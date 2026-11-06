@@ -5,6 +5,7 @@ src/generated/prisma/
 *.tsbuildinfo
 .env*
 !.env.example
+!.env.staging.example
 .pgpass
 secrets/
 *.key

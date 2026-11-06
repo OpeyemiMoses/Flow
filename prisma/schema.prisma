@@ -174,14 +174,16 @@ model FlowUser {
 }
 
 model FlowAccount {
-  id              String            @id @default(uuid()) @db.Uuid
+  id              String                 @id @default(uuid()) @db.Uuid
   kind            AccountKind
   name            String
-  personalOwnerId String?           @unique @map("personal_owner_id") @db.Uuid
-  createdAt       DateTime          @default(now()) @map("created_at")
-  personalOwner   FlowUser?         @relation(fields: [personalOwnerId], references: [id], onDelete: Restrict)
+  personalOwnerId String?                @unique @map("personal_owner_id") @db.Uuid
+  createdAt       DateTime               @default(now()) @map("created_at")
+  personalOwner   FlowUser?              @relation(fields: [personalOwnerId], references: [id], onDelete: Restrict)
   business        BusinessProfile?
   creation        BusinessCreation?
+  wallet          FlowWallet?
+  provisioningJob WalletProvisioningJob?
 
   @@unique([id, kind])
   @@map("accounts")
@@ -258,5 +260,101 @@ model SecurityAuditEvent {
 
   @@index([accountId, createdAt])
   @@map("security_audit_events")
+  @@schema("flow")
+}
+
+enum WalletStatus {
+  SETUP_PENDING
+  PROVISIONING
+  ACTIVE
+  SETUP_FAILED
+  FROZEN
+  RECOVERY_PENDING
+
+  @@map("wallet_status")
+  @@schema("flow")
+}
+
+model FlowWallet {
+  id                  String             @id @default(uuid()) @db.Uuid
+  accountId           String             @unique @map("account_id") @db.Uuid
+  provider            String             @default("OUTLAYER")
+  providerWalletId    String             @map("provider_wallet_id")
+  nearAccountId       String             @map("near_account_id")
+  encryptedCredential String             @map("encrypted_credential")
+  keyId               String             @default("v1") @map("key_id")
+  keyDigest           String             @map("key_digest")
+  status              WalletStatus       @default(SETUP_PENDING)
+  policyState         String             @default("none") @map("policy_state")
+  controllerAccountId String?            @map("controller_account_id")
+  handoffUrl          String?            @map("handoff_url")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @default(now()) @updatedAt @map("updated_at")
+  account             FlowAccount        @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  addresses           WalletAddress[]
+  capabilities        WalletCapability[]
+
+  @@index([providerWalletId])
+  @@map("wallets")
+  @@schema("flow")
+}
+
+model WalletAddress {
+  id        String     @id @default(uuid()) @db.Uuid
+  walletId  String     @map("wallet_id") @db.Uuid
+  network   String
+  chainId   String     @map("chain_id")
+  address   String
+  publicKey String     @map("public_key")
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @default(now()) @updatedAt @map("updated_at")
+  wallet    FlowWallet @relation(fields: [walletId], references: [id], onDelete: Restrict)
+
+  @@unique([walletId, network])
+  @@index([network, address])
+  @@map("wallet_addresses")
+  @@schema("flow")
+}
+
+model WalletCapability {
+  id                    String     @id @default(uuid()) @db.Uuid
+  walletId              String     @map("wallet_id") @db.Uuid
+  network               String
+  canDeriveAddress      Boolean    @default(true) @map("can_derive_address")
+  canReceive            Boolean    @default(true) @map("can_receive")
+  canReadNativeBalance  Boolean    @default(false) @map("can_read_native_balance")
+  canReadIntentsBalance Boolean    @default(false) @map("can_read_intents_balance")
+  canSignTransfer       Boolean    @default(false) @map("can_sign_transfer")
+  broadcastMode         String     @default("unsupported") @map("broadcast_mode")
+  canRotateCredentials  Boolean    @default(false) @map("can_rotate_credentials")
+  verifiedAt            DateTime   @default(now()) @map("verified_at")
+  wallet                FlowWallet @relation(fields: [walletId], references: [id], onDelete: Restrict)
+
+  @@unique([walletId, network])
+  @@map("wallet_capabilities")
+  @@schema("flow")
+}
+
+model WalletProvisioningJob {
+  id                    String      @id @default(uuid()) @db.Uuid
+  accountId             String      @unique @map("account_id") @db.Uuid
+  idempotencyKey        String      @unique @map("idempotency_key") @db.Uuid
+  status                String      @default("PENDING")
+  fencingToken          BigInt      @default(0) @map("fencing_token")
+  leaseHolder           String?     @map("lease_holder")
+  leaseExpiresAt        DateTime?   @map("lease_expires_at")
+  dispatchAttemptId     String?     @map("dispatch_attempt_id") @db.Uuid
+  dispatchedAt          DateTime?   @map("dispatched_at")
+  attempts              Int         @default(0)
+  maxAttempts           Int         @default(3) @map("max_attempts")
+  failureClassification String?     @map("failure_classification")
+  lastError             String?     @map("last_error")
+  recoveryEvidence      String?     @map("recovery_evidence")
+  createdAt             DateTime    @default(now()) @map("created_at")
+  updatedAt             DateTime    @default(now()) @updatedAt @map("updated_at")
+  account               FlowAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([accountId, status])
+  @@map("wallet_provisioning_jobs")
   @@schema("flow")
 }

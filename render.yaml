@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: flow-staging
+    runtime: node
+    plan: free
+    region: ohio
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/health/live
+    autoDeploy: false
+    envVars:
+      - key: FLOW_ENV
+        value: staging
+      - key: FLOW_EXECUTION
+        value: disabled
+      - key: NODE_VERSION
+        value: 24.22.2
+      - key: FLOW_APP_ORIGIN
+        sync: false
+      - key: FLOW_DATABASE_URL
+        sync: false
+      - key: FLOW_AUTH_SECRET
+        sync: false
+      - key: FLOW_OTP_KEY
+        sync: false
+      - key: FLOW_GOOGLE_CLIENT_ID
+        sync: false
+      - key: FLOW_GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: FLOW_MAIL_API_KEY
+        sync: false
+      - key: FLOW_MAIL_FROM
+        sync: false

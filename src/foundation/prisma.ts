@@ -1,4 +1,3 @@
-import "server-only";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, type Prisma } from "../generated/prisma/client.ts";
 import { readAuthConfig } from "./auth-environment.ts";
@@ -8,16 +7,25 @@ import { readConfig } from "./environment.ts";
 type Runtime = { db: PrismaClient; auth: ReturnType<typeof readAuthConfig> };
 const processCache = globalThis as typeof globalThis & {
   flowRuntime?: Runtime;
+  flowPrismaClient?: PrismaClient;
 };
+
+export function getPrismaClient(): PrismaClient {
+  if (!processCache.flowPrismaClient) {
+    const config = readConfig(process.env, "runtime");
+    const pool = createDatabasePool(config.database, "application");
+    processCache.flowPrismaClient = new PrismaClient({
+      adapter: new PrismaPg(pool, { schema: "flow" }),
+    });
+  }
+  return processCache.flowPrismaClient;
+}
 
 export function runtime(): Runtime {
   if (!processCache.flowRuntime) {
     const config = readConfig(process.env, "runtime");
     const auth = readAuthConfig(process.env, config.environment);
-    const pool = createDatabasePool(config.database, "application");
-    const db = new PrismaClient({
-      adapter: new PrismaPg(pool, { schema: "flow" }),
-    });
+    const db = getPrismaClient();
     processCache.flowRuntime = { db, auth };
   }
   return processCache.flowRuntime;
