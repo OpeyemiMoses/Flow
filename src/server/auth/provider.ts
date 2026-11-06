@@ -50,8 +50,14 @@ export async function lockAuthUser(db: FlowDb, id: string): Promise<void> {
 
 type AuthContext = {
   emailLogin?: string;
-  google?: { nonceHash: string; linkUserId?: string };
+  google?: { nonceHash: string; startOrder: bigint; linkUserId?: string };
   captureOtp?: (email: string, code: string) => void;
+};
+
+type VerifiedGoogle = {
+  subject: string;
+  identity: { id: string; userId: string } | null;
+  registeredUserId?: string;
 };
 
 const discardedCredentials = {
@@ -69,6 +75,35 @@ export function provider(
   config: AuthConfig,
   context: AuthContext = {},
 ) {
+  const google = context.google;
+  let verifiedGoogle: VerifiedGoogle | undefined;
+
+  // The caller holds the same auth-user lock as Google unlink and relink.
+  async function requireCurrentGoogleBinding(userId: string) {
+    const proof = verifiedGoogle;
+    if (!google || google.linkUserId || !proof)
+      throw new ApiFailure(401, "INVALID_PROOF");
+    const active = await db.authIdentity.findUnique({
+      where: {
+        providerId_accountId: {
+          providerId: "google",
+          accountId: proof.subject,
+        },
+      },
+      select: { id: true, userId: true, googleBindingOrder: true },
+    });
+    if (
+      active?.userId !== userId ||
+      (proof.identity
+        ? active.id !== proof.identity.id ||
+          userId !== proof.identity.userId ||
+          active.googleBindingOrder >= google.startOrder
+        : proof.registeredUserId !== userId)
+    ) {
+      throw new ApiFailure(401, "INVALID_PROOF");
+    }
+  }
+
   return betterAuth({
     appName: "FLOW",
     baseURL: config.origin,
@@ -129,7 +164,7 @@ export function provider(
         disableIdTokenSignIn: true,
         includeGrantedScopes: false,
         async getUserInfo(tokens) {
-          if (!tokens.idToken || !context.google) return null;
+          if (!tokens.idToken || !google) return null;
           const proof = await jwtVerify(tokens.idToken, googleKeys, {
             issuer: googleIssuer,
             audience: config.googleId,
@@ -146,7 +181,7 @@ export function provider(
             (claims.azp !== undefined && claims.azp !== config.googleId) ||
             (Array.isArray(claims.aud) && claims.aud.length !== 1) ||
             typeof claims.nonce !== "string" ||
-            digest(claims.nonce) !== context.google.nonceHash
+            digest(claims.nonce) !== google.nonceHash
           )
             return null;
 
@@ -187,15 +222,20 @@ export function provider(
             },
             include: { user: true },
           });
-          const linkUserId = context.google.linkUserId;
+          const linkUserId = google.linkUserId;
           if (linkUserId && identity && identity.userId !== linkUserId)
             return null;
+          verifiedGoogle = {
+            subject,
+            identity: identity && { id: identity.id, userId: identity.userId },
+          };
           if (
             identity &&
             !linkUserId &&
             (!authoritative || email.data !== identity.user.email)
           ) {
             await lockAuthUser(db, identity.userId);
+            await requireCurrentGoogleBinding(identity.userId);
             await db.authUser.update({
               where: { id: identity.userId },
               data: { mailboxPaused: true, emailEnrolled: false },
@@ -239,6 +279,7 @@ export function provider(
         create: {
           async before(session) {
             await lockAuthUser(db, session.userId);
+            if (google) await requireCurrentGoogleBinding(session.userId);
             if (context.emailLogin) {
               const user = await db.authUser.findUnique({
                 where: { id: session.userId },
@@ -257,7 +298,16 @@ export function provider(
       account: {
         create: {
           async before(account) {
-            await db.$executeRaw`
+            const proof = verifiedGoogle;
+            if (
+              !google ||
+              proof?.subject !== account.accountId ||
+              account.providerId !== "google" ||
+              (google.linkUserId && google.linkUserId !== account.userId)
+            ) {
+              throw new ApiFailure(401, "INVALID_PROOF");
+            }
+            const inserted = await db.$executeRaw`
               INSERT INTO flow.google_subject_bindings (subject, user_id)
               VALUES (${account.accountId}, ${account.userId}) ON CONFLICT (subject) DO NOTHING
             `;
@@ -266,6 +316,12 @@ export function provider(
             });
             if (binding?.userId !== account.userId)
               throw new ApiFailure(401, "INVALID_PROOF");
+            if (!google.linkUserId) {
+              // Only a first registration in this transaction can create its own binding.
+              if (proof.identity || inserted !== 1)
+                throw new ApiFailure(401, "INVALID_PROOF");
+              proof.registeredUserId = account.userId;
+            }
             return { data: { ...account, ...discardedCredentials } };
           },
         },

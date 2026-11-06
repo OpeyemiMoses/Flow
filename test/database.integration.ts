@@ -32,6 +32,13 @@ test("readiness rejects a mismatch between the expected and actual database", as
   );
 });
 
+test("the runtime role can allocate Google OAuth orders", async () => {
+  const { rows } = await pool.query<{ value: string }>(
+    "SELECT nextval('flow.google_oauth_order') AS value",
+  );
+  assert.ok(BigInt(rows[0]!.value) > 0n);
+});
+
 for (const [action, statement] of [
   [
     "create a table in the application namespace",
@@ -56,6 +63,7 @@ for (const [action, statement] of [
     "UPDATE flow.google_subject_bindings SET user_id = 'fixture'",
   ],
   ["delete an auth user", "DELETE FROM flow.auth_users"],
+  ["reset Google OAuth order", "SELECT setval('flow.google_oauth_order', 0)"],
 ] as const) {
   test(`the runtime role cannot ${action}`, async () => {
     const client = await pool.connect();

@@ -146,6 +146,82 @@ async function replay(record) {
   });
 }
 
+async function withDbGate(run) {
+  const gate = await app.db.connect();
+  try {
+    await gate.query("BEGIN");
+    await run(gate);
+    await gate.query("COMMIT");
+  } catch (error) {
+    await gate.query("ROLLBACK");
+    throw error;
+  } finally {
+    gate.release();
+  }
+}
+
+async function waitForDbWaiters(queryPattern, count) {
+  const deadline = Date.now() + 1_200;
+  do {
+    const { rows } = await app.db.query(
+      `SELECT pid, pg_blocking_pids(pid) AS blockers
+       FROM pg_stat_activity
+       WHERE datname = current_database() AND application_name = 'flow-application'
+         AND wait_event_type = 'Lock' AND query ~ $1
+       ORDER BY query_start, pid`,
+      [queryPattern],
+    );
+    if (rows.length === count) return rows;
+    await delay(10);
+  } while (Date.now() < deadline);
+  assert.fail(`Expected ${count} PostgreSQL waiters for the test gate`);
+}
+
+async function linkedMailbox(email) {
+  const owner = await app.createClient();
+  const claims = google(email, email);
+  await emailLogin(owner, email);
+  await onboard(owner);
+  await prove(owner, email, "link-google");
+  await completeGoogle(owner, claims, { link: true });
+  await emailLogin(owner, email);
+  await prove(owner, email, "unlink-google");
+  return { owner, claims };
+}
+
+async function beginGoogleCallback(claims, options = {}) {
+  const client = await app.createClient();
+  const start = await post(
+    client,
+    "/api/auth/google/start",
+    { recovery: options.recovery ?? false },
+    200,
+  );
+  const callback = await app.authorize(start.url, claims, options);
+  const retry = await app.createClient({
+    storageState: await client.storageState(),
+  });
+  return { client, retry, callback };
+}
+
+const callbackRequest = (client, callback) =>
+  client.get(callback, { maxRedirects: 0, timeout: 9_000 });
+
+async function expectGoogleRejection(response) {
+  await result(response, 303);
+  assert.equal(response.headers().location, "/sign-in?issue=authentication");
+  assert.ok(
+    !response
+      .headersArray()
+      .some(
+        ({ name, value }) =>
+          name.toLowerCase() === "set-cookie" &&
+          value.startsWith(`${sessionCookie}=`),
+      ),
+    "A rejected callback must not send a session cookie",
+  );
+}
+
 test("Google authorization code, signed identity, nonce and PKCE establish one database session", async () => {
   const client = await app.createClient();
   const email = "google-first@gmail.com";
@@ -306,6 +382,130 @@ test("revoking the linking session invalidates an outstanding Google callback", 
     ["revoked-link-subject"],
   );
   assert.equal(rows[0].total, 0);
+});
+
+for (const unlinkFirst of [true, false]) {
+  const first = unlinkFirst ? "unlink" : "callback";
+  test(`M11-01 ${first} wins the auth-user lock against an ordinary Google sign-in`, async () => {
+    const email = `race-${first}@gmail.com`;
+    const { owner, claims } = await linkedMailbox(email);
+    const staleOwner = await replay(await cookieValue(owner));
+    const { client, retry, callback } = await beginGoogleCallback(claims);
+    const {
+      rows: [user],
+    } = await app.db.query("SELECT id FROM flow.auth_users WHERE email = $1", [
+      email,
+    ]);
+    const requests = [
+      () =>
+        owner.post("/api/security/google/unlink", { data: {}, timeout: 4_000 }),
+      () => callbackRequest(client, callback),
+    ];
+    const firstRequest = unlinkFirst ? 0 : 1;
+    const pending = [];
+    const queryPattern = "SELECT id FROM flow\\.auth_users.*FOR UPDATE";
+    try {
+      await withDbGate(async (gate) => {
+        await gate.query(
+          "SELECT id FROM flow.auth_users WHERE id = $1 FOR UPDATE",
+          [user.id],
+        );
+        pending[firstRequest] = requests[firstRequest]();
+        const [firstWaiter] = await waitForDbWaiters(queryPattern, 1);
+        assert.ok(firstWaiter.blockers.includes(gate.processID));
+        pending[1 - firstRequest] = requests[1 - firstRequest]();
+        const [head, tail] = await waitForDbWaiters(queryPattern, 2);
+        assert.equal(head.pid, firstWaiter.pid);
+        assert.ok(tail.blockers.includes(head.pid));
+      });
+      const [unlink, signIn] = await Promise.all(pending);
+      await result(unlink, 204);
+      await result(await staleOwner.get("/api/me"), 401);
+      await result(await client.get("/api/me"), 401);
+      if (unlinkFirst) {
+        await expectGoogleRejection(signIn);
+      } else {
+        await result(signIn, 303);
+        assert.equal(signIn.headers().location, "/onboarding");
+        const revoked = await replay(await cookieValue(client));
+        await result(await revoked.get("/api/me"), 401);
+      }
+      await expectGoogleRejection(await callbackRequest(retry, callback));
+      const {
+        rows: [remaining],
+      } = await app.db.query(
+        `SELECT (SELECT count(*)::int FROM flow.auth_identities WHERE user_id = $1) AS identities,
+                (SELECT count(*)::int FROM flow.auth_sessions WHERE user_id = $1) AS sessions`,
+        [user.id],
+      );
+      assert.deepEqual(remaining, { identities: 0, sessions: 0 });
+      await completeGoogle(await app.createClient(), claims, {
+        accepted: false,
+      });
+    } finally {
+      await Promise.allSettled(pending);
+    }
+  });
+}
+
+test("M11-01 unlink and relink reject an in-flight callback and older recovery intents", async () => {
+  const email = "race-relink@gmail.com";
+  const { owner, claims } = await linkedMailbox(email);
+  const staleOwner = await replay(await cookieValue(owner));
+  const identityId = async () => {
+    const { rows } = await app.db.query(
+      "SELECT id FROM flow.auth_identities WHERE provider_subject = $1",
+      [claims.sub],
+    );
+    assert.equal(rows.length, 1);
+    return rows[0].id;
+  };
+  const originalId = await identityId();
+  const held = await beginGoogleCallback(claims, { pauseExchange: true });
+  const recovery = await beginGoogleCallback(claims, { recovery: true });
+  const drift = await beginGoogleCallback({
+    ...claims,
+    email: "race-drift@gmail.com",
+  });
+  const pending = callbackRequest(held.client, held.callback);
+  try {
+    await app.waitForTokenExchange(held.callback);
+    await expectGoogleRejection(
+      await callbackRequest(held.retry, held.callback),
+    );
+    await post(owner, "/api/security/google/unlink");
+    await emailLogin(owner, email);
+    await prove(owner, email, "link-google");
+    await completeGoogle(owner, claims, { link: true });
+    assert.notEqual(
+      await identityId(),
+      originalId,
+      "Relink must create a new binding",
+    );
+  } finally {
+    await app.releaseTokenExchange(held.callback);
+    await Promise.allSettled([pending]);
+  }
+  await expectGoogleRejection(await pending);
+  await result(await held.client.get("/api/me"), 401);
+  await expectGoogleRejection(
+    await callbackRequest(recovery.client, recovery.callback),
+  );
+  await expectGoogleRejection(
+    await callbackRequest(drift.client, drift.callback),
+  );
+  await expectGoogleRejection(
+    await callbackRequest(recovery.retry, recovery.callback),
+  );
+  await result(await staleOwner.get("/api/me"), 401);
+
+  const fresh = await app.createClient();
+  await completeGoogle(fresh, claims, { recovery: true });
+  const security = await status(fresh);
+  assert.equal(security.emailEnrolled, true);
+  assert.equal(security.mailboxPaused, false);
+  assert.equal(security.sessions.length, 1);
+  await result(await fresh.get("/api/me"), 200);
 });
 
 test("OTP is browser-bound, hashed at rest, limited to five guesses and consumed once", async () => {
@@ -657,6 +857,77 @@ test("expired sessions and attempts to revoke another user's session cannot auth
   await result(await alice.client.get("/api/me"), 401);
 });
 
+for (const remove of [false, true]) {
+  test(`M11-02 an in-flight roster excludes data created after ${remove ? "removal" : "downgrade"}`, async () => {
+    const caseName = remove ? "remove" : "downgrade";
+    const owner = await person(`roster-owner-${caseName}@example.test`);
+    const member = await person(`roster-member-${caseName}@example.test`);
+    const account = await business(owner.client, "Roster fixture");
+    const other = await business(member.client, "Member's business");
+    const roster = `/api/accounts/${account.id}/members`;
+    const otherRoster = `/api/accounts/${other.id}/members`;
+    await result(await member.client.get(roster), 404);
+    const { token } = await issueInvite(owner, account, member.email, "ADMIN");
+    await post(member.client, "/api/invites/accept", { token }, 200);
+    const { invitation: before } = await issueInvite(
+      owner,
+      account,
+      `roster-before-${caseName}@example.test`,
+      "MEMBER",
+    );
+    const stale = await replay(await cookieValue(member.client));
+    const { members } = await result(await stale.get(roster), 200);
+    const admin = members.find(({ role }) => role === "ADMIN");
+    assert.ok(admin);
+    await prove(owner.client, owner.email, "team-change", account.id);
+    const afterId = randomUUID();
+    const afterEmail = `roster-after-${caseName}@example.test`;
+    let pending;
+    try {
+      await withDbGate(async (gate) => {
+        await gate.query(
+          "LOCK TABLE flow.account_invites IN ACCESS EXCLUSIVE MODE",
+        );
+        pending = stale.get(roster, { timeout: 4_000 });
+        const [reader] = await waitForDbWaiters("account_invites", 1);
+        assert.ok(reader.blockers.includes(gate.processID));
+        const method = remove ? "delete" : "patch";
+        await result(
+          await owner.client[method](`${roster}/${admin.id}`, {
+            data: remove ? {} : { role: "MEMBER" },
+            timeout: 4_000,
+          }),
+          204,
+        );
+        // Commit a fixture row after revocation, then release the blocked reader.
+        const inserted = await gate.query(
+          `INSERT INTO flow.account_invites (id, account_id, inviter_id, email, role, digest, expires_at)
+           SELECT $1, $2, personal_owner_id, $3, 'MEMBER', $4, timestamp '2099-01-01'
+           FROM flow.accounts WHERE id = $5`,
+          [afterId, account.id, afterEmail, randomUUID(), owner.account.id],
+        );
+        assert.equal(inserted.rowCount, 1);
+      });
+      const queued = await result(await pending, 200);
+      assert.ok(queued.invitations.some(({ id }) => id === before.id));
+      assert.ok(
+        !queued.invitations.some(({ id }) => id === afterId),
+        "The stale roster request disclosed an invitation committed after revocation",
+      );
+      const denied = remove ? 404 : 403;
+      await result(await stale.get(roster), denied);
+      await result(await stale.get(roster), denied);
+      await result(await stale.get(otherRoster), 200);
+      const current = await result(await owner.client.get(roster), 200);
+      assert.ok(current.invitations.some(({ id }) => id === afterId));
+      await post(member.client, "/api/auth/sign-out");
+      await result(await stale.get(roster), 401);
+    } finally {
+      if (pending) await Promise.allSettled([pending]);
+    }
+  });
+}
+
 test("Chromium enforces host-only HttpOnly cookies, resists fixation and blocks cross-origin sign-out", async () => {
   const context = await app.browser.newContext({ ignoreHTTPSErrors: true });
   try {
@@ -761,6 +1032,9 @@ test("Chromium follows the Google redirect, onboards accounts and enforces tenan
     await page.getByRole("heading", { name: businessName }).waitFor();
     const id = new URL(page.url()).pathname.split("/").at(-1);
     const privateUrl = `${app.origin}/accounts/${id}`;
+    const teamUrl = `${privateUrl}/team`;
+    await page.getByRole("link", { name: "Manage team" }).click();
+    await page.getByRole("heading", { name: `${businessName} team` }).waitFor();
 
     const visitor = await payer.newPage();
     await visitor.goto(privateUrl);
@@ -811,6 +1085,11 @@ test("Chromium follows the Google redirect, onboards accounts and enforces tenan
         id,
       ),
       403,
+    );
+    assert.equal((await visitor.goto(teamUrl)).status(), 404);
+    assert.equal(
+      await visitor.getByText(ownerEmail, { exact: true }).count(),
+      0,
     );
   } finally {
     await owner.close();

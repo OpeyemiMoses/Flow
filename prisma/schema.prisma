@@ -53,6 +53,7 @@ model AuthIdentity {
   password              String?
   createdAt             DateTime  @default(now()) @map("created_at")
   updatedAt             DateTime  @updatedAt @map("updated_at")
+  googleBindingOrder    BigInt    @default(dbgenerated("nextval('flow.google_oauth_order'::regclass)")) @map("google_binding_order")
   user                  AuthUser  @relation(fields: [userId], references: [id], onDelete: Restrict)
 
   @@unique([providerId, accountId])
@@ -93,19 +94,20 @@ model AuthVerification {
 }
 
 model AuthIntent {
-  slot      String   @id
-  digest    String   @unique
-  purpose   String
-  email     String?
-  userId    String?  @map("user_id")
-  sessionId String?  @map("session_id")
-  target    String?
-  nonceHash String?  @map("nonce_hash")
-  stateHash String?  @map("state_hash")
-  attempts  Int      @default(0)
-  verified  Boolean  @default(false)
-  issuedAt  DateTime @map("issued_at")
-  expiresAt DateTime @map("expires_at")
+  slot             String   @id
+  digest           String   @unique
+  purpose          String
+  email            String?
+  userId           String?  @map("user_id")
+  sessionId        String?  @map("session_id")
+  target           String?
+  nonceHash        String?  @map("nonce_hash")
+  stateHash        String?  @map("state_hash")
+  attempts         Int      @default(0)
+  verified         Boolean  @default(false)
+  issuedAt         DateTime @map("issued_at")
+  expiresAt        DateTime @map("expires_at")
+  googleStartOrder BigInt?  @map("google_start_order")
 
   @@index([expiresAt])
   @@map("auth_intents")

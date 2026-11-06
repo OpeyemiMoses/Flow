@@ -321,6 +321,10 @@ async function beginGoogle(
       ? await requireSession(tx, request.headers, true)
       : undefined;
     if (current) await requireProof(tx, request, current, "link-google");
+    const [start] = await tx.$queryRaw<{ order: bigint }[]>`
+      SELECT nextval('flow.google_oauth_order') AS "order"
+    `;
+    if (!start) throw new ApiFailure(503, "UNAVAILABLE");
     const instance = provider(tx, auth);
     const body = {
       provider: "google" as const,
@@ -360,6 +364,7 @@ async function beginGoogle(
             : "sign-in-google",
         userId: current?.userId,
         sessionId: current?.id,
+        googleStartOrder: start.order,
         issuedAt: new Date(),
         expiresAt: expiry(),
       },
@@ -410,7 +415,9 @@ async function finishGoogle(request: Request): Promise<Response> {
       expiresAt: { gt: new Date() },
     },
   });
-  if (claimed.count !== 1) return authRedirect(fixedSignInError, headers);
+  const startOrder = intent.googleStartOrder;
+  if (claimed.count !== 1 || startOrder === null)
+    return authRedirect(fixedSignInError, headers);
   const link = intent.purpose === "link-google-callback";
   const binding = intent.nonceHash;
   try {
@@ -432,6 +439,7 @@ async function finishGoogle(request: Request): Promise<Response> {
       const response = await provider(tx, auth, {
         google: {
           nonceHash: binding,
+          startOrder,
           linkUserId: link ? current?.userId : undefined,
         },
       }).handler(

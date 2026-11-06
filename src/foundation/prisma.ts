@@ -27,8 +27,10 @@ export type FlowDb = Prisma.TransactionClient;
 
 export function transaction<T>(
   callback: (tx: FlowDb) => Promise<T>,
+  isolationLevel: Prisma.TransactionIsolationLevel = "ReadCommitted",
 ): Promise<T> {
   return runtime().db.$transaction(callback, {
+    isolationLevel,
     maxWait: 2_000,
     timeout: 12_000,
   });

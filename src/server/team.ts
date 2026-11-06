@@ -2,14 +2,13 @@ import "server-only";
 import { randomBytes } from "node:crypto";
 import { after } from "next/server";
 import { z } from "zod";
-import { runtime, transaction, type FlowDb } from "../foundation/prisma.ts";
+import { runtime, transaction } from "../foundation/prisma.ts";
 import {
   access,
   emptyBody,
   lockAccount,
   lockedAccess,
   principal,
-  type Principal,
 } from "./accounts.ts";
 import { audit } from "./audit.ts";
 import { requireProof } from "./auth/flows.ts";
@@ -47,11 +46,13 @@ const inviteSelect = {
   expiresAt: true,
 } as const;
 
-export async function team(db: FlowDb, actor: Principal, id: string) {
-  const account = await access(db, actor, id);
-  requireTeam(account);
-  const [members, invitations] = await Promise.all([
-    db.accountMembership.findMany({
+export function team(headers: Headers, id: string) {
+  // Authorize the session and role against the same snapshot as the roster.
+  return transaction(async (db) => {
+    const actor = await principal(db, headers);
+    const account = await access(db, actor, id);
+    requireTeam(account);
+    const members = await db.accountMembership.findMany({
       where: { accountId: id, status: "ACTIVE" },
       select: {
         id: true,
@@ -60,8 +61,8 @@ export async function team(db: FlowDb, actor: Principal, id: string) {
       },
       orderBy: [{ role: "asc" }, { createdAt: "asc" }],
       take: 100,
-    }),
-    db.accountInvite.findMany({
+    });
+    const invitations = await db.accountInvite.findMany({
       where: {
         accountId: id,
         status: "PENDING",
@@ -70,30 +71,28 @@ export async function team(db: FlowDb, actor: Principal, id: string) {
       select: inviteSelect,
       orderBy: { createdAt: "desc" },
       take: 100,
-    }),
-  ]);
-  return {
-    account,
-    members: members.map(({ id, role, user }) => ({
-      id,
-      role,
-      email: user.authUser.email,
-    })),
-    invitations: invitations.map((invite) => ({
-      ...invite,
-      expiresAt: invite.expiresAt.toISOString(),
-    })),
-  };
+    });
+    return {
+      account,
+      members: members.map(({ id, role, user }) => ({
+        id,
+        role,
+        email: user.authUser.email,
+      })),
+      invitations: invitations.map((invite) => ({
+        ...invite,
+        expiresAt: invite.expiresAt.toISOString(),
+      })),
+    };
+  }, "RepeatableRead");
 }
 
 export async function readTeam(
   request: Request,
   id: string,
 ): Promise<Response> {
-  const { db, auth } = runtime();
-  canonicalHost(request.headers, auth);
-  const actor = await principal(db, request.headers);
-  return reply(200, await team(db, actor, id));
+  canonicalHost(request.headers, runtime().auth);
+  return reply(200, await team(request.headers, id));
 }
 
 export async function invite(request: Request, id: string): Promise<Response> {

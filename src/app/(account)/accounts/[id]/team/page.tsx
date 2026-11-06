@@ -1,7 +1,7 @@
 import Link from "next/link";
-import { runtime } from "../../../../../foundation/prisma.ts";
+import { headers } from "next/headers";
 import { accountId } from "../../../../../server/accounts.ts";
-import { pageData, pagePrincipal } from "../../../../../server/pages.ts";
+import { pageData } from "../../../../../server/pages.ts";
 import { team } from "../../../../../server/team.ts";
 import { TeamManager } from "./team-manager.tsx";
 
@@ -10,10 +10,9 @@ export default async function TeamPage({
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const actor = await pagePrincipal();
   const { id } = await params;
-  const snapshot = await pageData(() =>
-    team(runtime().db, actor, accountId(id)),
+  const snapshot = await pageData(async () =>
+    team(await headers(), accountId(id)),
   );
   return (
     <main className="flow-main flow-stack">

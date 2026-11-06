@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
@@ -246,6 +247,7 @@ export async function securityServer() {
             access,
             refresh,
             idToken,
+            pauseExchange: flags.pauseExchange,
           }),
           { mode: 0o600 },
         );
@@ -253,6 +255,22 @@ export async function securityServer() {
         callback.searchParams.set("code", code);
         callback.searchParams.set("state", start.searchParams.get("state"));
         return callback.href;
+      },
+      async waitForTokenExchange(callback) {
+        const code = new URL(callback).searchParams.get("code");
+        assert.ok(/^[a-f0-9]{32}$/.test(code));
+        const waiting = path.join(dir, `exchange-${code}.waiting`);
+        const deadline = Date.now() + 4_000;
+        while (!existsSync(waiting) && Date.now() < deadline) await delay(10);
+        assert.ok(
+          existsSync(waiting),
+          "Google token exchange did not reach the barrier",
+        );
+      },
+      async releaseTokenExchange(callback) {
+        const code = new URL(callback).searchParams.get("code");
+        assert.ok(/^[a-f0-9]{32}$/.test(code));
+        await writeFile(path.join(dir, `exchange-${code}.release`), "");
       },
       async mail() {
         return await readFile(path.join(dir, "mail.jsonl"), "utf8")

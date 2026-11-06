@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
-import { appendFile, readFile, rename } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { appendFile, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 if (
   process.env.FLOW_ENV !== "test" ||
@@ -42,6 +44,17 @@ globalThis.fetch = async (input, init) => {
         challenge !== expected.challenge
       )
         return Response.json({ error: "invalid_grant" }, { status: 400 });
+      if (expected.pauseExchange) {
+        const release = path.join(directory, `exchange-${code}.release`);
+        await writeFile(path.join(directory, `exchange-${code}.waiting`), "");
+        const deadline = Date.now() + 7_000;
+        while (!existsSync(release) && Date.now() < deadline) await delay(10);
+        if (!existsSync(release))
+          return Response.json(
+            { error: "temporarily_unavailable" },
+            { status: 503 },
+          );
+      }
       return Response.json({
         access_token: expected.access,
         refresh_token: expected.refresh,
