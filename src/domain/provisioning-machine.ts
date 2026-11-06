@@ -4,6 +4,7 @@ export type ProvisioningStatus =
   | "PENDING"
   | "LEASED"
   | "SUBMITTED"
+  | "REGISTERED"
   | "PROVISIONED"
   | "POLICY_VERIFYING"
   | "ACTIVE"
@@ -33,6 +34,16 @@ export type ProvisioningEvent =
     }
   | { type: "RECORD_DISPATCH"; requestId: string; now: Date }
   | {
+      type: "RECEIVE_REGISTRATION_SUCCESS";
+      walletId: string;
+      nearAccountId: string;
+      now: Date;
+    }
+  | {
+      type: "COMPLETE_ADDRESS_DERIVATION";
+      now: Date;
+    }
+  | {
       type: "RECEIVE_SUCCESS";
       walletId: string;
       nearAccountId: string;
@@ -59,10 +70,14 @@ export function reduceProvisioningState(
 ): ProvisioningMachineState {
   switch (event.type) {
     case "ACQUIRE_LEASE": {
-      // Lease can only be acquired if PENDING or if an existing lease expired before dispatch
+      // Lease can only be acquired if PENDING, or if an existing lease expired before dispatch,
+      // or if resuming address derivation on an already REGISTERED wallet whose lease expired
       const canLease =
         state.status === "PENDING" ||
         (state.status === "LEASED" &&
+          state.leaseExpiresAt &&
+          state.leaseExpiresAt.getTime() <= event.now.getTime()) ||
+        (state.status === "REGISTERED" &&
           state.leaseExpiresAt &&
           state.leaseExpiresAt.getTime() <= event.now.getTime());
 
@@ -95,8 +110,41 @@ export function reduceProvisioningState(
       };
     }
 
-    case "RECEIVE_SUCCESS": {
+    case "RECEIVE_REGISTRATION_SUCCESS": {
       if (state.status !== "SUBMITTED" && state.status !== "LEASED") {
+        throw new FlowError(
+          "INVALID_STATE_TRANSITION",
+          `Cannot record registration success for account ${state.accountId} in status ${state.status}.`,
+        );
+      }
+      return {
+        ...state,
+        status: "REGISTERED",
+        walletId: event.walletId,
+        nearAccountId: event.nearAccountId,
+        lastError: undefined,
+      };
+    }
+
+    case "COMPLETE_ADDRESS_DERIVATION": {
+      if (state.status !== "REGISTERED") {
+        throw new FlowError(
+          "INVALID_STATE_TRANSITION",
+          `Cannot complete address derivation in status ${state.status}. Must be REGISTERED.`,
+        );
+      }
+      return {
+        ...state,
+        status: "PROVISIONED",
+      };
+    }
+
+    case "RECEIVE_SUCCESS": {
+      if (
+        state.status !== "SUBMITTED" &&
+        state.status !== "LEASED" &&
+        state.status !== "REGISTERED"
+      ) {
         throw new FlowError(
           "INVALID_STATE_TRANSITION",
           `Cannot receive success for account ${state.accountId} in status ${state.status}.`,

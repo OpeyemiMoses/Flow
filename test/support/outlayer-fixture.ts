@@ -11,6 +11,12 @@ export interface OutLayerMockOptions {
   dropConnection?: boolean;
   rateLimitCount?: number;
   policyState?: "none" | "stored";
+  mismatchWalletId?: boolean;
+  corruptNearId?: boolean;
+  corruptAddress?: boolean;
+  chainMismatch?: boolean;
+  rawErrorBody?: string;
+  rawErrorContentType?: string;
 }
 
 export interface OutLayerMockServer {
@@ -43,9 +49,12 @@ export async function createOutLayerMockServer(
 
       if (options.forceStatus && options.forceStatus !== 200) {
         res.writeHead(options.forceStatus, {
-          "Content-Type": "application/json",
+          "Content-Type": options.rawErrorContentType ?? "application/json",
         });
-        res.end(JSON.stringify({ error: `Mock fault ${options.forceStatus}` }));
+        res.end(
+          options.rawErrorBody ??
+            JSON.stringify({ error: `Mock fault ${options.forceStatus}` }),
+        );
         return;
       }
 
@@ -53,13 +62,19 @@ export async function createOutLayerMockServer(
 
       // Route: POST /register
       if (req.method === "POST" && parsedUrl.pathname === "/register") {
+        const walletId = options.mismatchWalletId
+          ? "00000000-0000-0000-0000-000000000000"
+          : "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20";
+        const nearAccountId = options.corruptNearId
+          ? "invalid-near-!!!"
+          : "98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac";
+
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
-            wallet_id: "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20",
+            wallet_id: walletId,
             api_key: "wk_2a8b1f3c4d5e6789abcdef0123456789",
-            near_account_id:
-              "98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac",
+            near_account_id: nearAccountId,
             handoff_url:
               "https://app.outlayer.ai/wallet?key=wk_2a8b1f3c4d5e6789abcdef0123456789",
             trial: { available: true, calls: 10, days: 7 },
@@ -86,9 +101,17 @@ export async function createOutLayerMockServer(
           return;
         }
 
+        const walletId = options.mismatchWalletId
+          ? "00000000-0000-0000-0000-000000000000"
+          : "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20";
+        const returnedChain =
+          options.chainMismatch && chain === "base" ? "ethereum" : chain;
+
         let address = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
         let publicKey = "secp256k1:0x04abc...";
-        if (chain === "near") {
+        if (options.corruptAddress) {
+          address = "0x833589"; // Invalid EVM length
+        } else if (chain === "near") {
           address =
             "98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac";
           publicKey = "ed25519:7BcBZ9Z...";
@@ -100,8 +123,8 @@ export async function createOutLayerMockServer(
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
-            wallet_id: "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20",
-            chain,
+            wallet_id: walletId,
+            chain: returnedChain,
             address,
             public_key: publicKey,
             asset_account_id: null,
@@ -120,10 +143,14 @@ export async function createOutLayerMockServer(
           return;
         }
 
+        const walletId = options.mismatchWalletId
+          ? "00000000-0000-0000-0000-000000000000"
+          : "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20";
+
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
-            wallet_id: "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20",
+            wallet_id: walletId,
             controller: "controller.near",
             frozen: false,
             policy: options.policyState ?? "none",

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   evaluatePolicyReadiness,
+  evaluateWalletFundReadiness,
   isValidEvmAddress,
   isValidNearAddress,
   isValidSolanaAddress,
@@ -167,4 +168,95 @@ test("evaluates policy readiness and enforces execution safeguards", () => {
     ),
     true,
   );
+});
+
+test("evaluates comprehensive wallet fund-readiness and decouples registration from fund receipt", () => {
+  const validAddresses = [
+    {
+      network: "near",
+      address:
+        "98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac",
+    },
+    {
+      network: "base",
+      address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    },
+    {
+      network: "solana",
+      address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+    },
+  ];
+
+  const validPolicy = {
+    walletId: "w-ready",
+    state: "stored" as const,
+    frozen: false,
+    allowsFinancialExecution: true,
+  };
+
+  const safeCapabilities = [
+    { network: "near", canSignTransfer: false, canReceive: true },
+    { network: "base", canSignTransfer: false, canReceive: true },
+    { network: "solana", canSignTransfer: false, canReceive: true },
+  ];
+
+  // 1. When global execution is disabled (as required in M2), isReady is ALWAYS false
+  const globalDisabledCheck = evaluateWalletFundReadiness({
+    walletStatus: "ACTIVE",
+    policySummary: validPolicy,
+    derivedAddresses: validAddresses,
+    capabilities: safeCapabilities,
+    globalExecutionDisabled: true,
+  });
+  assert.equal(globalDisabledCheck.isReady, false);
+  assert.equal(globalDisabledCheck.canReceiveFunds, false);
+  assert.equal(globalDisabledCheck.canSignTransfers, false);
+  assert.ok(globalDisabledCheck.reason?.includes("FLOW_EXECUTION=disabled"));
+
+  // 2. Even if global execution were enabled, non-ACTIVE status (e.g. SETUP_PENDING) is NOT ready
+  const pendingCheck = evaluateWalletFundReadiness({
+    walletStatus: "SETUP_PENDING",
+    policySummary: validPolicy,
+    derivedAddresses: validAddresses,
+    capabilities: safeCapabilities,
+    globalExecutionDisabled: false,
+  });
+  assert.equal(pendingCheck.isReady, false);
+  assert.ok(pendingCheck.reason?.includes("SETUP_PENDING"));
+
+  // 3. Even if ACTIVE, unverified policy ("none") is NOT ready
+  const unverifiedPolicyCheck = evaluateWalletFundReadiness({
+    walletStatus: "ACTIVE",
+    policySummary: { ...validPolicy, state: "none" },
+    derivedAddresses: validAddresses,
+    capabilities: safeCapabilities,
+    globalExecutionDisabled: false,
+  });
+  assert.equal(unverifiedPolicyCheck.isReady, false);
+  assert.ok(
+    unverifiedPolicyCheck.reason?.includes("requires verified 'stored' policy"),
+  );
+
+  // 4. Missing required chain address (e.g. Solana missing) is NOT ready
+  const missingChainCheck = evaluateWalletFundReadiness({
+    walletStatus: "ACTIVE",
+    policySummary: validPolicy,
+    derivedAddresses: validAddresses.slice(0, 2), // NEAR and Base only
+    capabilities: safeCapabilities,
+    globalExecutionDisabled: false,
+  });
+  assert.equal(missingChainCheck.isReady, false);
+  assert.ok(missingChainCheck.reason?.includes("Missing verified addresses"));
+
+  // 5. In an imaginary live environment with verified policy and addresses, canReceive is true but canSign remains false
+  const readyCheck = evaluateWalletFundReadiness({
+    walletStatus: "ACTIVE",
+    policySummary: validPolicy,
+    derivedAddresses: validAddresses,
+    capabilities: safeCapabilities,
+    globalExecutionDisabled: false,
+  });
+  assert.equal(readyCheck.isReady, true);
+  assert.equal(readyCheck.canReceiveFunds, true);
+  assert.equal(readyCheck.canSignTransfers, false); // can_sign_transfer is false
 });

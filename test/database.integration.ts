@@ -3,6 +3,10 @@ import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import pg from "pg";
 import {
+  evaluateWalletFundReadiness,
+  type OutLayerPolicyState,
+} from "../src/domain/custody.ts";
+import {
   decryptSecret,
   deriveKeyDigest,
   deserializeEnvelope,
@@ -16,11 +20,16 @@ import {
 import { readConfig } from "../src/foundation/environment.ts";
 import { getPrismaClient } from "../src/foundation/prisma.ts";
 import {
+  activateWalletIfReady,
+  attachWalletAddressesAndCapabilities,
   claimJobLease,
   commitJobSuccess,
   createProvisioningJob,
+  getAccountWalletPublicProjection,
+  persistRegisteredWallet,
   recordJobAmbiguous,
   recordJobDispatch,
+  recordJobTerminalFailure,
   reconcileCrashedJobs,
 } from "../src/server/custody/job-repository.ts";
 
@@ -616,6 +625,488 @@ test("execution safeguards remain strictly disabled after wallet activation", as
     0,
     "No capability may enable signing or moving funds during M2",
   );
+});
+
+test("two-stage provisioning: immediate credential persistence, worker crash recovery without duplicate registration", async () => {
+  const db = getPrismaClient();
+  const account = await createTestAccount(pool, "PERSONAL", "two-stage");
+  await createProvisioningJob(db, account.accountId, randomUUID());
+
+  // Worker 1 claims lease and records dispatch
+  const worker1Lease = await claimJobLease(
+    db,
+    account.accountId,
+    "worker-1",
+    30,
+  );
+  assert.ok(worker1Lease !== null);
+  await recordJobDispatch(
+    db,
+    worker1Lease.id,
+    worker1Lease.fencingToken,
+    randomUUID(),
+  );
+
+  // Worker 1 receives OutLayer registration response
+  const secretApiKey = "wk_one_time_bearer_key_stage1_123456";
+  const testKeyHex =
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+  const envelope = serializeEnvelope(
+    encryptSecret(secretApiKey, testKeyHex, "v1"),
+  );
+  const keyDigest = deriveKeyDigest(testKeyHex);
+
+  // Stage 1: IMMEDIATELY persist credential before any address derivation
+  const walletId = await persistRegisteredWallet(
+    db,
+    worker1Lease.id,
+    worker1Lease.fencingToken,
+    {
+      accountId: account.accountId,
+      providerWalletId: "outlayer-w-stage1",
+      nearAccountId:
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      encryptedCredential: envelope,
+      keyId: "v1",
+      keyDigest,
+      handoffUrl: "https://handoff.outlayer.fastnear.com/?key=scrubbed",
+    },
+  );
+
+  // Verify wallet is persisted in SETUP_PENDING and job is in REGISTERED
+  const { rows: wRows } = await pool.query<{
+    status: string;
+    encrypted_credential: string;
+  }>(
+    "SELECT status, encrypted_credential FROM flow.wallets WHERE id = $1::uuid",
+    [walletId],
+  );
+  assert.equal(
+    wRows[0]!.status,
+    "SETUP_PENDING",
+    "Wallet must start in SETUP_PENDING",
+  );
+
+  const { rows: jRows } = await pool.query<{ status: string }>(
+    "SELECT status FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
+    [worker1Lease.id],
+  );
+  assert.equal(
+    jRows[0]!.status,
+    "REGISTERED",
+    "Job must advance to REGISTERED upon credential persistence",
+  );
+
+  // Worker 1 CRASHES before deriving addresses. Worker 1 lease expires.
+  await pool.query(
+    "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = now() - interval '5 seconds' WHERE id = $1::uuid",
+    [worker1Lease.id],
+  );
+
+  // Reconciler runs: clears expired lease on REGISTERED job rather than quarantining to UNKNOWN
+  await reconcileCrashedJobs(db);
+
+  // Worker 2 performs crash recovery: claims lease to finish address derivation
+  const worker2Lease = await claimJobLease(
+    db,
+    account.accountId,
+    "worker-2-recovery",
+    30,
+  );
+  assert.ok(
+    worker2Lease !== null,
+    "Recovery worker must be able to claim lease on REGISTERED job",
+  );
+  assert.ok(
+    worker2Lease.fencingToken > worker1Lease.fencingToken,
+    "Fencing token must increment",
+  );
+
+  // Worker 2 reads existing persisted encrypted credential from DB and decrypts it
+  const { rows: credRows } = await pool.query<{
+    encrypted_credential: string;
+  }>("SELECT encrypted_credential FROM flow.wallets WHERE id = $1::uuid", [
+    walletId,
+  ]);
+  const recoveredKey = decryptSecret(
+    deserializeEnvelope(credRows[0]!.encrypted_credential),
+    testKeyHex,
+  );
+  assert.equal(
+    recoveredKey,
+    secretApiKey,
+    "Recovered bearer key matches original one-time token",
+  );
+
+  // Stage 2: Worker 2 attaches derived addresses and capabilities
+  await attachWalletAddressesAndCapabilities(db, walletId, {
+    addresses: [
+      {
+        network: "near",
+        chainId: "near-mainnet",
+        address:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        publicKey: "ed25519:6bWbF4F8qZ...",
+      },
+      {
+        network: "base",
+        chainId: "8453",
+        address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        publicKey: "secp256k1:0x04...",
+      },
+      {
+        network: "solana",
+        chainId: "solana-mainnet",
+        address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        publicKey: "ed25519:7xKX...",
+      },
+    ],
+    capabilities: [
+      {
+        network: "near",
+        canDeriveAddress: true,
+        canReceive: true,
+        canReadNativeBalance: false,
+        canReadIntentsBalance: false,
+        canSignTransfer: false,
+        broadcastMode: "provider_broadcast",
+        canRotateCredentials: true,
+      },
+      {
+        network: "base",
+        canDeriveAddress: true,
+        canReceive: true,
+        canReadNativeBalance: false,
+        canReadIntentsBalance: false,
+        canSignTransfer: false,
+        broadcastMode: "caller_broadcast",
+        canRotateCredentials: true,
+      },
+    ],
+  });
+
+  // Stage 3: Worker 2 activates wallet
+  await activateWalletIfReady(
+    db,
+    worker2Lease.id,
+    worker2Lease.fencingToken,
+    walletId,
+    "stored",
+  );
+
+  // Verify wallet is now ACTIVE and job is ACTIVE
+  const { rows: finalWallet } = await pool.query<{
+    status: string;
+    policy_state: string;
+  }>("SELECT status, policy_state FROM flow.wallets WHERE id = $1::uuid", [
+    walletId,
+  ]);
+  assert.equal(finalWallet[0]!.status, "ACTIVE");
+  assert.equal(finalWallet[0]!.policy_state, "stored");
+
+  const { rows: finalJob } = await pool.query<{
+    status: string;
+    lease_holder: string | null;
+  }>(
+    "SELECT status, lease_holder FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
+    [worker1Lease.id],
+  );
+  assert.equal(finalJob[0]!.status, "ACTIVE");
+  assert.equal(finalJob[0]!.lease_holder, null);
+});
+
+test("stale fencing token is rejected on Stage 1, Stage 2, and Stage 3 transitions", async () => {
+  const db = getPrismaClient();
+  const account = await createTestAccount(pool, "PERSONAL", "stale-fencing");
+  await createProvisioningJob(db, account.accountId, randomUUID());
+
+  // Worker 1 claims lease (fencing token = 1)
+  const w1 = await claimJobLease(db, account.accountId, "worker-1", 30);
+  assert.ok(w1 !== null);
+
+  // Worker 1's lease expires before dispatch
+  await pool.query(
+    "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = now() - interval '5 seconds' WHERE id = $1::uuid",
+    [w1.id],
+  );
+
+  // Worker 2 claims lease (fencing token = 2) and dispatches
+  const w2 = await claimJobLease(db, account.accountId, "worker-2", 30);
+  assert.ok(w2 !== null);
+  assert.ok(w2.fencingToken > w1.fencingToken);
+  await recordJobDispatch(db, w2.id, w2.fencingToken, randomUUID());
+
+  // Worker 1 (stale fencing token = 1) attempts persistRegisteredWallet -> MUST FAIL
+  const dummyEnvelope = serializeEnvelope(
+    encryptSecret(
+      "wk_dummy",
+      "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "v1",
+    ),
+  );
+  await assert.rejects(
+    persistRegisteredWallet(db, w1.id, w1.fencingToken, {
+      accountId: account.accountId,
+      providerWalletId: "outlayer-stale",
+      nearAccountId:
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      encryptedCredential: dummyEnvelope,
+      keyId: "v1",
+      keyDigest: "digest",
+    }),
+    { code: "STALE_FENCING_TOKEN" },
+  );
+
+  // Worker 2 (active fencing token = 2) persists wallet successfully
+  const walletId = await persistRegisteredWallet(db, w2.id, w2.fencingToken, {
+    accountId: account.accountId,
+    providerWalletId: "outlayer-active-cas",
+    nearAccountId:
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    encryptedCredential: dummyEnvelope,
+    keyId: "v1",
+    keyDigest: "digest",
+  });
+  assert.ok(walletId);
+
+  // Worker 2's lease expires during address derivation
+  await pool.query(
+    "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = now() - interval '5 seconds' WHERE id = $1::uuid",
+    [w2.id],
+  );
+
+  // Worker 3 claims lease (fencing token = 3) to complete provisioning
+  const w3 = await claimJobLease(db, account.accountId, "worker-3", 30);
+  assert.ok(w3 !== null);
+  assert.ok(w3.fencingToken > w2.fencingToken);
+
+  // Worker 1 and Worker 2 attempt to activate wallet with stale tokens -> MUST FAIL
+  await assert.rejects(
+    activateWalletIfReady(db, w1.id, w1.fencingToken, walletId),
+    { code: "STALE_FENCING_TOKEN" },
+  );
+  await assert.rejects(
+    activateWalletIfReady(db, w2.id, w2.fencingToken, walletId),
+    { code: "STALE_FENCING_TOKEN" },
+  );
+
+  // Worker 3 activates wallet with current fencing token -> SUCCEEDS
+  await activateWalletIfReady(db, w3.id, w3.fencingToken, walletId, "stored");
+});
+
+test("public wallet projection strictly isolates credentials at query time", async () => {
+  const db = getPrismaClient();
+  const account = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "public-projection",
+  );
+  await createProvisioningJob(db, account.accountId, randomUUID());
+  const leased = await claimJobLease(db, account.accountId, "worker-proj", 30);
+  assert.ok(leased !== null);
+  await recordJobDispatch(db, leased.id, leased.fencingToken, randomUUID());
+
+  const testKeyHex =
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+  const envelope = serializeEnvelope(
+    encryptSecret("wk_super_secret", testKeyHex, "v1"),
+  );
+  const keyDigest = deriveKeyDigest(testKeyHex);
+
+  await commitJobSuccess(db, leased.id, leased.fencingToken, {
+    accountId: account.accountId,
+    providerWalletId: "outlayer-proj-1",
+    nearAccountId:
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    encryptedCredential: envelope,
+    keyId: "v1",
+    keyDigest,
+    addresses: [
+      {
+        network: "near",
+        chainId: "near-mainnet",
+        address:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        publicKey: "ed25519:abc",
+      },
+    ],
+    capabilities: [
+      {
+        network: "near",
+        canDeriveAddress: true,
+        canReceive: true,
+        canReadNativeBalance: true,
+        canReadIntentsBalance: false,
+        canSignTransfer: false,
+        broadcastMode: "provider_broadcast",
+        canRotateCredentials: true,
+      },
+    ],
+  });
+
+  const projection = await getAccountWalletPublicProjection(
+    db,
+    account.accountId,
+  );
+  assert.ok(projection !== null);
+  assert.equal(projection.providerWalletId, "outlayer-proj-1");
+  assert.equal(
+    projection.nearAccountId,
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  );
+  assert.equal(projection.addresses.length, 1);
+  assert.equal(projection.capabilities.length, 1);
+
+  const projRecord = projection as unknown as Record<string, unknown>;
+  assert.equal(projRecord.encryptedCredential, undefined);
+  assert.equal(projRecord.encrypted_credential, undefined);
+  assert.equal(projRecord.keyId, undefined);
+  assert.equal(projRecord.key_id, undefined);
+  assert.equal(projRecord.keyDigest, undefined);
+  assert.equal(projRecord.key_digest, undefined);
+});
+
+test("job repository sanitizes errors before persisting to database", async () => {
+  const db = getPrismaClient();
+  const account = await createTestAccount(pool, "PERSONAL", "sanitized-err");
+  await createProvisioningJob(db, account.accountId, randomUUID());
+  const leased = await claimJobLease(db, account.accountId, "worker-err", 30);
+  assert.ok(leased !== null);
+  await recordJobDispatch(db, leased.id, leased.fencingToken, randomUUID());
+
+  // Record an ambiguous error containing sensitive tokens and HTML
+  const rawSensitiveError =
+    "Connection reset by peer while exchanging wk_sensitive_api_key_777 <script>alert(1)</script>";
+  await recordJobAmbiguous(
+    db,
+    leased.id,
+    leased.fencingToken,
+    rawSensitiveError,
+  );
+
+  const { rows } = await pool.query<{ last_error: string }>(
+    "SELECT last_error FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
+    [leased.id],
+  );
+
+  const savedError = rows[0]!.last_error;
+  assert.ok(
+    !savedError.includes("wk_sensitive"),
+    "Bearer key must be sanitized",
+  );
+  assert.ok(!savedError.includes("<script>"), "HTML tags must be stripped");
+  assert.ok(
+    savedError.includes("[REDACTED_API_KEY]"),
+    "Redacted token replacement present",
+  );
+
+  // Also test recordJobTerminalFailure sanitizes
+  await recordJobTerminalFailure(
+    db,
+    leased.id,
+    leased.fencingToken,
+    "HTTP 400 from wk_bad_bearer: <b>Bad Input</b>",
+    "BAD_REQUEST",
+  );
+  const { rows: termRows } = await pool.query<{ last_error: string }>(
+    "SELECT last_error FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
+    [leased.id],
+  );
+  assert.ok(!termRows[0]!.last_error.includes("wk_bad_bearer"));
+  assert.ok(!termRows[0]!.last_error.includes("<b>"));
+});
+
+test("decoupled fund readiness enforces execution guards and unverified policy rejection on DB records", async () => {
+  const db = getPrismaClient();
+  const account = await createTestAccount(pool, "PERSONAL", "fund-readiness");
+  await createProvisioningJob(db, account.accountId, randomUUID());
+  const leased = await claimJobLease(db, account.accountId, "worker-funds", 30);
+  assert.ok(leased !== null);
+  await recordJobDispatch(db, leased.id, leased.fencingToken, randomUUID());
+
+  const testKeyHex =
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+  const envelope = serializeEnvelope(
+    encryptSecret("wk_fund_test", testKeyHex, "v1"),
+  );
+
+  const walletId = await commitJobSuccess(db, leased.id, leased.fencingToken, {
+    accountId: account.accountId,
+    providerWalletId: "outlayer-funds-1",
+    nearAccountId:
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    encryptedCredential: envelope,
+    keyId: "v1",
+    keyDigest: deriveKeyDigest(testKeyHex),
+    policyState: "none", // UNVERIFIED policy
+    addresses: [
+      {
+        network: "near",
+        chainId: "near-mainnet",
+        address:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        publicKey: "ed25519:abc",
+      },
+    ],
+    capabilities: [
+      {
+        network: "near",
+        canDeriveAddress: true,
+        canReceive: true,
+        canReadNativeBalance: true,
+        canReadIntentsBalance: false,
+        canSignTransfer: false,
+        broadcastMode: "provider_broadcast",
+        canRotateCredentials: true,
+      },
+    ],
+  });
+
+  const { rows: wRows } = await pool.query<{
+    status: string;
+    policy_state: string;
+  }>("SELECT status, policy_state FROM flow.wallets WHERE id = $1::uuid", [
+    walletId,
+  ]);
+  const { rows: addrRows } = await pool.query<{
+    network: string;
+    address: string;
+  }>(
+    "SELECT network, address FROM flow.wallet_addresses WHERE wallet_id = $1::uuid",
+    [walletId],
+  );
+  const { rows: capRows } = await pool.query<{
+    network: string;
+    can_sign_transfer: boolean;
+    can_receive: boolean;
+  }>(
+    "SELECT network, can_sign_transfer, can_receive FROM flow.wallet_capabilities WHERE wallet_id = $1::uuid",
+    [walletId],
+  );
+
+  // Even though wallet row is ACTIVE in DB:
+  // 1. With FLOW_EXECUTION=disabled:
+  const readinessCheck = evaluateWalletFundReadiness({
+    walletStatus: wRows[0]!.status,
+    policySummary: {
+      walletId,
+      state: wRows[0]!.policy_state as OutLayerPolicyState,
+      frozen: false,
+      allowsFinancialExecution: true,
+    },
+    derivedAddresses: addrRows,
+    capabilities: capRows.map((c) => ({
+      network: c.network,
+      canSignTransfer: c.can_sign_transfer,
+      canReceive: c.can_receive,
+    })),
+    globalExecutionDisabled: true,
+  });
+
+  assert.equal(readinessCheck.isReady, false);
+  assert.equal(readinessCheck.canReceiveFunds, false);
+  assert.equal(readinessCheck.canSignTransfers, false);
+  assert.ok(readinessCheck.reason?.includes("FLOW_EXECUTION=disabled"));
 });
 
 test("the real PostgreSQL server has the migrated namespace and the correct runtime role", async () => {

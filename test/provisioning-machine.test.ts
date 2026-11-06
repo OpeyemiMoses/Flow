@@ -168,6 +168,56 @@ test("allows lease recovery if previous lease expired before dispatch", () => {
   assert.equal(s2.leaseHolder, "worker-alive");
 });
 
+test("two-stage provisioning: captures REGISTERED stage and allows lease recovery during address derivation", () => {
+  const t0 = new Date("2026-11-06T12:00:00Z");
+  const t1 = new Date("2026-11-06T12:00:01Z");
+  const t2 = new Date("2026-11-06T12:00:02Z");
+
+  const s1 = reduceProvisioningState(initialPending(), {
+    type: "ACQUIRE_LEASE",
+    leaseExpiresAt: new Date(t0.getTime() + 10_000),
+    leaseHolder: "worker-1",
+    now: t0,
+  });
+  const s2 = reduceProvisioningState(s1, {
+    type: "RECORD_DISPATCH",
+    requestId: "req-stage1",
+    now: t1,
+  });
+
+  // Stage 1: Registration success moves to REGISTERED
+  const s3 = reduceProvisioningState(s2, {
+    type: "RECEIVE_REGISTRATION_SUCCESS",
+    walletId: "w-registered-uuid",
+    nearAccountId:
+      "98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac",
+    now: t2,
+  });
+  assert.equal(s3.status, "REGISTERED");
+  assert.equal(s3.walletId, "w-registered-uuid");
+
+  // Worker 1 crashes while deriving addresses; lease expires at t0 + 10s
+  const t3 = new Date(t0.getTime() + 15_000);
+  const s4 = reduceProvisioningState(s3, {
+    type: "ACQUIRE_LEASE",
+    leaseExpiresAt: new Date(t3.getTime() + 30_000),
+    leaseHolder: "worker-recovery",
+    now: t3,
+  });
+  assert.equal(s4.status, "LEASED");
+  assert.equal(s4.leaseHolder, "worker-recovery");
+
+  // Worker 2 completes address derivation -> PROVISIONED
+  const s5 = reduceProvisioningState(
+    { ...s4, status: "REGISTERED" },
+    {
+      type: "COMPLETE_ADDRESS_DERIVATION",
+      now: new Date(t3.getTime() + 2_000),
+    },
+  );
+  assert.equal(s5.status, "PROVISIONED");
+});
+
 test("rejects invalid state transitions", () => {
   const pending = initialPending();
   const now = new Date();

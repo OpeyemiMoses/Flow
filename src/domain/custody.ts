@@ -215,3 +215,103 @@ export function evaluatePolicyReadiness(
   if (policy.state !== "stored") return false;
   return policy.allowsFinancialExecution;
 }
+
+export interface WalletFundReadinessCheck {
+  readonly isReady: boolean;
+  readonly reason?: string;
+  readonly canReceiveFunds: boolean;
+  readonly canSignTransfers: boolean;
+}
+
+/**
+ * Assesses complete wallet fund-readiness.
+ * Decouples wallet registration from fund-receiving and signing eligibility.
+ * Enforces that a wallet is NEVER fund-ready if global execution is disabled,
+ * if policy is unverified/none, if required multi-chain addresses are missing or invalid,
+ * or if custody controls are not active.
+ */
+export function evaluateWalletFundReadiness(params: {
+  readonly walletStatus: string;
+  readonly policySummary: CustodyPolicySummary;
+  readonly derivedAddresses: ReadonlyArray<{
+    network: string;
+    address: string;
+  }>;
+  readonly capabilities: ReadonlyArray<{
+    network: string;
+    canSignTransfer: boolean;
+    canReceive: boolean;
+  }>;
+  readonly globalExecutionDisabled: boolean;
+}): WalletFundReadinessCheck {
+  if (params.globalExecutionDisabled) {
+    return {
+      isReady: false,
+      reason:
+        "Global financial execution is disabled (FLOW_EXECUTION=disabled).",
+      canReceiveFunds: false,
+      canSignTransfers: false,
+    };
+  }
+
+  if (params.walletStatus !== "ACTIVE") {
+    return {
+      isReady: false,
+      reason: `Wallet status is ${params.walletStatus}, not ACTIVE.`,
+      canReceiveFunds: false,
+      canSignTransfers: false,
+    };
+  }
+
+  if (params.policySummary.frozen) {
+    return {
+      isReady: false,
+      reason: "Wallet is frozen by custody controller.",
+      canReceiveFunds: false,
+      canSignTransfers: false,
+    };
+  }
+
+  if (params.policySummary.state !== "stored") {
+    return {
+      isReady: false,
+      reason: `Custody policy state is '${params.policySummary.state}', requires verified 'stored' policy.`,
+      canReceiveFunds: false,
+      canSignTransfers: false,
+    };
+  }
+
+  // Check required chains have valid addresses: NEAR, Base, Solana
+  const hasNear = params.derivedAddresses.some(
+    (a) =>
+      (a.network === "near" || a.network === "near:mainnet") &&
+      isValidNearAddress(a.address),
+  );
+  const hasBase = params.derivedAddresses.some(
+    (a) =>
+      (a.network === "base" || a.network === "eip155:8453") &&
+      isValidEvmAddress(a.address),
+  );
+  const hasSolana = params.derivedAddresses.some(
+    (a) =>
+      (a.network === "solana" || a.network === "solana:mainnet") &&
+      isValidSolanaAddress(a.address),
+  );
+
+  if (!hasNear || !hasBase || !hasSolana) {
+    return {
+      isReady: false,
+      reason:
+        "Missing verified addresses for one or more required chains (NEAR, Base, Solana).",
+      canReceiveFunds: false,
+      canSignTransfers: false,
+    };
+  }
+
+  const anySignEnabled = params.capabilities.some((c) => c.canSignTransfer);
+  return {
+    isReady: true,
+    canReceiveFunds: true,
+    canSignTransfers: anySignEnabled,
+  };
+}
