@@ -1,0 +1,4 @@
+// Prisma manages the M0 infrastructure migration. Domain models begin after M0.
+datasource db {
+  provider = "postgresql"
+}

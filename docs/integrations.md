@@ -1,0 +1,28 @@
+# Provider evidence and assumptions
+
+M0 provides interface definitions. Evidence below separates documented contracts, directly observed public responses, and behavior that still requires integration verification. The public reads on 6 November 2026 used no credentials and did not register wallets, request quotes, or initiate transfers.
+
+## OutLayer
+
+**Documented.** `POST /register` has random and deterministic modes. Random registration returns a one-time bearer credential. Deterministic registration derives identity from a NEAR account, seed and optional vault scope, and requires a NEAR authorization signature. The hosted registration operation does not declare a retry key. A local job alone cannot make a lost random registration response safe to retry. [Hosted OpenAPI](https://api.outlayer.ai/openapi.json) · [Agent Custody guide](https://app.outlayer.ai/docs/agent-custody)
+
+**Documented.** The address API describes NEAR, shared EVM addresses including Base, and Solana. OutLayer broadcasts its native NEAR transfers and contract calls. The raw EVM and Solana operations return signatures for the caller to assemble and broadcast, subject to wallet policy. The native balance endpoint supports NEAR and provides a separate Intents balance mode. Use independent chain RPCs for EVM and Solana native balances. Cross-chain deposits into Intents credit a separate position. [Agent Custody guide](https://app.outlayer.ai/docs/agent-custody) · [Hosted OpenAPI](https://api.outlayer.ai/openapi.json)
+
+**Observed.** A public GET of the hosted OpenAPI returned HTTP 200 and identified version `0.1.0-alpha.4`. The SHA-256 of the fetched document was `d4a948b242cdd818033adc8f667309bfc85e49a163e1f12a7f433cb0e5200a93`. This confirms access to the contract document. [Hosted OpenAPI](https://api.outlayer.ai/openapi.json)
+
+**Unverified.** Confirm the registration mode for FLOW, lost-response recovery, policy controller assignment, rotation and recovery that preserve the address, and live capabilities for each enabled asset. A wallet without a stored policy is documented as unrestricted. Verify the policy before funding and enforce FLOW's own reservations and limits. Prove Base address control and an approved path to spend or recover funds before using it as a demo recipient. [Policy and recovery guide](https://app.outlayer.ai/docs/agent-custody) · [MPC vaults](https://app.outlayer.ai/docs/vaults)
+
+## NEAR Intents 1Click
+
+**Documented.** `GET /v0/tokens` lists provider asset IDs. `POST /v0/quote` supports a dry preview and a funded path with returned deposit instructions when committed. A fixed destination amount uses `EXACT_OUTPUT`. The payer sends on the origin chain and the recipient receives on the destination chain for the proposed demo. Deposit hash submission is optional. Status is polled by deposit address and, when needed, memo. Verify signed quote data, then independently verify the resulting delivery on-chain. [1Click OpenAPI](https://1click.chaindefuser.com/docs/v0/openapi.yaml) · [Swap types](https://docs.near-intents.org/integration/distribution-channels/1click-api/swap-types) · [Signature guide](https://docs.near-intents.org/integration/distribution-channels/1click-api/verify-quote-signature)
+
+**Observed.** The hosted OpenAPI returned HTTP 200 in M0, resolving the earlier retrieval limitation. It identifies API version `0.1.10` with OpenAPI format `3.0.0`. The SHA-256 was `9a2e676682aa6dec6905c82f1b2cc0ec72eda97964369aa51ec35eb82ccac0a3`. The public token catalog returned HTTP 200 and included the following entries. [1Click OpenAPI](https://1click.chaindefuser.com/docs/v0/openapi.yaml) · [Live token catalog](https://1click.chaindefuser.com/v0/tokens)
+
+| Network | Asset | 1Click ID                                                          | Decimals |
+| ------- | ----- | ------------------------------------------------------------------ | -------- |
+| NEAR    | wNEAR | `nep141:wrap.near`                                                 | 24       |
+| Base    | USDC  | `nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near` | 6        |
+
+The Base contract matches Circle's registry. NEAR's example pairs the wNEAR quote ID with a native NEAR transfer to the returned deposit address. This is documentation of the deposit pattern. FLOW must verify the exact source funding action and refund asset for its own Base route. [Circle USDC contracts](https://developers.circle.com/stablecoins/usdc-contract-addresses) · [NEAR swap example](https://github.com/near-examples/near-intents-examples/blob/main/1click-example/6-full-swap.ts) · [NEAR deposit example](https://github.com/near-examples/near-intents-examples/blob/main/1click-example/3-send-deposit.ts)
+
+**Unverified.** Confirm partner access and effective fees, the route minimum and live liquidity, executable funding instructions, refund handling, and the finalized Base receipt. The route remains a demo proposal until a controlled rehearsal verifies delivery. OutLayer supplies the recipient address. 1Click handles the proposed route. FLOW independently verifies the Base USDC event, its canonical finalized block and the amount delivered. [Partner authentication](https://docs.near-intents.org/integration/distribution-channels/1click-api/authentication) · [Base receipt RPC](https://docs.base.org/base-chain/api-reference/ethereum-json-rpc-api/eth_getTransactionReceipt)

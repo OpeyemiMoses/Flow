@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17.11-bookworm
+    environment:
+      POSTGRES_PASSWORD: ${FLOW_POSTGRES_ADMIN_PASSWORD:?Set a disposable cluster password}
+      FLOW_LOCAL_APP_PASSWORD: ${FLOW_LOCAL_APP_PASSWORD:?Set a local app password}
+      FLOW_LOCAL_MIGRATOR_PASSWORD: ${FLOW_LOCAL_MIGRATOR_PASSWORD:?Set a local migration password}
+      FLOW_TEST_APP_PASSWORD: ${FLOW_TEST_APP_PASSWORD:?Set a test app password}
+      FLOW_TEST_MIGRATOR_PASSWORD: ${FLOW_TEST_MIGRATOR_PASSWORD:?Set a test migration password}
+    ports:
+      - "127.0.0.1:${FLOW_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/bootstrap.sql:/docker-entrypoint-initdb.d/10-flow.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+volumes:
+  postgres-data:

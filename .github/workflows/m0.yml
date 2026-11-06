@@ -1,0 +1,62 @@
+name: M0 checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Verify migrations and database permissions
+        shell: bash
+        run: |
+          admin_password="$(openssl rand -hex 24)"
+          local_app_password="$(openssl rand -hex 24)"
+          local_migrator_password="$(openssl rand -hex 24)"
+          test_app_password="$(openssl rand -hex 24)"
+          test_migrator_password="$(openssl rand -hex 24)"
+          printf '::add-mask::%s\n' "$admin_password" "$local_app_password" "$local_migrator_password" "$test_app_password" "$test_migrator_password"
+          export FLOW_POSTGRES_PORT=55432
+          export FLOW_ENV=test FLOW_EXECUTION=disabled
+          compose_test_db() {
+            FLOW_POSTGRES_ADMIN_PASSWORD="$admin_password" \
+            FLOW_LOCAL_APP_PASSWORD="$local_app_password" \
+            FLOW_LOCAL_MIGRATOR_PASSWORD="$local_migrator_password" \
+            FLOW_TEST_APP_PASSWORD="$test_app_password" \
+            FLOW_TEST_MIGRATOR_PASSWORD="$test_migrator_password" \
+              docker compose --env-file /dev/null "$@"
+          }
+          trap 'compose_test_db down --volumes' EXIT
+          compose_test_db up --wait
+          (
+            export FLOW_MIGRATION_DATABASE_URL="postgresql://flow_test_migrator:$test_migrator_password@127.0.0.1:$FLOW_POSTGRES_PORT/flow_test"
+            npm run db:validate
+            npm run db:deploy
+            npm run db:deploy
+            npm run db:status
+          )
+          (
+            export FLOW_DATABASE_URL="postgresql://flow_test_app:$test_app_password@127.0.0.1:$FLOW_POSTGRES_PORT/flow_test"
+            npm run db:check
+            npm run test:db
+          )
