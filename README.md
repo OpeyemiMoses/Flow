@@ -2,7 +2,7 @@
 
 FLOW is a multi-chain payments project. The sender chooses the funding asset and network, and the recipient chooses the settlement asset and network.
 
-The M0 foundation provides the Next.js shell, server configuration, PostgreSQL migration history, health checks, and interface contracts. Financial execution is disabled in every environment.
+M1 provides Google sign-in, passwordless email codes, personal and business accounts, team invitations, and session controls. Financial execution is disabled in every environment.
 
 ## Local development
 
@@ -11,7 +11,16 @@ Use Node **24.22.2** with its bundled npm **11.19.1** and a disposable PostgreSQ
 1. Run `npm ci`.
 2. From an operator shell, bootstrap PostgreSQL and apply the migration as described below.
 3. Create the web dotenv file with `(umask 077; cp -n .env.example .env)` and set `FLOW_DATABASE_URL` to the `flow_local_app` connection URL. Keep `.env` private and put only runtime settings in it. Percent-encode special characters in URL passwords.
-4. From a fresh runtime shell, run `npm run db:check` and `npm run dev`. The dev server defaults to `127.0.0.1:3000`. The shell is at `/`, with liveness and database readiness at `/api/health/live` and `/api/health/ready`.
+4. Configure Google and mail for the local web process. Run `npm run db:check` and `npm run dev` from a fresh runtime shell. The dev server defaults to `127.0.0.1:3000`. Sign-in is at `/sign-in` and health checks are at `/api/health/live` and `/api/health/ready`.
+
+### Authentication setup
+
+- Set `FLOW_APP_ORIGIN` to the exact URL you use in your browser, such as `http://127.0.0.1:3000`. Register that origin plus `/api/auth/callback/google` as the redirect URI for a dedicated Google web client and set the matching client ID and secret. Staging and production use their own clients and HTTPS origins. [Google OAuth configuration](https://developers.google.com/identity/protocols/oauth2/web-server)
+- Generate `FLOW_AUTH_SECRET` and `FLOW_OTP_KEY` separately with `openssl rand -hex 32`. Supply those keys only to the runtime. Changing the session key invalidates existing signed cookies and changing the OTP key invalidates outstanding codes.
+- Set `FLOW_MAIL_API_KEY` and `FLOW_MAIL_FROM` using a Resend key and a verified sender. Email delivery runs after the response, so a generic accepted response does not confirm that an email was delivered. Try the other enrolled method or request another code after the cooldown. [Resend send API](https://resend.com/docs/api-reference/emails/send-email)
+- Preserve the configured public `Host` at the HTTPS ingress. Omit `FLOW_CLIENT_IP_HEADER` unless the ingress strips any client-provided value and writes that header itself. Configure ingress logging to omit auth query strings, cookie and authorization headers, and request bodies.
+
+Google accounts with a verified Gmail address or a matching Google Workspace hosted domain can register with Google. Other addresses can register by email. Google-first users can enable email sign-in in Security with a code sent to the verified mailbox. Linking, unlinking and team administration use fresh, session-bound mailbox proof. Recovery signs in with an enrolled method and revokes other sessions.
 
 ### Bootstrap and migrations
 
@@ -52,7 +61,7 @@ In a separate Bash subshell, supply only the migration URL to Prisma. For local 
 
 Prisma takes its URL from the command environment. Next.js reads its own dotenv files and inherited environment, so keep operator secrets out of every `.env*` file in the checkout and out of any shell that launches the web process. Next.js refuses to build or start with recognized foreign credentials present. The local setup separates inputs at the process level. For OS isolation, run the web process as an identity without access to the operator secret store, operator processes, or Docker daemon. Docker administrators can inspect the disposable database container.
 
-The migration identity owns the database. The web process uses the app role with `CONNECT` and `USAGE` on the application namespace. Readiness checks the actual role and database, namespace access, and the absence of elevated role flags, role memberships and database/schema creation privileges. A readiness failure returns HTTP 503 with a request ID and writes a redacted structured log.
+The migration identity owns the database. The app role has `CONNECT`, namespace `USAGE`, and explicit grants for named M1 tables. It can append security audit events. Readiness checks the actual role and database, namespace access, and the absence of elevated role flags, role memberships and database/schema creation privileges. A readiness failure returns HTTP 503 with a request ID and writes a redacted structured log.
 
 ## Checks
 
@@ -65,7 +74,7 @@ npm test
 npm run build
 ```
 
-The production build requires no database URL or live provider credentials. Development and build scripts use Next.js's Webpack mode because Turbopack's CSS worker could not bind its port in this workspace. `npm run start` validates the runtime environment before serving. `npm run db:check` can load the web `.env` for local use; `npm run test:db` takes configuration from its process environment.
+The production build and Prisma Client generation require no database URL or auth credentials. Development and build scripts use Next.js's Webpack mode. `npm run start` validates the runtime environment before serving. `npm run db:check` can load the web `.env` for local use. The integration suites take configuration from their process environment.
 
 For integration checks, repeat the migration subshell with `FLOW_ENV=test` and a URL for `flow_test_migrator` on `127.0.0.1:55432/flow_test`. Run `npm run db:deploy` twice before `npm run db:status`; the second deploy should find no pending migration. In a separate Bash subshell, enter only the URL for `flow_test_app` on that test database:
 
@@ -77,10 +86,11 @@ For integration checks, repeat the migration subshell with `FLOW_ENV=test` and a
   export FLOW_DATABASE_URL
   npm run db:check
   npm run test:db
+  npm run test:security
 )
 ```
 
-`test:db` requires an actual migrated test database and checks privileges and cross-environment isolation. The CI workflow uses separate command environments with an ephemeral PostgreSQL container.
+`test:db` requires a migrated test database and checks privileges and cross-environment isolation. Build the app and install Chromium with `npm exec -- playwright install chromium` before `test:security`. Set `FLOW_TEST_CHROME_PATH` to use a local Chrome binary. The suite runs production Next.js on loopback HTTPS and uses a test-only network fixture for Google token exchange, signing keys and captured email. The CI workflow runs both suites with an ephemeral PostgreSQL container and separate migration and application environments.
 
 ## Environment contract
 
@@ -93,4 +103,4 @@ For integration checks, repeat the migration subshell with `FLOW_ENV=test` and a
 
 For each database, suffix its name with `_app` for the runtime role and `_migrator` for the migration role. `FLOW_ENV` and `FLOW_EXECUTION=disabled` are mandatory at runtime. `FLOW_DATABASE_URL` is for the app and readiness check. `FLOW_MIGRATION_DATABASE_URL` is for Prisma. The app and migration processes reject the other URL and recognized bootstrap credentials in every environment. In staging and production, use separate identities and secret injection scopes, and use `?sslmode=verify-full` for the app URL and `?sslmode=require&sslaccept=strict` for the Prisma URL. Provision separate database access per environment on the server. The TLS configurations require a trusted server certificate.
 
-See the [architecture decisions](docs/architecture.md), [provider evidence](docs/integrations.md), [M0 verification report](docs/milestones/M0.md), and [M0 remediation evidence](docs/milestones/M0-remediation.md).
+See the [architecture decisions](docs/architecture.md), [provider evidence](docs/integrations.md), and [M1 milestone report](docs/milestones/M1.md). The [M0 remediation report](docs/milestones/M0-remediation.md) records the accepted foundation.

@@ -202,9 +202,16 @@ test("the checked-in web dotenv template contains only runtime settings", () => 
     readFileSync(new URL("../.env.example", import.meta.url), "utf8"),
   );
   assert.deepEqual(Object.keys(template).sort(), [
+    "FLOW_APP_ORIGIN",
+    "FLOW_AUTH_SECRET",
     "FLOW_DATABASE_URL",
     "FLOW_ENV",
     "FLOW_EXECUTION",
+    "FLOW_GOOGLE_CLIENT_ID",
+    "FLOW_GOOGLE_CLIENT_SECRET",
+    "FLOW_MAIL_API_KEY",
+    "FLOW_MAIL_FROM",
+    "FLOW_OTP_KEY",
   ]);
   assert.equal(template.FLOW_ENV, "local");
   assert.equal(template.FLOW_EXECUTION, "disabled");

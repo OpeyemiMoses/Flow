@@ -1,4 +1,260 @@
-// Prisma manages the M0 infrastructure migration. Domain models begin after M0.
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "ts"
+}
+
 datasource db {
   provider = "postgresql"
+  schemas  = ["flow"]
+}
+
+model AuthUser {
+  id             String                 @id
+  name           String
+  email          String                 @unique
+  emailVerified  Boolean                @map("email_verified")
+  emailEnrolled  Boolean                @default(false) @map("email_enrolled")
+  mailboxPaused  Boolean                @default(false) @map("mailbox_paused")
+  image          String?
+  createdAt      DateTime               @default(now()) @map("created_at")
+  updatedAt      DateTime               @updatedAt @map("updated_at")
+  identities     AuthIdentity[]
+  sessions       AuthSession[]
+  googleBindings GoogleSubjectBinding[]
+  flowUser       FlowUser?
+
+  @@map("auth_users")
+  @@schema("flow")
+}
+
+model GoogleSubjectBinding {
+  subject   String   @id
+  userId    String   @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      AuthUser @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@map("google_subject_bindings")
+  @@schema("flow")
+}
+
+model AuthIdentity {
+  id                    String    @id
+  userId                String    @map("user_id")
+  providerId            String    @map("provider_id")
+  accountId             String    @map("provider_subject")
+  accessToken           String?   @map("access_token")
+  refreshToken          String?   @map("refresh_token")
+  idToken               String?   @map("id_token")
+  accessTokenExpiresAt  DateTime? @map("access_token_expires_at")
+  refreshTokenExpiresAt DateTime? @map("refresh_token_expires_at")
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+  user                  AuthUser  @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([providerId, accountId])
+  @@unique([userId, providerId])
+  @@map("auth_identities")
+  @@schema("flow")
+}
+
+model AuthSession {
+  id        String   @id
+  userId    String   @map("user_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  user      AuthUser @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("auth_sessions")
+  @@schema("flow")
+}
+
+model AuthVerification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([identifier])
+  @@index([expiresAt])
+  @@map("auth_verifications")
+  @@schema("flow")
+}
+
+model AuthIntent {
+  slot      String   @id
+  digest    String   @unique
+  purpose   String
+  email     String?
+  userId    String?  @map("user_id")
+  sessionId String?  @map("session_id")
+  target    String?
+  nonceHash String?  @map("nonce_hash")
+  stateHash String?  @map("state_hash")
+  attempts  Int      @default(0)
+  verified  Boolean  @default(false)
+  issuedAt  DateTime @map("issued_at")
+  expiresAt DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("auth_intents")
+  @@schema("flow")
+}
+
+model AuthThrottle {
+  key       String   @id
+  count     Int
+  expiresAt DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("auth_throttles")
+  @@schema("flow")
+}
+
+enum AccountKind {
+  PERSONAL
+  BUSINESS
+
+  @@map("account_kind")
+  @@schema("flow")
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+
+  @@map("member_role")
+  @@schema("flow")
+}
+
+enum MemberStatus {
+  ACTIVE
+  REMOVED
+
+  @@map("member_status")
+  @@schema("flow")
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+
+  @@map("invite_status")
+  @@schema("flow")
+}
+
+model FlowUser {
+  id              String              @id @default(uuid()) @db.Uuid
+  authUserId      String              @unique @map("auth_user_id")
+  active          Boolean             @default(true)
+  createdAt       DateTime            @default(now()) @map("created_at")
+  authUser        AuthUser            @relation(fields: [authUserId], references: [id], onDelete: Restrict)
+  personalAccount FlowAccount?
+  memberships     AccountMembership[]
+  sentInvites     AccountInvite[]
+  businessKeys    BusinessCreation[]
+
+  @@map("users")
+  @@schema("flow")
+}
+
+model FlowAccount {
+  id              String            @id @default(uuid()) @db.Uuid
+  kind            AccountKind
+  name            String
+  personalOwnerId String?           @unique @map("personal_owner_id") @db.Uuid
+  createdAt       DateTime          @default(now()) @map("created_at")
+  personalOwner   FlowUser?         @relation(fields: [personalOwnerId], references: [id], onDelete: Restrict)
+  business        BusinessProfile?
+  creation        BusinessCreation?
+
+  @@unique([id, kind])
+  @@map("accounts")
+  @@schema("flow")
+}
+
+model BusinessProfile {
+  accountId String              @id @map("account_id") @db.Uuid
+  kind      AccountKind         @default(BUSINESS)
+  account   FlowAccount         @relation(fields: [accountId, kind], references: [id, kind], onDelete: Restrict)
+  members   AccountMembership[]
+  invites   AccountInvite[]
+
+  @@unique([accountId, kind])
+  @@map("business_profiles")
+  @@schema("flow")
+}
+
+model AccountMembership {
+  id        String          @id @default(uuid()) @db.Uuid
+  accountId String          @map("account_id") @db.Uuid
+  userId    String          @map("user_id") @db.Uuid
+  role      MemberRole
+  status    MemberStatus    @default(ACTIVE)
+  createdAt DateTime        @default(now()) @map("created_at")
+  business  BusinessProfile @relation(fields: [accountId], references: [accountId], onDelete: Restrict)
+  user      FlowUser        @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([accountId, userId])
+  @@index([userId, status])
+  @@map("account_memberships")
+  @@schema("flow")
+}
+
+model AccountInvite {
+  id        String          @id @default(uuid()) @db.Uuid
+  accountId String          @map("account_id") @db.Uuid
+  inviterId String          @map("inviter_id") @db.Uuid
+  email     String
+  role      MemberRole
+  digest    String          @unique
+  status    InviteStatus    @default(PENDING)
+  expiresAt DateTime        @map("expires_at")
+  createdAt DateTime        @default(now()) @map("created_at")
+  business  BusinessProfile @relation(fields: [accountId], references: [accountId], onDelete: Restrict)
+  inviter   FlowUser        @relation(fields: [inviterId], references: [id], onDelete: Restrict)
+
+  @@index([accountId, status])
+  @@map("account_invites")
+  @@schema("flow")
+}
+
+model BusinessCreation {
+  actorId     String      @map("actor_id") @db.Uuid
+  key         String      @db.Uuid
+  fingerprint String
+  accountId   String      @unique @map("account_id") @db.Uuid
+  actor       FlowUser    @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  account     FlowAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@id([actorId, key])
+  @@map("business_creations")
+  @@schema("flow")
+}
+
+model SecurityAuditEvent {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kind        String
+  actorAuthId String   @map("actor_auth_id")
+  accountId   String?  @map("account_id") @db.Uuid
+  targetId    String?  @map("target_id")
+  requestId   String   @map("request_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([accountId, createdAt])
+  @@map("security_audit_events")
+  @@schema("flow")
 }

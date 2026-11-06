@@ -46,6 +46,16 @@ for (const [action, statement] of [
     "read Prisma migration history",
     "SELECT 1 FROM public._prisma_migrations LIMIT 1",
   ],
+  [
+    "read the append-only security audit",
+    "SELECT 1 FROM flow.security_audit_events LIMIT 1",
+  ],
+  ["erase security audit events", "DELETE FROM flow.security_audit_events"],
+  [
+    "rewrite an immutable Google subject binding",
+    "UPDATE flow.google_subject_bindings SET user_id = 'fixture'",
+  ],
+  ["delete an auth user", "DELETE FROM flow.auth_users"],
 ] as const) {
   test(`the runtime role cannot ${action}`, async () => {
     const client = await pool.connect();

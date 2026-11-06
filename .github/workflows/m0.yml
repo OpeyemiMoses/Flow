@@ -1,4 +1,4 @@
-name: M0 checks
+name: FLOW checks
 
 on:
   push:
@@ -27,7 +27,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
-      - name: Verify migrations and database permissions
+      - name: Install Chromium for security tests
+        run: npm exec -- playwright install --with-deps chromium
+      - name: Verify migrations, permissions and browser security
         shell: bash
         run: |
           admin_password="$(openssl rand -hex 24)"
@@ -59,4 +61,5 @@ jobs:
             export FLOW_DATABASE_URL="postgresql://flow_test_app:$test_app_password@127.0.0.1:$FLOW_POSTGRES_PORT/flow_test"
             npm run db:check
             npm run test:db
+            npm run test:security
           )

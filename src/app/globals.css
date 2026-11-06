@@ -1,1 +1,131 @@
 @import "tailwindcss" source("../");
+
+.flow-main {
+  width: min(100% - 2rem, 57rem);
+  margin-inline: auto;
+  padding-block: 3rem;
+}
+.flow-narrow {
+  max-width: 34rem;
+}
+.flow-brand {
+  display: inline-block;
+  margin-bottom: 1rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+.flow-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.8rem max(1rem, calc((100vw - 57rem) / 2));
+  border-bottom: 1px solid #334155;
+}
+.flow-topbar .flow-brand {
+  margin: 0;
+}
+.flow-stack {
+  display: grid;
+  gap: 1rem;
+}
+.flow-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem 1rem;
+}
+.flow-panel {
+  border: 1px solid #334155;
+  border-radius: 1rem;
+  padding: clamp(1rem, 4vw, 1.8rem);
+  background: #0f172a;
+}
+.flow-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+  gap: 1rem;
+}
+.flow-main h1 {
+  font-size: clamp(1.8rem, 5vw, 2.6rem);
+  font-weight: 750;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+.flow-main h2 {
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+.flow-main p {
+  color: #cbd5e1;
+  line-height: 1.6;
+}
+.flow-main label {
+  display: grid;
+  gap: 0.35rem;
+}
+.flow-main .flow-check {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.flow-main input:not([type="checkbox"]),
+.flow-main select {
+  width: 100%;
+  border: 1px solid #64748b;
+  border-radius: 0.45rem;
+  padding: 0.65rem 0.8rem;
+  background: #020617;
+  color: #f8fafc;
+}
+.flow-main button,
+.flow-topbar button {
+  border-radius: 0.45rem;
+  padding: 0.55rem 0.9rem;
+  background: #5eead4;
+  color: #042f2e;
+  font-weight: 650;
+  cursor: pointer;
+}
+.flow-main .flow-secondary,
+.flow-topbar .flow-secondary {
+  border: 1px solid #64748b;
+  background: #0f172a;
+  color: #f8fafc;
+}
+.flow-main button:disabled,
+.flow-topbar button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+a {
+  color: #99f6e4;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+:is(a, button, input, select):focus-visible {
+  outline: 2px solid #5eead4;
+  outline-offset: 3px;
+}
+.flow-main .flow-feedback,
+.flow-topbar .flow-feedback {
+  color: #fcd34d;
+}
+.flow-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  flex-wrap: wrap;
+  padding: 0.7rem 0;
+  border-top: 1px solid #334155;
+  overflow-wrap: anywhere;
+}
+.flow-main .flow-tag {
+  justify-self: start;
+  border: 1px solid #0f766e;
+  color: #99f6e4;
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+}

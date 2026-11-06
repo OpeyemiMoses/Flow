@@ -3,18 +3,21 @@ import type { DatabaseTarget } from "./environment.ts";
 import { FlowError } from "./errors.ts";
 import { log } from "./logger.ts";
 
-export function createDatabasePool(target: DatabaseTarget): pg.Pool {
+export function createDatabasePool(
+  target: DatabaseTarget,
+  purpose: "readiness" | "application" = "readiness",
+): pg.Pool {
   const connectionUrl = new URL(target.url);
   // pg replaces explicit TLS options when the connection string has SSL parameters.
   connectionUrl.search = "";
   const pool = new pg.Pool({
     connectionString: connectionUrl.href,
     ssl: target.tls ? { rejectUnauthorized: true } : false,
-    application_name: "flow-readiness",
+    application_name: `flow-${purpose}`,
     connectionTimeoutMillis: 1_500,
     query_timeout: 1_500,
     statement_timeout: 1_500,
-    max: 2,
+    max: purpose === "readiness" ? 2 : 8,
   });
   pool.on("error", () => {
     log("error", "database_idle_connection_failed", {

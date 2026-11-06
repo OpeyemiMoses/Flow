@@ -1,4 +1,5 @@
 .next/
 next-env.d.ts
+src/generated/prisma/
 work/
 outputs/
