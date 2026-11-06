@@ -1,5 +1,175 @@
+import {
+  evaluateWalletFundReadiness,
+  isValidNearAddress,
+  isValidPolicyState,
+  validateRequiredWalletProvisioning,
+  verifyCustodyPolicyEvidence,
+  type OutLayerPolicyState,
+  type ProviderPolicyEvidenceInput,
+} from "../../domain/custody.ts";
 import { FlowError } from "../../foundation/errors.ts";
 import type { FlowDb } from "../../foundation/prisma.ts";
+import {
+  outlayerChainSchema,
+  type OutLayerChain,
+  type SanitizedProviderErrorCode,
+} from "./outlayer-adapter.ts";
+
+export const ALLOWED_JOB_FAILURE_CLASSIFICATIONS = [
+  "POST_DISPATCH_AMBIGUOUS",
+  "BAD_REQUEST",
+  "AUTHENTICATION_FAILED",
+  "RESOURCE_NOT_FOUND",
+  "RATE_LIMITED",
+  "UPSTREAM_UNAVAILABLE",
+  "GATEWAY_TIMEOUT",
+  "NETWORK_ERROR",
+  "CORRUPTED_RESPONSE",
+  "UNSUPPORTED_CHAIN",
+  "CORRELATION_ERROR",
+  "INVALID_ADDRESS",
+  "POLICY_VERIFICATION_FAILED",
+  "INCOMPLETE_PROVISIONING",
+] as const;
+
+export type JobFailureClassification =
+  (typeof ALLOWED_JOB_FAILURE_CLASSIFICATIONS)[number];
+
+export type AllowlistedProviderEndpoint =
+  "/register" | "/wallet/v1/address" | "/wallet/v1/policy";
+
+const ALLOWED_PROVIDER_ENDPOINTS = new Set<AllowlistedProviderEndpoint>([
+  "/register",
+  "/wallet/v1/address",
+  "/wallet/v1/policy",
+]);
+
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export interface SafeProviderErrorMetadata {
+  readonly code?: SanitizedProviderErrorCode | JobFailureClassification;
+  readonly httpStatus?: number;
+  readonly endpoint?: AllowlistedProviderEndpoint;
+  readonly chain?: OutLayerChain;
+  readonly correlationId?: string;
+}
+
+const ALLOWLISTED_FAILURE_SUMMARIES: Readonly<
+  Record<JobFailureClassification, string>
+> = Object.freeze({
+  POST_DISPATCH_AMBIGUOUS:
+    "Ambiguous provider outcome after external dispatch; quarantined for reconciliation.",
+  BAD_REQUEST: "Provider rejected request with HTTP 400 category error.",
+  AUTHENTICATION_FAILED: "Provider rejected authentication credentials.",
+  RESOURCE_NOT_FOUND: "Requested provider resource was not found.",
+  RATE_LIMITED: "Provider rate limit exceeded.",
+  UPSTREAM_UNAVAILABLE: "Provider service temporarily unavailable.",
+  GATEWAY_TIMEOUT: "Provider gateway timed out.",
+  NETWORK_ERROR: "Provider network communication failed.",
+  CORRUPTED_RESPONSE: "Provider returned malformed or schema-invalid response.",
+  UNSUPPORTED_CHAIN: "Requested blockchain network is unsupported by provider.",
+  CORRELATION_ERROR:
+    "Provider response failed mandatory wallet or chain correlation check.",
+  INVALID_ADDRESS:
+    "Provider returned address that failed network format validation.",
+  POLICY_VERIFICATION_FAILED:
+    "Provider custody policy failed mandatory verification checks.",
+  INCOMPLETE_PROVISIONING:
+    "Wallet provisioning is missing required launch chain addresses or capabilities.",
+});
+
+export function isValidJobFailureClassification(
+  value: unknown,
+): value is JobFailureClassification {
+  return (
+    typeof value === "string" &&
+    (ALLOWED_JOB_FAILURE_CLASSIFICATIONS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Constructs a strictly isolated, non-sensitive JSON error payload for database persistence.
+ * Arbitrary upstream error messages, HTML, bearer tokens, headers, cookies, email addresses,
+ * and database URLs are never read or persisted; only allowlisted codes and validated
+ * correlation metadata (HTTP integer status, allowlisted endpoint/chain, UUID correlationId)
+ * are serialized.
+ */
+export function formatIsolatedProviderFailure(
+  classification: JobFailureClassification,
+  metadata?: SafeProviderErrorMetadata | unknown,
+  fallbackCorrelationId?: string | null,
+): string {
+  if (!isValidJobFailureClassification(classification)) {
+    throw new FlowError(
+      "INVALID_FAILURE_CLASSIFICATION",
+      "Unrecognized or unallowlisted job failure classification.",
+    );
+  }
+
+  let safeCode: JobFailureClassification = classification;
+  let safeHttpStatus: number | undefined;
+  let safeEndpoint: AllowlistedProviderEndpoint | undefined;
+  let safeChain: OutLayerChain | undefined;
+  let safeCorrelationId: string | undefined;
+
+  if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+    const record = metadata as Record<string, unknown>;
+
+    if (isValidJobFailureClassification(record.code)) {
+      safeCode = record.code;
+    }
+
+    if (
+      typeof record.httpStatus === "number" &&
+      Number.isInteger(record.httpStatus) &&
+      record.httpStatus >= 100 &&
+      record.httpStatus <= 599
+    ) {
+      safeHttpStatus = record.httpStatus;
+    }
+
+    if (
+      typeof record.endpoint === "string" &&
+      ALLOWED_PROVIDER_ENDPOINTS.has(
+        record.endpoint as AllowlistedProviderEndpoint,
+      )
+    ) {
+      safeEndpoint = record.endpoint as AllowlistedProviderEndpoint;
+    }
+
+    const parsedChain = outlayerChainSchema.safeParse(record.chain);
+    if (parsedChain.success) {
+      safeChain = parsedChain.data;
+    }
+
+    if (
+      typeof record.correlationId === "string" &&
+      UUID_REGEX.test(record.correlationId.trim())
+    ) {
+      safeCorrelationId = record.correlationId.trim().toLowerCase();
+    }
+  }
+
+  if (
+    !safeCorrelationId &&
+    typeof fallbackCorrelationId === "string" &&
+    UUID_REGEX.test(fallbackCorrelationId.trim())
+  ) {
+    safeCorrelationId = fallbackCorrelationId.trim().toLowerCase();
+  }
+
+  return JSON.stringify({
+    code: safeCode,
+    summary: ALLOWLISTED_FAILURE_SUMMARIES[classification],
+    ...(safeHttpStatus !== undefined ? { httpStatus: safeHttpStatus } : {}),
+    ...(safeEndpoint !== undefined ? { endpoint: safeEndpoint } : {}),
+    ...(safeChain !== undefined ? { chain: safeChain } : {}),
+    ...(safeCorrelationId !== undefined
+      ? { correlationId: safeCorrelationId }
+      : {}),
+  });
+}
 
 export interface ProvisioningJobRow {
   readonly id: string;
@@ -25,7 +195,7 @@ export interface WalletCommitInput {
   readonly keyId: string;
   readonly keyDigest: string;
   readonly handoffUrl?: string;
-  readonly policyState?: "none" | "stored";
+  readonly policyEvidence: ProviderPolicyEvidenceInput;
   readonly addresses: ReadonlyArray<{
     readonly network: string;
     readonly chainId: string;
@@ -52,7 +222,6 @@ export interface PersistRegisteredWalletInput {
   readonly keyId: string;
   readonly keyDigest: string;
   readonly handoffUrl?: string;
-  readonly policyState?: "none" | "stored";
 }
 
 export interface AttachAddressesInput {
@@ -82,7 +251,13 @@ export interface PublicWalletProjection {
   readonly nearAccountId: string;
   readonly status: string;
   readonly policyState: string;
+  readonly controllerAccountId: string | null;
   readonly handoffUrl: string | null;
+  readonly provisioningComplete: boolean;
+  readonly policyVerified: boolean;
+  readonly fundsReady: boolean;
+  readonly canReceiveFunds: boolean;
+  readonly canSignTransfers: boolean;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly addresses: ReadonlyArray<{
@@ -100,14 +275,6 @@ export interface PublicWalletProjection {
     readonly canSignTransfer: boolean;
     readonly broadcastMode: string;
   }>;
-}
-
-function sanitizeErrorMessage(msg: string): string {
-  return msg
-    .replace(/\bwk_[\w-]+/g, "[REDACTED_API_KEY]")
-    .replace(/<[^>]*>/g, "")
-    .trim()
-    .slice(0, 500);
 }
 
 /**
@@ -144,8 +311,9 @@ export async function createProvisioningJob(
  * Atomically claims an execution lease for a provisioning job.
  * Enforces pre-dispatch retry safety: only claims if PENDING or if previous lease
  * expired BEFORE any external network dispatch occurred (dispatched_at IS NULL),
- * OR if the job is already REGISTERED (bearer key durably persisted) and lease expired
- * during address derivation, allowing safe recovery without duplicate registration.
+ * OR if the job is already REGISTERED or PROVISIONED (bearer key durably persisted)
+ * and lease expired during address derivation / policy verification, allowing safe
+ * recovery without duplicate registration.
  */
 export async function claimJobLease(
   db: FlowDb,
@@ -166,7 +334,7 @@ export async function claimJobLease(
       AND (
         (status = 'PENDING')
         OR (status = 'LEASED' AND lease_expires_at <= CURRENT_TIMESTAMP AND dispatched_at IS NULL)
-        OR (status = 'REGISTERED' AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP))
+        OR (status IN ('REGISTERED', 'PROVISIONED') AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP))
       )
     RETURNING
       id, account_id AS "accountId", idempotency_key AS "idempotencyKey",
@@ -210,21 +378,42 @@ export async function recordJobDispatch(
 
 /**
  * Quarantines an ambiguous external outcome into the UNKNOWN state.
- * Sanitizes the error message to prevent arbitrary HTML or sensitive tokens from leaking.
+ * Never persists arbitrary upstream error messages; stores only allowlisted classification
+ * codes, static summaries, and safe correlation metadata.
  */
 export async function recordJobAmbiguous(
   db: FlowDb,
   jobId: string,
   fencingToken: bigint,
-  error: string,
+  metadataOrIgnoredError?: SafeProviderErrorMetadata | unknown,
 ): Promise<void> {
-  const sanitized = sanitizeErrorMessage(error);
+  const rows = await db.$queryRaw<
+    Array<{ fencingToken: bigint; dispatchAttemptId: string | null }>
+  >`
+    SELECT fencing_token AS "fencingToken", dispatch_attempt_id AS "dispatchAttemptId"
+    FROM flow.wallet_provisioning_jobs
+    WHERE id = ${jobId}::uuid
+  `;
+  const existing = rows[0];
+  if (!existing || existing.fencingToken !== fencingToken) {
+    throw new FlowError(
+      "STALE_FENCING_TOKEN",
+      `Job ${jobId} fencing token is stale on ambiguous error recording.`,
+    );
+  }
+
+  const isolatedError = formatIsolatedProviderFailure(
+    "POST_DISPATCH_AMBIGUOUS",
+    metadataOrIgnoredError,
+    existing.dispatchAttemptId,
+  );
+
   const result = await db.$executeRaw`
     UPDATE flow.wallet_provisioning_jobs
     SET
       status = 'UNKNOWN',
       failure_classification = 'POST_DISPATCH_AMBIGUOUS',
-      last_error = ${sanitized},
+      last_error = ${isolatedError},
       lease_holder = NULL,
       lease_expires_at = NULL,
       updated_at = CURRENT_TIMESTAMP
@@ -241,23 +430,61 @@ export async function recordJobAmbiguous(
 }
 
 /**
- * Records an explicit, terminal failure (e.g. 400 bad request, 429 rate limit).
- * Sanitizes the error message.
+ * Records an explicit, terminal failure using allowlisted classifications and safe
+ * correlation metadata. Never persists arbitrary upstream error messages.
  */
 export async function recordJobTerminalFailure(
   db: FlowDb,
   jobId: string,
   fencingToken: bigint,
-  error: string,
-  classification: string,
+  classificationOrIgnoredError: JobFailureClassification | string,
+  metadataOrClassification?:
+    SafeProviderErrorMetadata | JobFailureClassification | string,
+  maybeMetadata?: SafeProviderErrorMetadata,
 ): Promise<void> {
-  const sanitized = sanitizeErrorMessage(error);
+  const classificationCandidate =
+    typeof metadataOrClassification === "string"
+      ? metadataOrClassification
+      : classificationOrIgnoredError;
+  const metadataCandidate =
+    typeof metadataOrClassification === "string"
+      ? maybeMetadata
+      : metadataOrClassification;
+
+  if (!isValidJobFailureClassification(classificationCandidate)) {
+    throw new FlowError(
+      "INVALID_FAILURE_CLASSIFICATION",
+      `Invalid failure classification '${String(classificationCandidate)}'. Must be an allowlisted classification code.`,
+    );
+  }
+
+  const rows = await db.$queryRaw<
+    Array<{ fencingToken: bigint; dispatchAttemptId: string | null }>
+  >`
+    SELECT fencing_token AS "fencingToken", dispatch_attempt_id AS "dispatchAttemptId"
+    FROM flow.wallet_provisioning_jobs
+    WHERE id = ${jobId}::uuid
+  `;
+  const existing = rows[0];
+  if (!existing || existing.fencingToken !== fencingToken) {
+    throw new FlowError(
+      "STALE_FENCING_TOKEN",
+      `Job ${jobId} fencing token is stale on failure recording.`,
+    );
+  }
+
+  const isolatedError = formatIsolatedProviderFailure(
+    classificationCandidate,
+    metadataCandidate,
+    existing.dispatchAttemptId,
+  );
+
   const result = await db.$executeRaw`
     UPDATE flow.wallet_provisioning_jobs
     SET
       status = 'FAILED',
-      failure_classification = ${classification},
-      last_error = ${sanitized},
+      failure_classification = ${classificationCandidate},
+      last_error = ${isolatedError},
       lease_holder = NULL,
       lease_expires_at = NULL,
       updated_at = CURRENT_TIMESTAMP
@@ -277,7 +504,14 @@ export async function recordJobTerminalFailure(
  * Stage 1: Immediately and durably saves the provider wallet ID and encrypted
  * one-time bearer credential in an atomic transaction before any address derivation
  * or policy verification is attempted.
- * Sets wallet status to SETUP_PENDING and advances job to REGISTERED.
+ *
+ * Enforces:
+ * - Job-to-account ownership (`job.account_id === input.accountId`)
+ * - Active fencing token CAS (`job.fencing_token === fencingToken`)
+ * - Valid state transition (`job.status IN ('SUBMITTED', 'LEASED')`)
+ * - Valid NEAR account ID format
+ * - Initial wallet status is strictly `SETUP_PENDING` and `policy_state = 'none'`
+ *   (callers cannot promote policy state at registration).
  */
 export async function persistRegisteredWallet(
   db: FlowDb,
@@ -285,15 +519,69 @@ export async function persistRegisteredWallet(
   fencingToken: bigint,
   input: PersistRegisteredWalletInput,
 ): Promise<string> {
+  if (!isValidNearAddress(input.nearAccountId)) {
+    throw new FlowError(
+      "CUSTODY_INVALID_ADDRESS",
+      "Cannot persist registered wallet: invalid NEAR account ID format.",
+    );
+  }
+
+  if (
+    typeof input.providerWalletId !== "string" ||
+    input.providerWalletId.trim().length === 0
+  ) {
+    throw new FlowError(
+      "CUSTODY_PROVIDER_ERROR",
+      "Cannot persist registered wallet: missing providerWalletId.",
+    );
+  }
+
   return await db.$transaction(async (tx) => {
-    // 1. Verify fencing token and advance job to REGISTERED
+    const jobs = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+        fencingToken: bigint;
+      }>
+    >`
+      SELECT id, account_id AS "accountId", status, fencing_token AS "fencingToken"
+      FROM flow.wallet_provisioning_jobs
+      WHERE id = ${jobId}::uuid
+      FOR UPDATE
+    `;
+
+    const job = jobs[0];
+    if (!job || job.accountId !== input.accountId) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Job ${jobId} does not belong to account ${input.accountId}.`,
+      );
+    }
+
+    if (job.fencingToken !== fencingToken) {
+      throw new FlowError(
+        "STALE_FENCING_TOKEN",
+        `Job ${jobId} fencing token ${fencingToken} is stale.`,
+      );
+    }
+
+    if (job.status !== "SUBMITTED" && job.status !== "LEASED") {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Job ${jobId} cannot transition to REGISTERED from status ${job.status}.`,
+      );
+    }
+
     const jobUpdate = await tx.$executeRaw`
       UPDATE flow.wallet_provisioning_jobs
       SET
         status = 'REGISTERED',
         last_error = NULL,
+        failure_classification = NULL,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ${jobId}::uuid
+        AND account_id = ${input.accountId}::uuid
         AND fencing_token = ${fencingToken}
         AND status IN ('SUBMITTED', 'LEASED')
     `;
@@ -301,20 +589,19 @@ export async function persistRegisteredWallet(
     if (jobUpdate === 0) {
       throw new FlowError(
         "STALE_FENCING_TOKEN",
-        `Job ${jobId} fencing token ${fencingToken} was invalidated or job not in valid registration state.`,
+        `Job ${jobId} fencing token ${fencingToken} was invalidated during registration persistence.`,
       );
     }
 
-    // 2. Insert wallet record with status 'SETUP_PENDING'
     const walletResult = await tx.$queryRaw<{ id: string }[]>`
       INSERT INTO flow.wallets (
         account_id, provider, provider_wallet_id, near_account_id,
         encrypted_credential, key_id, key_digest, status, policy_state,
-        handoff_url, created_at, updated_at
+        controller_account_id, handoff_url, created_at, updated_at
       ) VALUES (
         ${input.accountId}::uuid, 'OUTLAYER', ${input.providerWalletId}, ${input.nearAccountId},
         ${input.encryptedCredential}, ${input.keyId}, ${input.keyDigest}, 'SETUP_PENDING'::flow.wallet_status,
-        ${input.policyState ?? "none"}, ${input.handoffUrl ?? null}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        'none', NULL, ${input.handoffUrl ?? null}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
       )
       RETURNING id
     `;
@@ -332,14 +619,95 @@ export async function persistRegisteredWallet(
 }
 
 /**
- * Stage 2: Attaches derived multi-chain addresses and capabilities idempotently.
+ * Stage 2: Attaches derived multi-chain addresses and baseline capabilities idempotently.
+ *
+ * Enforces:
+ * - Job-to-wallet-to-account relationship (`wallet.account_id === job.account_id`)
+ * - Active fencing token CAS (`job.fencing_token === fencingToken`)
+ * - Valid state transition (`job.status IN ('LEASED', 'REGISTERED', 'PROVISIONED')`
+ *   and `wallet.status IN ('SETUP_PENDING', 'PROVISIONING')`)
+ * - Complete, format-verified addresses and capabilities for all required launch networks
+ *   (`near`, `base`, `solana`) with `canReceive=false` and `canSignTransfer=false`
+ * - Transitions wallet status to `PROVISIONING` (`policy_state='none'`) and job status to `PROVISIONED`.
  */
 export async function attachWalletAddressesAndCapabilities(
   db: FlowDb,
+  jobId: string,
+  fencingToken: bigint,
   walletId: string,
   input: AttachAddressesInput,
 ): Promise<void> {
   await db.$transaction(async (tx) => {
+    const jobs = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+        fencingToken: bigint;
+      }>
+    >`
+      SELECT id, account_id AS "accountId", status, fencing_token AS "fencingToken"
+      FROM flow.wallet_provisioning_jobs
+      WHERE id = ${jobId}::uuid
+      FOR UPDATE
+    `;
+
+    const wallets = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        nearAccountId: string;
+        status: string;
+      }>
+    >`
+      SELECT id, account_id AS "accountId", near_account_id AS "nearAccountId", status::text AS status
+      FROM flow.wallets
+      WHERE id = ${walletId}::uuid
+      FOR UPDATE
+    `;
+
+    const job = jobs[0];
+    const wallet = wallets[0];
+
+    if (!job || !wallet || job.accountId !== wallet.accountId) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Wallet ${walletId} does not belong to the account bound to provisioning job ${jobId}.`,
+      );
+    }
+
+    if (job.fencingToken !== fencingToken) {
+      throw new FlowError(
+        "STALE_FENCING_TOKEN",
+        `Job ${jobId} fencing token ${fencingToken} is stale on address attachment.`,
+      );
+    }
+
+    if (
+      job.status !== "LEASED" &&
+      job.status !== "REGISTERED" &&
+      job.status !== "PROVISIONED"
+    ) {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Cannot attach addresses for job ${jobId} in status ${job.status}.`,
+      );
+    }
+
+    if (wallet.status !== "SETUP_PENDING" && wallet.status !== "PROVISIONING") {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Cannot attach addresses for wallet ${walletId} in status ${wallet.status}.`,
+      );
+    }
+
+    validateRequiredWalletProvisioning({
+      nearAccountId: wallet.nearAccountId,
+      addresses: input.addresses,
+      capabilities: input.capabilities,
+      policyVerified: false,
+    });
+
     for (const addr of input.addresses) {
       await tx.$executeRaw`
         INSERT INTO flow.wallet_addresses (
@@ -363,36 +731,202 @@ export async function attachWalletAddressesAndCapabilities(
           can_read_native_balance, can_read_intents_balance, can_sign_transfer,
           broadcast_mode, can_rotate_credentials, verified_at
         ) VALUES (
-          ${walletId}::uuid, ${cap.network}, ${cap.canDeriveAddress}, ${cap.canReceive},
-          ${cap.canReadNativeBalance}, ${cap.canReadIntentsBalance}, ${cap.canSignTransfer},
+          ${walletId}::uuid, ${cap.network}, ${cap.canDeriveAddress}, false,
+          ${cap.canReadNativeBalance}, ${cap.canReadIntentsBalance}, false,
           ${cap.broadcastMode}, ${cap.canRotateCredentials}, CURRENT_TIMESTAMP
         )
         ON CONFLICT (wallet_id, network) DO UPDATE
         SET
           can_derive_address = EXCLUDED.can_derive_address,
-          can_receive = EXCLUDED.can_receive,
+          can_receive = false,
           can_read_native_balance = EXCLUDED.can_read_native_balance,
           can_read_intents_balance = EXCLUDED.can_read_intents_balance,
-          can_sign_transfer = EXCLUDED.can_sign_transfer,
+          can_sign_transfer = false,
           broadcast_mode = EXCLUDED.broadcast_mode,
           can_rotate_credentials = EXCLUDED.can_rotate_credentials,
           verified_at = CURRENT_TIMESTAMP
       `;
     }
+
+    await tx.$executeRaw`
+      UPDATE flow.wallets
+      SET
+        status = 'PROVISIONING'::flow.wallet_status,
+        policy_state = 'none',
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${walletId}::uuid
+        AND account_id = ${job.accountId}::uuid
+    `;
+
+    await tx.$executeRaw`
+      UPDATE flow.wallet_provisioning_jobs
+      SET
+        status = 'PROVISIONED',
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${jobId}::uuid
+        AND account_id = ${job.accountId}::uuid
+        AND fencing_token = ${fencingToken}
+    `;
   });
 }
 
 /**
- * Stage 3: Evaluates policy/address readiness and transitions wallet to ACTIVE status.
+ * Stage 3: Validates job-to-wallet-to-account binding, active fencing token,
+ * state transition, persisted multi-chain addresses/capabilities, and provider-backed
+ * custody policy evidence before transitioning the wallet to `ACTIVE` (`policy_state='stored'`).
+ *
+ * NOTE: `ACTIVE` means custodial provisioning and policy verification are complete.
+ * Live fund movement and fund readiness remain governed by `evaluateWalletFundReadiness()`
+ * and are unconditionally blocked while `FLOW_EXECUTION=disabled`.
  */
 export async function activateWalletIfReady(
   db: FlowDb,
   jobId: string,
   fencingToken: bigint,
   walletId: string,
-  policyState = "none",
+  policyEvidence: ProviderPolicyEvidenceInput,
 ): Promise<void> {
   await db.$transaction(async (tx) => {
+    const jobs = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+        fencingToken: bigint;
+      }>
+    >`
+      SELECT id, account_id AS "accountId", status, fencing_token AS "fencingToken"
+      FROM flow.wallet_provisioning_jobs
+      WHERE id = ${jobId}::uuid
+      FOR UPDATE
+    `;
+
+    const wallets = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        providerWalletId: string;
+        nearAccountId: string;
+        status: string;
+      }>
+    >`
+      SELECT
+        id, account_id AS "accountId", provider_wallet_id AS "providerWalletId",
+        near_account_id AS "nearAccountId", status::text AS status
+      FROM flow.wallets
+      WHERE id = ${walletId}::uuid
+      FOR UPDATE
+    `;
+
+    const job = jobs[0];
+    const wallet = wallets[0];
+
+    if (!job || !wallet || job.accountId !== wallet.accountId) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Cannot activate wallet ${walletId}: job ${jobId} does not belong to the same account.`,
+      );
+    }
+
+    if (job.fencingToken !== fencingToken) {
+      throw new FlowError(
+        "STALE_FENCING_TOKEN",
+        `Job ${jobId} fencing token ${fencingToken} was invalidated before activation.`,
+      );
+    }
+
+    if (
+      job.status !== "LEASED" &&
+      job.status !== "REGISTERED" &&
+      job.status !== "PROVISIONED" &&
+      job.status !== "POLICY_VERIFYING"
+    ) {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Job ${jobId} in status ${job.status} cannot transition to ACTIVE.`,
+      );
+    }
+
+    if (wallet.status !== "SETUP_PENDING" && wallet.status !== "PROVISIONING") {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Wallet ${walletId} in status ${wallet.status} cannot transition to ACTIVE.`,
+      );
+    }
+
+    // 1. Verify provider-backed custody policy evidence (rejects caller-supplied strings)
+    const verifiedPolicy = verifyCustodyPolicyEvidence(
+      policyEvidence,
+      wallet.providerWalletId,
+    );
+
+    // 2. Load and validate persisted multi-chain addresses and capabilities
+    const dbAddresses = await tx.$queryRaw<
+      Array<{
+        network: string;
+        chainId: string;
+        address: string;
+        publicKey: string;
+      }>
+    >`
+      SELECT network, chain_id AS "chainId", address, public_key AS "publicKey"
+      FROM flow.wallet_addresses
+      WHERE wallet_id = ${walletId}::uuid
+    `;
+
+    const dbCapabilities = await tx.$queryRaw<
+      Array<{
+        network: string;
+        canDeriveAddress: boolean;
+        canReceive: boolean;
+        canSignTransfer: boolean;
+        broadcastMode: string;
+      }>
+    >`
+      SELECT
+        network, can_derive_address AS "canDeriveAddress", can_receive AS "canReceive",
+        can_sign_transfer AS "canSignTransfer", broadcast_mode AS "broadcastMode"
+      FROM flow.wallet_capabilities
+      WHERE wallet_id = ${walletId}::uuid
+    `;
+
+    validateRequiredWalletProvisioning({
+      nearAccountId: wallet.nearAccountId,
+      addresses: dbAddresses,
+      capabilities: dbCapabilities,
+      policyVerified: true,
+    });
+
+    // 3. Grant receive capability now that policy is verified, keeping can_sign_transfer strictly false
+    await tx.$executeRaw`
+      UPDATE flow.wallet_capabilities
+      SET
+        can_receive = true,
+        can_sign_transfer = false,
+        verified_at = CURRENT_TIMESTAMP
+      WHERE wallet_id = ${walletId}::uuid
+    `;
+
+    // 4. Transition wallet to ACTIVE with verified policy_state='stored' and controller_account_id
+    const walletUpdate = await tx.$executeRaw`
+      UPDATE flow.wallets
+      SET
+        status = 'ACTIVE'::flow.wallet_status,
+        policy_state = ${verifiedPolicy.policyState},
+        controller_account_id = ${verifiedPolicy.controllerAccountId},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${walletId}::uuid
+        AND account_id = ${job.accountId}::uuid
+    `;
+
+    if (walletUpdate === 0) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Wallet ${walletId} could not be activated for account ${job.accountId}.`,
+      );
+    }
+
+    // 5. Transition job to ACTIVE and release lease
     const jobUpdate = await tx.$executeRaw`
       UPDATE flow.wallet_provisioning_jobs
       SET
@@ -400,40 +934,27 @@ export async function activateWalletIfReady(
         lease_holder = NULL,
         lease_expires_at = NULL,
         last_error = NULL,
+        failure_classification = NULL,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ${jobId}::uuid
+        AND account_id = ${job.accountId}::uuid
         AND fencing_token = ${fencingToken}
-        AND status IN ('LEASED', 'REGISTERED')
     `;
 
     if (jobUpdate === 0) {
       throw new FlowError(
         "STALE_FENCING_TOKEN",
-        `Job ${jobId} fencing token ${fencingToken} was invalidated before activation.`,
-      );
-    }
-
-    const walletUpdate = await tx.$executeRaw`
-      UPDATE flow.wallets
-      SET
-        status = 'ACTIVE'::flow.wallet_status,
-        policy_state = ${policyState},
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ${walletId}::uuid
-    `;
-
-    if (walletUpdate === 0) {
-      throw new FlowError(
-        "DATABASE_UNAVAILABLE",
-        `Wallet ${walletId} not found for activation.`,
+        `Job ${jobId} fencing token ${fencingToken} was invalidated during activation.`,
       );
     }
   });
 }
 
 /**
- * Commits successful wallet registration, encrypted credentials, derived addresses,
- * and capabilities in a single short transaction, verifying the fencing token.
+ * Commits complete wallet registration, encrypted credentials, derived addresses,
+ * capabilities, and verified custody policy evidence in a single atomic transaction.
+ * Enforces the exact same account-binding, fencing-token, address/capability, and
+ * provider policy evidence invariants as the multi-stage pipeline.
  */
 export async function commitJobSuccess(
   db: FlowDb,
@@ -442,7 +963,59 @@ export async function commitJobSuccess(
   input: WalletCommitInput,
 ): Promise<string> {
   return await db.$transaction(async (tx) => {
-    // 1. Verify fencing token & update job status
+    const jobs = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+        fencingToken: bigint;
+      }>
+    >`
+      SELECT id, account_id AS "accountId", status, fencing_token AS "fencingToken"
+      FROM flow.wallet_provisioning_jobs
+      WHERE id = ${jobId}::uuid
+      FOR UPDATE
+    `;
+
+    const job = jobs[0];
+    if (!job || job.accountId !== input.accountId) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Job ${jobId} does not belong to account ${input.accountId}.`,
+      );
+    }
+
+    if (job.fencingToken !== fencingToken) {
+      throw new FlowError(
+        "STALE_FENCING_TOKEN",
+        `Job ${jobId} fencing token ${fencingToken} was invalidated before commit.`,
+      );
+    }
+
+    if (
+      job.status !== "SUBMITTED" &&
+      job.status !== "LEASED" &&
+      job.status !== "REGISTERED" &&
+      job.status !== "PROVISIONED"
+    ) {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Job ${jobId} in status ${job.status} cannot commit wallet provisioning.`,
+      );
+    }
+
+    const verifiedPolicy = verifyCustodyPolicyEvidence(
+      input.policyEvidence,
+      input.providerWalletId,
+    );
+
+    validateRequiredWalletProvisioning({
+      nearAccountId: input.nearAccountId,
+      addresses: input.addresses,
+      capabilities: input.capabilities,
+      policyVerified: true,
+    });
+
     const jobUpdate = await tx.$executeRaw`
       UPDATE flow.wallet_provisioning_jobs
       SET
@@ -450,8 +1023,10 @@ export async function commitJobSuccess(
         lease_holder = NULL,
         lease_expires_at = NULL,
         last_error = NULL,
+        failure_classification = NULL,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ${jobId}::uuid
+        AND account_id = ${input.accountId}::uuid
         AND fencing_token = ${fencingToken}
     `;
 
@@ -462,16 +1037,16 @@ export async function commitJobSuccess(
       );
     }
 
-    // 2. Insert wallet record
     const walletResult = await tx.$queryRaw<{ id: string }[]>`
       INSERT INTO flow.wallets (
         account_id, provider, provider_wallet_id, near_account_id,
         encrypted_credential, key_id, key_digest, status, policy_state,
-        handoff_url, created_at, updated_at
+        controller_account_id, handoff_url, created_at, updated_at
       ) VALUES (
         ${input.accountId}::uuid, 'OUTLAYER', ${input.providerWalletId}, ${input.nearAccountId},
         ${input.encryptedCredential}, ${input.keyId}, ${input.keyDigest}, 'ACTIVE'::flow.wallet_status,
-        ${input.policyState ?? "none"}, ${input.handoffUrl ?? null}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        ${verifiedPolicy.policyState}, ${verifiedPolicy.controllerAccountId}, ${input.handoffUrl ?? null},
+        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
       )
       RETURNING id
     `;
@@ -484,7 +1059,6 @@ export async function commitJobSuccess(
       );
     const walletId = wallet.id;
 
-    // 3. Insert multi-chain addresses
     for (const addr of input.addresses) {
       await tx.$executeRaw`
         INSERT INTO flow.wallet_addresses (
@@ -495,7 +1069,6 @@ export async function commitJobSuccess(
       `;
     }
 
-    // 4. Insert network capabilities
     for (const cap of input.capabilities) {
       await tx.$executeRaw`
         INSERT INTO flow.wallet_capabilities (
@@ -503,8 +1076,8 @@ export async function commitJobSuccess(
           can_read_native_balance, can_read_intents_balance, can_sign_transfer,
           broadcast_mode, can_rotate_credentials, verified_at
         ) VALUES (
-          ${walletId}::uuid, ${cap.network}, ${cap.canDeriveAddress}, ${cap.canReceive},
-          ${cap.canReadNativeBalance}, ${cap.canReadIntentsBalance}, ${cap.canSignTransfer},
+          ${walletId}::uuid, ${cap.network}, ${cap.canDeriveAddress}, true,
+          ${cap.canReadNativeBalance}, ${cap.canReadIntentsBalance}, false,
           ${cap.broadcastMode}, ${cap.canRotateCredentials}, CURRENT_TIMESTAMP
         )
       `;
@@ -516,35 +1089,59 @@ export async function commitJobSuccess(
 
 /**
  * Reconciles expired leases after worker crashes.
- * Quarantines post-dispatch SUBMITTED/LEASED jobs into UNKNOWN to prevent duplicate registrations.
- * For REGISTERED jobs (where bearer key is already durably persisted), clears the expired lease
- * so a recovery worker can re-claim and complete address derivation without duplicate registration.
+ * Quarantines post-dispatch SUBMITTED/LEASED jobs (where no wallet record exists yet)
+ * into UNKNOWN with an isolated structured failure record to prevent duplicate registrations.
+ * For REGISTERED or PROVISIONED jobs (where the bearer key is already durably persisted),
+ * clears the expired lease so a recovery worker can re-claim and complete provisioning
+ * without registering another wallet.
  */
 export async function reconcileCrashedJobs(db: FlowDb): Promise<number> {
-  // 1. Quarantine ambiguous post-dispatch registration attempts
+  const crashedError = formatIsolatedProviderFailure(
+    "POST_DISPATCH_AMBIGUOUS",
+    {
+      code: "POST_DISPATCH_AMBIGUOUS",
+      endpoint: "/register",
+    },
+  );
+
+  // 1. Quarantine ambiguous post-dispatch registration attempts where wallet was not yet persisted
   const quarantined = await db.$executeRaw`
-    UPDATE flow.wallet_provisioning_jobs
+    UPDATE flow.wallet_provisioning_jobs j
     SET
       status = 'UNKNOWN',
       failure_classification = 'POST_DISPATCH_AMBIGUOUS',
-      last_error = 'Worker crashed or lease expired after external dispatch',
+      last_error = ${crashedError},
       lease_holder = NULL,
       lease_expires_at = NULL,
       updated_at = CURRENT_TIMESTAMP
-    WHERE status IN ('SUBMITTED', 'LEASED')
-      AND dispatched_at IS NOT NULL
-      AND lease_expires_at <= CURRENT_TIMESTAMP
+    WHERE j.status IN ('SUBMITTED', 'LEASED')
+      AND j.dispatched_at IS NOT NULL
+      AND j.lease_expires_at <= CURRENT_TIMESTAMP
+      AND NOT EXISTS (
+        SELECT 1 FROM flow.wallets w WHERE w.account_id = j.account_id
+      )
   `;
 
-  // 2. Clear expired leases on REGISTERED jobs to allow safe resumption of address derivation
+  // 2. If a job was in LEASED (re-leased after REGISTERED/PROVISIONED) or REGISTERED/PROVISIONED
+  // and a wallet already exists for the account, restore status to REGISTERED/PROVISIONED and clear lease
   await db.$executeRaw`
-    UPDATE flow.wallet_provisioning_jobs
+    UPDATE flow.wallet_provisioning_jobs j
     SET
+      status = CASE
+        WHEN EXISTS (
+          SELECT 1 FROM flow.wallets w
+          WHERE w.account_id = j.account_id AND w.status = 'PROVISIONING'::flow.wallet_status
+        ) THEN 'PROVISIONED'
+        ELSE 'REGISTERED'
+      END,
       lease_holder = NULL,
       lease_expires_at = NULL,
       updated_at = CURRENT_TIMESTAMP
-    WHERE status = 'REGISTERED'
-      AND lease_expires_at <= CURRENT_TIMESTAMP
+    WHERE j.status IN ('LEASED', 'REGISTERED', 'PROVISIONED')
+      AND j.lease_expires_at <= CURRENT_TIMESTAMP
+      AND EXISTS (
+        SELECT 1 FROM flow.wallets w WHERE w.account_id = j.account_id
+      )
   `;
 
   return quarantined;
@@ -552,8 +1149,10 @@ export async function reconcileCrashedJobs(db: FlowDb): Promise<number> {
 
 /**
  * Queries a user-facing public wallet projection.
- * Strictly projects only public fields; encrypted_credential, key_id, and key_digest
+ * Strictly projects only public fields; `encrypted_credential`, `key_id`, and `key_digest`
  * are completely omitted at query time to preserve credential isolation.
+ * Explicitly separates `provisioningComplete` (`status === 'ACTIVE'`) from `fundsReady`
+ * (which is unconditionally `false` while `FLOW_EXECUTION=disabled`).
  */
 export async function getAccountWalletPublicProjection(
   db: FlowDb,
@@ -568,6 +1167,7 @@ export async function getAccountWalletPublicProjection(
       nearAccountId: string;
       status: string;
       policyState: string;
+      controllerAccountId: string | null;
       handoffUrl: string | null;
       createdAt: Date;
       updatedAt: Date;
@@ -575,7 +1175,8 @@ export async function getAccountWalletPublicProjection(
   >`
     SELECT
       id, account_id AS "accountId", provider, provider_wallet_id AS "providerWalletId",
-      near_account_id AS "nearAccountId", status, policy_state AS "policyState",
+      near_account_id AS "nearAccountId", status::text AS status, policy_state AS "policyState",
+      controller_account_id AS "controllerAccountId",
       handoff_url AS "handoffUrl", created_at AS "createdAt", updated_at AS "updatedAt"
     FROM flow.wallets
     WHERE account_id = ${accountId}::uuid
@@ -616,8 +1217,38 @@ export async function getAccountWalletPublicProjection(
     WHERE wallet_id = ${wallet.id}::uuid
   `;
 
+  const policyState: OutLayerPolicyState = isValidPolicyState(
+    wallet.policyState,
+  )
+    ? wallet.policyState
+    : "unverified";
+
+  const readiness = evaluateWalletFundReadiness({
+    walletStatus: wallet.status,
+    policySummary: {
+      walletId: wallet.providerWalletId,
+      controller: wallet.controllerAccountId ?? undefined,
+      state: policyState,
+      frozen: wallet.status === "FROZEN",
+      allowsFinancialExecution: false,
+    },
+    derivedAddresses: addresses,
+    capabilities,
+    globalExecutionDisabled: true,
+  });
+
+  const policyVerified =
+    policyState === "stored" &&
+    typeof wallet.controllerAccountId === "string" &&
+    isValidNearAddress(wallet.controllerAccountId);
+
   return {
     ...wallet,
+    provisioningComplete: wallet.status === "ACTIVE" && policyVerified,
+    policyVerified,
+    fundsReady: readiness.isReady,
+    canReceiveFunds: readiness.canReceiveFunds,
+    canSignTransfers: readiness.canSignTransfers,
     addresses,
     capabilities,
   };

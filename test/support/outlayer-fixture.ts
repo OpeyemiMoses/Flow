@@ -47,8 +47,11 @@ export async function createOutLayerMockServer(
         return;
       }
 
-      if (options.forceStatus && options.forceStatus !== 200) {
-        res.writeHead(options.forceStatus, {
+      if (
+        (options.forceStatus && options.forceStatus !== 200) ||
+        options.rawErrorBody !== undefined
+      ) {
+        res.writeHead(options.forceStatus ?? 200, {
           "Content-Type": options.rawErrorContentType ?? "application/json",
         });
         res.end(

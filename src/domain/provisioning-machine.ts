@@ -71,13 +71,13 @@ export function reduceProvisioningState(
   switch (event.type) {
     case "ACQUIRE_LEASE": {
       // Lease can only be acquired if PENDING, or if an existing lease expired before dispatch,
-      // or if resuming address derivation on an already REGISTERED wallet whose lease expired
+      // or if resuming address derivation / policy verification on an already REGISTERED or PROVISIONED wallet whose lease expired
       const canLease =
         state.status === "PENDING" ||
         (state.status === "LEASED" &&
           state.leaseExpiresAt &&
           state.leaseExpiresAt.getTime() <= event.now.getTime()) ||
-        (state.status === "REGISTERED" &&
+        ((state.status === "REGISTERED" || state.status === "PROVISIONED") &&
           state.leaseExpiresAt &&
           state.leaseExpiresAt.getTime() <= event.now.getTime());
 
@@ -127,10 +127,10 @@ export function reduceProvisioningState(
     }
 
     case "COMPLETE_ADDRESS_DERIVATION": {
-      if (state.status !== "REGISTERED") {
+      if (state.status !== "REGISTERED" && state.status !== "LEASED") {
         throw new FlowError(
           "INVALID_STATE_TRANSITION",
-          `Cannot complete address derivation in status ${state.status}. Must be REGISTERED.`,
+          `Cannot complete address derivation in status ${state.status}. Must be REGISTERED or LEASED.`,
         );
       }
       return {

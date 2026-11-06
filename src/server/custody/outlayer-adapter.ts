@@ -22,62 +22,91 @@ export type SanitizedProviderErrorCode =
 export interface SanitizedProviderError {
   readonly classification: SanitizedProviderErrorCode;
   readonly safeMessage: string;
+  readonly httpStatus?: number;
+  readonly endpoint?: "/register" | "/wallet/v1/address" | "/wallet/v1/policy";
+  readonly chain?: OutLayerChain;
 }
 
 /**
- * Maps raw HTTP status codes and error contexts to sanitized, allowlisted classifications.
- * Prevents arbitrary provider response bodies (HTML, stack traces, sensitive tokens)
- * from entering application logs or persisted database records.
+ * Maps raw HTTP status codes and allowlisted error contexts to sanitized, allowlisted classifications.
+ * Prevents arbitrary provider response bodies (HTML, stack traces, headers, cookies, emails,
+ * database URLs, or bearer tokens) from entering application logs or persisted database records.
  */
 export function classifyProviderError(
   status: number | null,
-  context?: string,
+  context?: {
+    readonly endpoint?:
+      "/register" | "/wallet/v1/address" | "/wallet/v1/policy";
+    readonly chain?: OutLayerChain;
+  },
 ): SanitizedProviderError {
-  if (status === 429) {
+  const safeStatus =
+    typeof status === "number" &&
+    Number.isInteger(status) &&
+    status >= 100 &&
+    status <= 599
+      ? status
+      : undefined;
+
+  const metadata = {
+    ...(safeStatus !== undefined ? { httpStatus: safeStatus } : {}),
+    ...(context?.endpoint !== undefined ? { endpoint: context.endpoint } : {}),
+    ...(context?.chain !== undefined ? { chain: context.chain } : {}),
+  };
+
+  if (safeStatus === 429) {
     return {
       classification: "RATE_LIMITED",
       safeMessage: "OutLayer rate limit exceeded (30 req/min).",
+      ...metadata,
     };
   }
-  if (status === 400) {
-    if (context && /bitcoin/i.test(context)) {
+  if (safeStatus === 400) {
+    if (context?.chain === "bitcoin") {
       return {
         classification: "UNSUPPORTED_CHAIN",
         safeMessage: "Bitcoin is unsupported by OutLayer wallet v1.",
+        ...metadata,
       };
     }
     return {
       classification: "BAD_REQUEST",
       safeMessage: "OutLayer rejected the request as invalid (HTTP 400).",
+      ...metadata,
     };
   }
-  if (status === 401 || status === 403) {
+  if (safeStatus === 401 || safeStatus === 403) {
     return {
       classification: "AUTHENTICATION_FAILED",
       safeMessage: "OutLayer authentication failed or credentials rejected.",
+      ...metadata,
     };
   }
-  if (status === 404) {
+  if (safeStatus === 404) {
     return {
       classification: "RESOURCE_NOT_FOUND",
       safeMessage: "Requested OutLayer resource was not found (HTTP 404).",
+      ...metadata,
     };
   }
-  if (status === 504) {
+  if (safeStatus === 504) {
     return {
       classification: "GATEWAY_TIMEOUT",
       safeMessage: "OutLayer upstream gateway timed out (HTTP 504).",
+      ...metadata,
     };
   }
-  if (status && status >= 500 && status < 600) {
+  if (safeStatus && safeStatus >= 500 && safeStatus < 600) {
     return {
       classification: "UPSTREAM_UNAVAILABLE",
-      safeMessage: `OutLayer service temporarily unavailable (HTTP ${status}).`,
+      safeMessage: `OutLayer service temporarily unavailable (HTTP ${safeStatus}).`,
+      ...metadata,
     };
   }
   return {
     classification: "NETWORK_ERROR",
     safeMessage: "OutLayer communication failed due to a network error.",
+    ...metadata,
   };
 }
 
@@ -104,16 +133,16 @@ const registerResponseSchema = z.object({
 });
 
 const addressResponseSchema = z.object({
-  wallet_id: z.string(),
+  wallet_id: z.string().uuid(),
   chain: outlayerChainSchema,
-  address: z.string().min(1),
-  public_key: z.string().min(1),
+  address: z.string().min(1).max(128),
+  public_key: z.string().min(1).max(256),
   asset_account_id: z.string().nullable().optional(),
   executor_account_id: z.string().optional(),
 });
 
 const policyResponseSchema = z.object({
-  wallet_id: z.string(),
+  wallet_id: z.string().uuid(),
   controller: z.string().optional(),
   frozen: z.boolean(),
   policy: z.enum(["none", "stored"]).optional(),
@@ -133,6 +162,13 @@ export interface OutLayerRegisterInput {
   readonly vaultId?: string;
 }
 
+const ALLOWED_REGISTER_FIELDS = new Set([
+  "wallet_id",
+  "api_key",
+  "near_account_id",
+  "handoff_url",
+]);
+
 export class OutLayerAdapter {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -140,10 +176,6 @@ export class OutLayerAdapter {
   constructor(baseUrl = "https://api.outlayer.ai", timeoutMs = 5_000) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.timeoutMs = timeoutMs;
-  }
-
-  private sanitizeMessage(message: string): string {
-    return message.replace(/\bwk_[\w-]+/g, "[REDACTED_API_KEY]");
   }
 
   private async fetchWithTimeout(
@@ -164,10 +196,10 @@ export class OutLayerAdapter {
           `OutLayer request timed out after ${this.timeoutMs}ms.`,
         );
       }
-      const raw = error instanceof Error ? error.message : "Network error";
+      // Never propagate raw upstream network error messages, headers, URLs, or bodies
       throw new FlowError(
         "CUSTODY_PROVIDER_NETWORK_ERROR",
-        this.sanitizeMessage(raw),
+        "OutLayer communication failed due to an upstream network error.",
       );
     } finally {
       clearTimeout(timer);
@@ -209,7 +241,9 @@ export class OutLayerAdapter {
     }
 
     if (!response.ok) {
-      const sanitized = classifyProviderError(response.status);
+      const sanitized = classifyProviderError(response.status, {
+        endpoint: "/register",
+      });
       throw new FlowError(
         response.status >= 500
           ? "CUSTODY_PROVIDER_UNAVAILABLE"
@@ -227,8 +261,11 @@ export class OutLayerAdapter {
 
     const parsed = registerResponseSchema.safeParse(json);
     if (!parsed.success) {
+      const safeFields = parsed.error.issues
+        .map((i) => String(i.path[0] ?? "root"))
+        .filter((f) => ALLOWED_REGISTER_FIELDS.has(f) || f === "root");
       log("error", "outlayer_register_schema_mismatch", {
-        errors: parsed.error.issues.map((i) => i.path.join(".")),
+        fields: Array.from(new Set(safeFields)),
       });
       throw new FlowError(
         "CUSTODY_PROVIDER_ERROR",
@@ -256,7 +293,15 @@ export class OutLayerAdapter {
     chain: OutLayerChain,
     expectedWalletId?: string,
   ): Promise<OutLayerAddressResult> {
-    if (chain === "bitcoin") {
+    const validChain = outlayerChainSchema.safeParse(chain);
+    if (!validChain.success) {
+      throw new FlowError(
+        "UNSUPPORTED_CHAIN",
+        "Requested blockchain network is unsupported.",
+      );
+    }
+
+    if (validChain.data === "bitcoin") {
       throw new FlowError(
         "UNSUPPORTED_CHAIN",
         "Bitcoin is unsupported by OutLayer wallet v1.",
@@ -264,7 +309,7 @@ export class OutLayerAdapter {
     }
 
     const response = await this.fetchWithTimeout(
-      `/wallet/v1/address?chain=${encodeURIComponent(chain)}`,
+      `/wallet/v1/address?chain=${encodeURIComponent(validChain.data)}`,
       {
         method: "GET",
         headers: {
@@ -274,7 +319,10 @@ export class OutLayerAdapter {
     );
 
     if (!response.ok) {
-      const sanitized = classifyProviderError(response.status, chain);
+      const sanitized = classifyProviderError(response.status, {
+        endpoint: "/wallet/v1/address",
+        chain: validChain.data,
+      });
       throw new FlowError(
         sanitized.classification === "UNSUPPORTED_CHAIN"
           ? "UNSUPPORTED_CHAIN"
@@ -294,7 +342,7 @@ export class OutLayerAdapter {
     if (!parsed.success) {
       throw new FlowError(
         "CUSTODY_PROVIDER_ERROR",
-        `OutLayer address schema mismatch for chain ${chain}.`,
+        `OutLayer address schema mismatch for chain ${validChain.data}.`,
       );
     }
 
@@ -302,24 +350,27 @@ export class OutLayerAdapter {
     if (expectedWalletId && parsed.data.wallet_id !== expectedWalletId) {
       throw new FlowError(
         "CUSTODY_PROVIDER_CORRELATION_ERROR",
-        `Provider returned wallet ID mismatch: expected ${expectedWalletId}, got ${parsed.data.wallet_id}.`,
+        `Provider returned wallet ID mismatch for chain ${validChain.data}.`,
       );
     }
 
     // 2. Mandatory correlation check: chain must match requested chain
-    if (parsed.data.chain !== chain) {
+    if (parsed.data.chain !== validChain.data) {
       throw new FlowError(
         "CUSTODY_PROVIDER_CORRELATION_ERROR",
-        `Provider returned chain mismatch: requested ${chain}, got ${parsed.data.chain}.`,
+        `Provider returned chain mismatch for requested chain ${validChain.data}.`,
       );
     }
 
     // 3. Network-specific address validation
-    const validation = validateAddressForNetwork(chain, parsed.data.address);
+    const validation = validateAddressForNetwork(
+      validChain.data,
+      parsed.data.address,
+    );
     if (!validation.valid) {
       throw new FlowError(
         "CUSTODY_INVALID_ADDRESS",
-        `Provider returned invalid address format for ${chain}: ${validation.error}`,
+        `Provider returned invalid address format for ${validChain.data}.`,
       );
     }
 
@@ -341,7 +392,9 @@ export class OutLayerAdapter {
     });
 
     if (!response.ok) {
-      const sanitized = classifyProviderError(response.status);
+      const sanitized = classifyProviderError(response.status, {
+        endpoint: "/wallet/v1/policy",
+      });
       throw new FlowError("CUSTODY_PROVIDER_ERROR", sanitized.safeMessage);
     }
 
@@ -363,7 +416,7 @@ export class OutLayerAdapter {
     if (expectedWalletId && parsed.data.wallet_id !== expectedWalletId) {
       throw new FlowError(
         "CUSTODY_PROVIDER_CORRELATION_ERROR",
-        `Provider returned wallet ID mismatch on policy query: expected ${expectedWalletId}, got ${parsed.data.wallet_id}.`,
+        "Provider returned wallet ID mismatch on policy query.",
       );
     }
 
