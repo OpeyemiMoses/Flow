@@ -34,17 +34,25 @@ jobs:
         run: |
           admin_password="$(openssl rand -hex 24)"
           local_app_password="$(openssl rand -hex 24)"
+          local_worker_password="$(openssl rand -hex 24)"
+          local_operator_password="$(openssl rand -hex 24)"
           local_migrator_password="$(openssl rand -hex 24)"
           test_app_password="$(openssl rand -hex 24)"
+          test_worker_password="$(openssl rand -hex 24)"
+          test_operator_password="$(openssl rand -hex 24)"
           test_migrator_password="$(openssl rand -hex 24)"
-          printf '::add-mask::%s\n' "$admin_password" "$local_app_password" "$local_migrator_password" "$test_app_password" "$test_migrator_password"
+          printf '::add-mask::%s\n' "$admin_password" "$local_app_password" "$local_worker_password" "$local_operator_password" "$local_migrator_password" "$test_app_password" "$test_worker_password" "$test_operator_password" "$test_migrator_password"
           export FLOW_POSTGRES_PORT=55432
           export FLOW_ENV=test FLOW_EXECUTION=disabled
           compose_test_db() {
             FLOW_POSTGRES_ADMIN_PASSWORD="$admin_password" \
             FLOW_LOCAL_APP_PASSWORD="$local_app_password" \
+            FLOW_LOCAL_WORKER_PASSWORD="$local_worker_password" \
+            FLOW_LOCAL_OPERATOR_PASSWORD="$local_operator_password" \
             FLOW_LOCAL_MIGRATOR_PASSWORD="$local_migrator_password" \
             FLOW_TEST_APP_PASSWORD="$test_app_password" \
+            FLOW_TEST_WORKER_PASSWORD="$test_worker_password" \
+            FLOW_TEST_OPERATOR_PASSWORD="$test_operator_password" \
             FLOW_TEST_MIGRATOR_PASSWORD="$test_migrator_password" \
               docker compose --env-file /dev/null "$@"
           }
@@ -59,6 +67,8 @@ jobs:
           )
           (
             export FLOW_DATABASE_URL="postgresql://flow_test_app:$test_app_password@127.0.0.1:$FLOW_POSTGRES_PORT/flow_test"
+            export FLOW_WORKER_DATABASE_URL="postgresql://flow_test_worker:$test_worker_password@127.0.0.1:$FLOW_POSTGRES_PORT/flow_test"
+            export FLOW_OPERATOR_DATABASE_URL="postgresql://flow_test_operator:$test_operator_password@127.0.0.1:$FLOW_POSTGRES_PORT/flow_test"
             npm run db:check
             npm run test:db
             npm run test:security

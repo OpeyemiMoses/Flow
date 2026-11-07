@@ -195,4 +195,44 @@ test("wallet environment enforces fail-closed validation for provider compatibil
       }),
     invalid,
   );
+
+  // 7. Fail-closed testnet coordinator check: testnet rehearsal rejects mainnet coordinator
+  assert.throws(
+    () =>
+      readWalletConfig({
+        ...source,
+        FLOW_EXECUTION: "disabled",
+        FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+        FLOW_PROVIDER_COMPATIBILITY_AUTHORIZATION_ID: validAuthId,
+        FLOW_PROVIDER_COMPATIBILITY_ENVIRONMENT: "testnet",
+        FLOW_PROVIDER_COMPATIBILITY_TOKEN: validToken,
+        FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: validAccountId,
+        FLOW_OUTLAYER_API_URL: "https://api.outlayer.ai", // prohibited for testnet!
+      }),
+    {
+      code: "INVALID_CONFIGURATION",
+      message:
+        /Testnet compatibility rehearsal strictly requires FLOW_OUTLAYER_API_URL to be https:\/\/testnet-api\.outlayer\.ai/,
+    },
+  );
+
+  // 8. Fail-closed mainnet coordinator check: mainnet mode rejects testnet coordinator
+  assert.throws(
+    () =>
+      readWalletConfig({
+        ...source,
+        FLOW_EXECUTION: "disabled",
+        FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+        FLOW_PROVIDER_COMPATIBILITY_AUTHORIZATION_ID: validAuthId,
+        FLOW_PROVIDER_COMPATIBILITY_ENVIRONMENT: "mainnet",
+        FLOW_PROVIDER_COMPATIBILITY_TOKEN: validToken,
+        FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: validAccountId,
+        FLOW_OUTLAYER_API_URL: "https://testnet-api.outlayer.ai", // prohibited for mainnet!
+      }),
+    {
+      code: "INVALID_CONFIGURATION",
+      message:
+        /Mainnet compatibility mode requires FLOW_OUTLAYER_API_URL to be https:\/\/api\.outlayer\.ai/,
+    },
+  );
 });

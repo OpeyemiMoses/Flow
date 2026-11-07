@@ -158,6 +158,29 @@ export function readWalletConfig(
         `Provider compatibility mode endpoint ${url.hostname} is not in the allowlist.`,
       );
     }
+    // 5. Fail-closed environment & coordinator binding (Requirement 7)
+    const isLoopback =
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "localhost" ||
+      url.hostname === "[::1]";
+    if (FLOW_PROVIDER_COMPATIBILITY_ENVIRONMENT === "testnet" && !isLoopback) {
+      if (url.hostname !== "testnet-api.outlayer.ai") {
+        throw new FlowError(
+          "INVALID_CONFIGURATION",
+          "Testnet compatibility rehearsal strictly requires FLOW_OUTLAYER_API_URL to be https://testnet-api.outlayer.ai; mainnet and deprecated endpoints are strictly prohibited.",
+        );
+      }
+    } else if (
+      FLOW_PROVIDER_COMPATIBILITY_ENVIRONMENT === "mainnet" &&
+      !isLoopback
+    ) {
+      if (url.hostname !== "api.outlayer.ai") {
+        throw new FlowError(
+          "INVALID_CONFIGURATION",
+          "Mainnet compatibility mode requires FLOW_OUTLAYER_API_URL to be https://api.outlayer.ai.",
+        );
+      }
+    }
 
     compatibilityConfig = {
       mode: "authorized",

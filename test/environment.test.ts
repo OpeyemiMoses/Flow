@@ -5,6 +5,7 @@ import { parseEnv } from "node:util";
 import pg from "pg";
 import { createDatabasePool } from "../src/foundation/database.ts";
 import {
+  assertOperatorEnvironment,
   assertWebEnvironment,
   assertWorkerEnvironment,
   readConfig,
@@ -264,9 +265,89 @@ test("assertWorkerEnvironment rejects migration database URL in worker runtime",
       }),
     {
       code: "INVALID_CONFIGURATION",
-      message: /Supply only the FLOW runtime database credential/,
+      message: /Migration credentials must remain strictly isolated/,
     },
   );
+});
+
+test("assertWebEnvironment rejects operator database URL in web runtime", () => {
+  assert.throws(
+    () =>
+      assertWebEnvironment({
+        FLOW_DATABASE_URL:
+          "postgresql://flow_local_app:password@127.0.0.1:55432/flow_local",
+        FLOW_OPERATOR_DATABASE_URL:
+          "postgresql://flow_local_operator:password@127.0.0.1:55432/flow_local",
+      }),
+    {
+      code: "INVALID_CONFIGURATION",
+      message: /Privileged operator database credentials are strictly isolated/,
+    },
+  );
+});
+
+test("assertWorkerEnvironment rejects operator database URL in worker runtime", () => {
+  assert.throws(
+    () =>
+      assertWorkerEnvironment({
+        FLOW_WORKER_DATABASE_URL:
+          "postgresql://flow_local_worker:password@127.0.0.1:55432/flow_local",
+        FLOW_OPERATOR_DATABASE_URL:
+          "postgresql://flow_local_operator:password@127.0.0.1:55432/flow_local",
+      }),
+    {
+      code: "INVALID_CONFIGURATION",
+      message: /Operator credentials must remain strictly isolated/,
+    },
+  );
+});
+
+test("assertOperatorEnvironment rejects wallet encryption key and migration database URL", () => {
+  assert.throws(
+    () =>
+      assertOperatorEnvironment({
+        FLOW_OPERATOR_DATABASE_URL:
+          "postgresql://flow_local_operator:password@127.0.0.1:55432/flow_local",
+        FLOW_WALLET_ENCRYPTION_KEY:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      }),
+    {
+      code: "INVALID_CONFIGURATION",
+      message:
+        /Wallet encryption key is strictly isolated to the wallet worker/,
+    },
+  );
+  assert.throws(
+    () =>
+      assertOperatorEnvironment({
+        FLOW_OPERATOR_DATABASE_URL:
+          "postgresql://flow_local_operator:password@127.0.0.1:55432/flow_local",
+        FLOW_MIGRATION_DATABASE_URL:
+          "postgresql://flow_local_migrator:password@127.0.0.1:55432/flow_local",
+      }),
+    {
+      code: "INVALID_CONFIGURATION",
+      message: /Migration credentials must remain strictly isolated/,
+    },
+  );
+});
+
+test("accepts isolated worker and operator runtime identities", () => {
+  const workerSource = {
+    FLOW_ENV: "local" as const,
+    FLOW_EXECUTION: "disabled" as const,
+    FLOW_WORKER_DATABASE_URL: `postgresql://flow_local_worker:${testPassword}@127.0.0.1:55432/flow_local`,
+  };
+  const workerConfig = readConfig(workerSource, "worker");
+  assert.equal(workerConfig.database.role, "flow_local_worker");
+
+  const operatorSource = {
+    FLOW_ENV: "local" as const,
+    FLOW_EXECUTION: "disabled" as const,
+    FLOW_OPERATOR_DATABASE_URL: `postgresql://flow_local_operator:${testPassword}@127.0.0.1:55432/flow_local`,
+  };
+  const operatorConfig = readConfig(operatorSource, "operator");
+  assert.equal(operatorConfig.database.role, "flow_local_operator");
 });
 
 test("the npm development command binds explicitly to IPv4 loopback", () => {

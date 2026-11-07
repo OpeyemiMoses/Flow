@@ -283,6 +283,7 @@ model FlowWallet {
   id                  String             @id @default(uuid()) @db.Uuid
   accountId           String             @unique @map("account_id") @db.Uuid
   provider            String             @default("OUTLAYER")
+  environment         String             @default("mainnet")
   providerWalletId    String             @map("provider_wallet_id")
   nearAccountId       String             @map("near_account_id")
   encryptedCredential String             @map("encrypted_credential")
@@ -368,6 +369,7 @@ model ProviderCompatibilityAuthorization {
   id                     String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   accountId              String      @map("account_id") @db.Uuid
   environment            String
+  singletonScope         String      @unique @default("GLOBAL_TESTNET_REHEARSAL") @map("singleton_scope")
   allowedMethods         String[]    @map("allowed_methods")
   status                 String      @default("AUTHORIZED")
   maxRegistrations       Int         @default(1) @map("max_registrations")
@@ -378,6 +380,7 @@ model ProviderCompatibilityAuthorization {
   consumedAt             DateTime?   @map("consumed_at")
   expiresAt              DateTime    @map("expires_at")
   dispatchAttemptId      String?     @map("dispatch_attempt_id") @db.Uuid
+  authorizedByOperatorId String?     @map("authorized_by_operator_id")
   createdAt              DateTime    @default(now()) @map("created_at")
   updatedAt              DateTime    @default(now()) @updatedAt @map("updated_at")
   account                FlowAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
@@ -402,19 +405,21 @@ model CustodyOperator {
 }
 
 model CustodyRecoveryApproval {
-  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  jobId             String                @map("job_id") @db.Uuid
-  accountId         String                @map("account_id") @db.Uuid
-  approverAuthId    String                @map("approver_auth_id")
-  resolution        String
-  approvalTokenHash String                @unique @map("approval_token_hash")
-  status            String                @default("PENDING")
-  expiresAt         DateTime              @map("expires_at")
-  consumedAt        DateTime?             @map("consumed_at")
-  createdAt         DateTime              @default(now()) @map("created_at")
-  job               WalletProvisioningJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
-  account           FlowAccount           @relation(fields: [accountId], references: [id], onDelete: Restrict)
-  approver          AuthUser              @relation(fields: [approverAuthId], references: [id], onDelete: Restrict)
+  id                      String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jobId                   String                @map("job_id") @db.Uuid
+  accountId               String                @map("account_id") @db.Uuid
+  initiatorOperatorAuthId String                @map("initiator_operator_auth_id")
+  approverAuthId          String                @map("approver_auth_id")
+  resolution              String
+  approvalTokenHash       String                @unique @map("approval_token_hash")
+  status                  String                @default("PENDING")
+  expiresAt               DateTime              @map("expires_at")
+  consumedAt              DateTime?             @map("consumed_at")
+  dispatchAttemptId       String                @map("dispatch_attempt_id") @db.Uuid
+  createdAt               DateTime              @default(now()) @map("created_at")
+  job                     WalletProvisioningJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  account                 FlowAccount           @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  approver                AuthUser              @relation(fields: [approverAuthId], references: [id], onDelete: Restrict)
 
   @@index([jobId, status])
   @@map("custody_recovery_approvals")

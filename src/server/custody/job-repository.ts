@@ -226,6 +226,7 @@ export interface PersistRegisteredWalletInput {
   readonly keyId: string;
   readonly keyDigest: string;
   readonly handoffUrl?: string;
+  readonly environment?: "mainnet" | "testnet";
 }
 
 export interface AttachAddressesInput {
@@ -257,6 +258,10 @@ export interface PublicWalletProjection {
   readonly policyState: string;
   readonly controllerAccountId: string | null;
   readonly handoffUrl: string | null;
+  readonly environment: string;
+  readonly isTestnet: boolean;
+  readonly eligibleForDeposits: boolean;
+  readonly depositWarning: string | null;
   readonly provisioningComplete: boolean;
   readonly policyVerified: boolean;
   readonly fundsReady: boolean;
@@ -637,16 +642,17 @@ export async function persistRegisteredWallet(
     }
 
     const safeHandoffUrl = scrubHandoffUrl(input.handoffUrl) ?? null;
+    const environment = input.environment ?? "mainnet";
 
     const walletResult = await tx.$queryRaw<{ id: string }[]>`
       INSERT INTO flow.wallets (
         account_id, provider, provider_wallet_id, near_account_id,
         encrypted_credential, key_id, key_digest, status, policy_state,
-        controller_account_id, handoff_url, created_at, updated_at
+        controller_account_id, handoff_url, environment, created_at, updated_at
       ) VALUES (
         ${input.accountId}::uuid, 'OUTLAYER', ${input.providerWalletId}, ${input.nearAccountId},
         ${input.encryptedCredential}, ${input.keyId}, ${input.keyDigest}, 'SETUP_PENDING'::flow.wallet_status,
-        'none', NULL, ${safeHandoffUrl}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        'none', NULL, ${safeHandoffUrl}, ${environment}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
       )
       RETURNING id
     `;
@@ -1301,6 +1307,7 @@ export async function getAccountWalletPublicProjection(
       policyState: string;
       controllerAccountId: string | null;
       handoffUrl: string | null;
+      environment: string;
       createdAt: Date;
       updatedAt: Date;
     }>
@@ -1309,7 +1316,7 @@ export async function getAccountWalletPublicProjection(
       id, account_id AS "accountId", provider, provider_wallet_id AS "providerWalletId",
       near_account_id AS "nearAccountId", status::text AS status, policy_state AS "policyState",
       controller_account_id AS "controllerAccountId",
-      handoff_url AS "handoffUrl", created_at AS "createdAt", updated_at AS "updatedAt"
+      handoff_url AS "handoffUrl", environment, created_at AS "createdAt", updated_at AS "updatedAt"
     FROM flow.wallets
     WHERE account_id = ${accountId}::uuid
   `;
@@ -1374,13 +1381,22 @@ export async function getAccountWalletPublicProjection(
     typeof wallet.controllerAccountId === "string" &&
     isValidNearAddress(wallet.controllerAccountId);
 
+  const isTestnet = wallet.environment === "testnet";
+  const depositWarning = isTestnet
+    ? "TESTNET_WALLET: Addresses are for testnet provider compatibility rehearsal only. NEVER send mainnet or real funds to testnet addresses."
+    : null;
+
   return {
     ...wallet,
+    environment: wallet.environment,
+    isTestnet,
+    eligibleForDeposits: isTestnet ? false : readiness.canReceiveFunds,
+    depositWarning,
     provisioningComplete: wallet.status === "ACTIVE" && policyVerified,
     policyVerified,
-    fundsReady: readiness.isReady,
-    canReceiveFunds: readiness.canReceiveFunds,
-    canSignTransfers: readiness.canSignTransfers,
+    fundsReady: isTestnet ? false : readiness.isReady,
+    canReceiveFunds: isTestnet ? false : readiness.canReceiveFunds,
+    canSignTransfers: isTestnet ? false : readiness.canSignTransfers,
     addresses,
     capabilities,
   };
@@ -1754,6 +1770,8 @@ export async function resolveQuarantinedProvisioningJob(
           WHERE job_id = ${input.jobId}::uuid
             AND account_id = ${input.accountId}::uuid
             AND approver_auth_id = ${approver}
+            AND initiator_operator_auth_id = ${initiator}
+            AND dispatch_attempt_id = ${input.expectedDispatchAttemptId.trim()}::uuid
             AND resolution = ${input.resolution}
             AND approval_token_hash = ${tokenHash}
             AND status = 'PENDING'
@@ -1769,6 +1787,8 @@ export async function resolveQuarantinedProvisioningJob(
           WHERE job_id = ${input.jobId}::uuid
             AND account_id = ${input.accountId}::uuid
             AND approver_auth_id = ${approver}
+            AND initiator_operator_auth_id = ${initiator}
+            AND dispatch_attempt_id = ${input.expectedDispatchAttemptId.trim()}::uuid
             AND resolution = ${input.resolution}
             AND status = 'PENDING'
             AND expires_at > CURRENT_TIMESTAMP
@@ -2117,6 +2137,8 @@ export async function assertOperatorAuthority(
 
 /**
  * Enrolls or updates a user as an authorized custody operator in `flow.custody_operators`.
+ * Requires enrollment by an existing active SECURITY_OFFICER (or bootstrap by another registered user).
+ * Self-enrollment is strictly prohibited.
  */
 export async function enrollCustodyOperator(
   db: FlowDb,
@@ -2130,52 +2152,168 @@ export async function enrollCustodyOperator(
   readonly authUserId: string;
   readonly role: string;
 }> {
-  await assertOperatorIdentityRegistered(db, input.authUserId);
+  const authUserId = input.authUserId.trim();
+  const enrolledBy = input.enrolledBy.trim();
+  if (
+    !OPERATOR_AUTH_ID_REGEX.test(authUserId) ||
+    !OPERATOR_AUTH_ID_REGEX.test(enrolledBy)
+  ) {
+    throw new FlowError(
+      "INVALID_OPERATOR_IDENTITY",
+      "Both authUserId and enrolledBy must be valid non-empty identifiers.",
+    );
+  }
+  if (authUserId.toLowerCase() === enrolledBy.toLowerCase()) {
+    throw new FlowError(
+      "TWO_PERSON_APPROVAL_REQUIRED",
+      "Self-enrollment is prohibited: an operator cannot enroll themselves.",
+    );
+  }
+  await assertOperatorIdentityRegistered(db, authUserId);
+  await assertOperatorIdentityRegistered(db, enrolledBy);
+
+  // If active operators already exist in the database, enrolledBy must possess active SECURITY_OFFICER authority
+  const existingOperators = await db.$queryRaw<
+    Array<{ id: string; role: string; status: string }>
+  >`
+    SELECT id, role, status FROM flow.custody_operators WHERE status = 'ACTIVE'
+  `;
+  if (existingOperators.length > 0) {
+    await assertOperatorAuthority(db, enrolledBy, "SECURITY_OFFICER");
+  }
+
   const role = input.role ?? "CUSTODY_OPERATOR";
   const rows = await db.$queryRaw<
     Array<{ id: string; authUserId: string; role: string }>
   >`
     INSERT INTO flow.custody_operators (auth_user_id, role, status, enrolled_by)
-    VALUES (${input.authUserId.trim()}, ${role}, 'ACTIVE', ${input.enrolledBy.trim()})
+    VALUES (${authUserId}, ${role}, 'ACTIVE', ${enrolledBy})
     ON CONFLICT (auth_user_id)
     DO UPDATE SET status = 'ACTIVE', role = ${role}, updated_at = CURRENT_TIMESTAMP
     RETURNING id, auth_user_id AS "authUserId", role
   `;
+
+  log("info", "custody_operator_enrolled", {
+    enrolledAuthUserId: authUserId,
+    enrolledBy,
+    role,
+  });
+
   return rows[0]!;
+}
+
+export interface CreateCustodyRecoveryApprovalInput {
+  readonly jobId: string;
+  readonly accountId: string;
+  readonly initiatorOperatorAuthId: string;
+  readonly approverAuthId: string;
+  readonly expectedDispatchAttemptId: string;
+  readonly resolution:
+    "ATTACH_RECOVERED_WALLET" | "RESET_CONFIRMED_PRE_CREATION_FAILURE";
+  readonly approvalToken?: string;
+  readonly validityMinutes?: number;
 }
 
 /**
  * Creates an independently authenticated approval record in `flow.custody_recovery_approvals`.
+ * Enforces two distinct active operators (initiator !== approver), matching jobId, accountId,
+ * and expectedDispatchAttemptId.
  */
 export async function createCustodyRecoveryApproval(
   db: FlowDb,
-  input: {
-    readonly jobId: string;
-    readonly accountId: string;
-    readonly approverAuthId: string;
-    readonly resolution:
-      "ATTACH_RECOVERED_WALLET" | "RESET_CONFIRMED_PRE_CREATION_FAILURE";
-    readonly approvalToken?: string;
-    readonly validityMinutes?: number;
-  },
+  input: CreateCustodyRecoveryApprovalInput,
 ): Promise<{
   readonly id: string;
   readonly token: string;
   readonly expiresAt: Date;
 }> {
-  await assertOperatorAuthority(db, input.approverAuthId);
+  const initiator = input.initiatorOperatorAuthId.trim();
+  const approver = input.approverAuthId.trim();
+
+  if (
+    !OPERATOR_AUTH_ID_REGEX.test(initiator) ||
+    !OPERATOR_AUTH_ID_REGEX.test(approver)
+  ) {
+    throw new FlowError(
+      "INVALID_OPERATOR_IDENTITY",
+      "Both initiator and approver operator auth IDs must be valid non-empty identifiers.",
+    );
+  }
+  if (initiator.toLowerCase() === approver.toLowerCase()) {
+    throw new FlowError(
+      "TWO_PERSON_APPROVAL_REQUIRED",
+      "Recovery approval requires two distinct operators (initiator !== approver).",
+    );
+  }
+  if (
+    !UUID_REGEX.test(input.jobId.trim()) ||
+    !UUID_REGEX.test(input.accountId.trim())
+  ) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      "Job ID and Account ID must be valid UUIDs.",
+    );
+  }
+  if (!UUID_REGEX.test(input.expectedDispatchAttemptId.trim())) {
+    throw new FlowError(
+      "CUSTODY_PROVIDER_CORRELATION_ERROR",
+      "Recovery approval requires a valid UUID expectedDispatchAttemptId.",
+    );
+  }
+
+  await assertOperatorAuthority(db, initiator);
+  await assertOperatorAuthority(db, approver);
+
+  const jobs = await db.$queryRaw<
+    Array<{
+      id: string;
+      accountId: string;
+      status: string;
+      dispatchAttemptId: string | null;
+    }>
+  >`
+    SELECT id, account_id AS "accountId", status, dispatch_attempt_id AS "dispatchAttemptId"
+    FROM flow.wallet_provisioning_jobs
+    WHERE id = ${input.jobId.trim()}::uuid
+  `;
+  const job = jobs[0];
+  if (!job || job.accountId !== input.accountId.trim()) {
+    throw new FlowError(
+      "WALLET_ACCOUNT_MISMATCH",
+      `Job ${input.jobId} does not belong to account ${input.accountId}.`,
+    );
+  }
+  if (
+    !job.dispatchAttemptId ||
+    job.dispatchAttemptId.toLowerCase() !==
+      input.expectedDispatchAttemptId.trim().toLowerCase()
+  ) {
+    throw new FlowError(
+      "CUSTODY_PROVIDER_CORRELATION_ERROR",
+      `Job ${input.jobId} dispatch_attempt_id does not match expectedDispatchAttemptId.`,
+    );
+  }
+  if (job.status !== "UNKNOWN" && job.status !== "MANUAL_REVIEW") {
+    throw new FlowError(
+      "INVALID_STATE_TRANSITION",
+      `Recovery approval can only be created for jobs in UNKNOWN or MANUAL_REVIEW, not ${job.status}.`,
+    );
+  }
+
   const token = input.approvalToken ?? randomUUID();
   const tokenHash = createHash("sha256").update(token).digest("hex");
   const validityMinutes = input.validityMinutes ?? 30;
 
   const rows = await db.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
     INSERT INTO flow.custody_recovery_approvals (
-      job_id, account_id, approver_auth_id, resolution,
-      approval_token_hash, status, expires_at
+      job_id, account_id, approver_auth_id, initiator_operator_auth_id,
+      dispatch_attempt_id, resolution, approval_token_hash, status, expires_at
     ) VALUES (
-      ${input.jobId}::uuid,
-      ${input.accountId}::uuid,
-      ${input.approverAuthId.trim()},
+      ${input.jobId.trim()}::uuid,
+      ${input.accountId.trim()}::uuid,
+      ${approver},
+      ${initiator},
+      ${input.expectedDispatchAttemptId.trim()}::uuid,
       ${input.resolution},
       ${tokenHash},
       'PENDING',
@@ -2184,18 +2322,30 @@ export async function createCustodyRecoveryApproval(
     RETURNING id, expires_at AS "expiresAt"
   `;
 
+  log("info", "custody_recovery_approved", {
+    approvalId: rows[0]!.id,
+    jobId: input.jobId.trim(),
+    accountId: input.accountId.trim(),
+    initiator,
+    approver,
+    dispatchAttemptId: input.expectedDispatchAttemptId.trim(),
+    resolution: input.resolution,
+  });
+
   return { id: rows[0]!.id, token, expiresAt: rows[0]!.expiresAt };
 }
 
 export interface CreateCompatibilityAuthorizationInput {
   readonly accountId: string;
   readonly environment: "testnet" | "mainnet";
+  readonly operatorAuthId: string;
   readonly allowedMethods?: readonly string[];
   readonly validityMinutes?: number;
 }
 
 /**
  * Creates a durable, database-enforced single-registration authorization record.
+ * Enforces authenticated operator authority and database singleton uniqueness constraint.
  */
 export async function createCompatibilityAuthorization(
   db: FlowDb,
@@ -2204,6 +2354,17 @@ export async function createCompatibilityAuthorization(
   if (!UUID_REGEX.test(input.accountId.trim())) {
     throw new FlowError("INVALID_CONFIGURATION", "Invalid account ID.");
   }
+  if (
+    !input.operatorAuthId ||
+    !OPERATOR_AUTH_ID_REGEX.test(input.operatorAuthId.trim())
+  ) {
+    throw new FlowError(
+      "INVALID_OPERATOR_IDENTITY",
+      "Valid operatorAuthId is required to create compatibility authorization.",
+    );
+  }
+  await assertOperatorAuthority(db, input.operatorAuthId);
+
   const validityMinutes = input.validityMinutes ?? 60;
   const methods = input.allowedMethods ?? [
     "POST /register",
@@ -2211,25 +2372,51 @@ export async function createCompatibilityAuthorization(
     "GET /wallet/v1/policy",
   ];
 
-  const rows = await db.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
-    INSERT INTO flow.provider_compatibility_authorizations (
-      account_id, environment, allowed_methods, status,
-      max_registrations, registrations_attempted, registrations_completed,
-      expires_at
-    ) VALUES (
-      ${input.accountId.trim()}::uuid,
-      ${input.environment},
-      ${methods},
-      'AUTHORIZED',
-      1,
-      0,
-      0,
-      CURRENT_TIMESTAMP + (${validityMinutes} * interval '1 minute')
-    )
-    RETURNING id, expires_at AS "expiresAt"
-  `;
+  try {
+    const rows = await db.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
+      INSERT INTO flow.provider_compatibility_authorizations (
+        account_id, environment, allowed_methods, status,
+        max_registrations, registrations_attempted, registrations_completed,
+        authorized_by_operator_id, singleton_scope,
+        expires_at
+      ) VALUES (
+        ${input.accountId.trim()}::uuid,
+        ${input.environment},
+        ${methods},
+        'AUTHORIZED',
+        1,
+        0,
+        0,
+        ${input.operatorAuthId.trim()},
+        'GLOBAL_TESTNET_REHEARSAL',
+        CURRENT_TIMESTAMP + (${validityMinutes} * interval '1 minute')
+      )
+      RETURNING id, expires_at AS "expiresAt"
+    `;
 
-  return rows[0]!;
+    log("info", "compatibility_authorization_created", {
+      authorizationId: rows[0]!.id,
+      accountId: input.accountId.trim(),
+      operatorAuthId: input.operatorAuthId.trim(),
+      environment: input.environment,
+    });
+
+    return rows[0]!;
+  } catch (error: unknown) {
+    const err = error as { code?: string; message?: string } | null | undefined;
+    if (
+      err?.code === "23505" ||
+      err?.code === "P2002" ||
+      err?.message?.includes("provider_compatibility_singleton_key") ||
+      err?.message?.includes("unique")
+    ) {
+      throw new FlowError(
+        "CUSTODY_REGISTRATION_BUDGET_EXCEEDED",
+        "A provider compatibility authorization already exists in the database. Multiple authorization records are prohibited.",
+      );
+    }
+    throw error;
+  }
 }
 
 /**

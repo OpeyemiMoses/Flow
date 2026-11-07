@@ -21,7 +21,10 @@ import {
   createDatabasePool,
 } from "../src/foundation/database.ts";
 import { readConfig } from "../src/foundation/environment.ts";
-import { getPrismaClient } from "../src/foundation/prisma.ts";
+import {
+  disconnectPrismaClients,
+  getPrismaClient,
+} from "../src/foundation/prisma.ts";
 import {
   activateWalletIfReady,
   assertOperatorAuthority,
@@ -55,14 +58,24 @@ assert.equal(
   "test",
   "Integration tests require FLOW_ENV=test.",
 );
-const { database } = readConfig(process.env, "runtime");
-const pool = createDatabasePool(database);
+const { database: appDbConfig } = readConfig(process.env, "runtime");
+const pool = createDatabasePool(appDbConfig);
+const appDb = getPrismaClient("runtime");
+
+const { database: workerDbConfig } = readConfig(process.env, "worker");
+const workerPool = createDatabasePool(workerDbConfig);
+const db = getPrismaClient("worker");
+
+const { database: operatorDbConfig } = readConfig(process.env, "operator");
+const operatorPool = createDatabasePool(operatorDbConfig);
+const operatorDb = getPrismaClient("operator");
 
 after(async () => {
   await pool.end();
+  await workerPool.end();
+  await operatorPool.end();
   try {
-    const db = getPrismaClient();
-    await db.$disconnect();
+    await disconnectPrismaClients();
   } catch {
     // Ignore cleanup errors
   }
@@ -139,7 +152,7 @@ test("account ownership: enforces single wallet per account and preserves accoun
   const w2Id = randomUUID();
 
   // Create wallet for personal account
-  await pool.query(
+  await workerPool.query(
     `
     INSERT INTO flow.wallets (
       id, account_id, provider, provider_wallet_id, near_account_id,
@@ -152,7 +165,7 @@ test("account ownership: enforces single wallet per account and preserves accoun
   );
 
   // Create wallet for business account
-  await pool.query(
+  await workerPool.query(
     `
     INSERT INTO flow.wallets (
       id, account_id, provider, provider_wallet_id, near_account_id,
@@ -166,7 +179,7 @@ test("account ownership: enforces single wallet per account and preserves accoun
 
   // Attempt to insert duplicate wallet for personal account -> violates wallets_account_id_key (23505)
   await assert.rejects(
-    pool.query(
+    workerPool.query(
       `
       INSERT INTO flow.wallets (
         id, account_id, provider, provider_wallet_id, near_account_id,
@@ -182,7 +195,7 @@ test("account ownership: enforces single wallet per account and preserves accoun
 
   // Attempt to insert wallet for non-existent account -> violates foreign key (23503)
   await assert.rejects(
-    pool.query(
+    workerPool.query(
       `
       INSERT INTO flow.wallets (
         id, account_id, provider, provider_wallet_id, near_account_id,
@@ -201,7 +214,7 @@ test("address and capability uniqueness: enforces unique network per wallet", as
   const account = await createTestAccount(pool, "BUSINESS", "addr-cap");
   const walletId = randomUUID();
 
-  await pool.query(
+  await workerPool.query(
     `
     INSERT INTO flow.wallets (
       id, account_id, provider, provider_wallet_id, near_account_id,
@@ -214,7 +227,7 @@ test("address and capability uniqueness: enforces unique network per wallet", as
   );
 
   // Insert NEAR address
-  await pool.query(
+  await workerPool.query(
     `
     INSERT INTO flow.wallet_addresses (
       wallet_id, network, chain_id, address, public_key
@@ -227,7 +240,7 @@ test("address and capability uniqueness: enforces unique network per wallet", as
 
   // Duplicate NEAR address on same wallet -> violates wallet_addresses_wallet_id_network_key (23505)
   await assert.rejects(
-    pool.query(
+    workerPool.query(
       `
       INSERT INTO flow.wallet_addresses (
         wallet_id, network, chain_id, address, public_key
@@ -241,7 +254,7 @@ test("address and capability uniqueness: enforces unique network per wallet", as
   );
 
   // Insert NEAR capability
-  await pool.query(
+  await workerPool.query(
     `
     INSERT INTO flow.wallet_capabilities (
       wallet_id, network, can_derive_address, can_receive, can_sign_transfer, broadcast_mode
@@ -254,7 +267,7 @@ test("address and capability uniqueness: enforces unique network per wallet", as
 
   // Duplicate NEAR capability on same wallet -> violates wallet_capabilities_wallet_id_network_key (23505)
   await assert.rejects(
-    pool.query(
+    workerPool.query(
       `
       INSERT INTO flow.wallet_capabilities (
         wallet_id, network, can_derive_address, can_receive, can_sign_transfer, broadcast_mode
@@ -311,7 +324,6 @@ test("provisioning job idempotency: enforces one job per account and unique idem
 });
 
 test("concurrent provisioning: atomic job leasing grants exactly one lease to racing workers", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "PERSONAL", "race-lease");
   const job = await createProvisioningJob(db, account.accountId, randomUUID());
   assert.equal(job.status, "PENDING");
@@ -336,7 +348,6 @@ test("concurrent provisioning: atomic job leasing grants exactly one lease to ra
 });
 
 test("stale fencing token protection: CAS reject prevents stale worker dispatch or commit", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "BUSINESS", "stale-fence");
   await createProvisioningJob(db, account.accountId, randomUUID());
   const leased = await claimJobLease(
@@ -381,7 +392,6 @@ test("stale fencing token protection: CAS reject prevents stale worker dispatch 
 });
 
 test("worker crash recovery: pre-dispatch lease expiration allows re-lease with incremented fencing token", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "PERSONAL", "crash-pre");
   await createProvisioningJob(db, account.accountId, randomUUID());
   const initialLease = await claimJobLease(
@@ -394,7 +404,7 @@ test("worker crash recovery: pre-dispatch lease expiration allows re-lease with 
   assert.equal(initialLease.fencingToken, 1n);
 
   // Simulate crash before dispatch: expire the lease manually while dispatched_at remains NULL
-  await pool.query(
+  await workerPool.query(
     `
     UPDATE flow.wallet_provisioning_jobs
     SET lease_expires_at = now() - interval '10 seconds'
@@ -418,7 +428,6 @@ test("worker crash recovery: pre-dispatch lease expiration allows re-lease with 
 });
 
 test("worker crash safety: post-dispatch lease expiration blocks re-lease and quarantines to UNKNOWN", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "BUSINESS", "crash-post");
   await createProvisioningJob(db, account.accountId, randomUUID());
   const leased = await claimJobLease(
@@ -433,7 +442,7 @@ test("worker crash safety: post-dispatch lease expiration blocks re-lease and qu
   await recordJobDispatch(db, leased.id, leased.fencingToken, randomUUID());
 
   // Worker crashed while waiting for response; lease expires
-  await pool.query(
+  await workerPool.query(
     `
     UPDATE flow.wallet_provisioning_jobs
     SET lease_expires_at = now() - interval '10 seconds'
@@ -473,7 +482,6 @@ test("worker crash safety: post-dispatch lease expiration blocks re-lease and qu
 });
 
 test("ambiguous outcome quarantine: blocks automatic retries and requires manual review", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "PERSONAL", "ambig-outcome");
   await createProvisioningJob(db, account.accountId, randomUUID());
   const leased = await claimJobLease(db, account.accountId, "worker-ambig", 30);
@@ -525,7 +533,6 @@ test("ambiguous outcome quarantine: blocks automatic retries and requires manual
 });
 
 test("credential isolation: encrypted envelope at rest, plaintext never stored, decryptable only with secret key", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "PERSONAL", "cred-iso");
   await createProvisioningJob(db, account.accountId, randomUUID());
   const leased = await claimJobLease(db, account.accountId, "worker-cred", 30);
@@ -679,7 +686,6 @@ test("execution safeguards remain strictly disabled after wallet activation", as
 });
 
 test("two-stage provisioning: immediate credential persistence, worker crash recovery without duplicate registration", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "PERSONAL", "two-stage");
   await createProvisioningJob(db, account.accountId, randomUUID());
 
@@ -751,7 +757,7 @@ test("two-stage provisioning: immediate credential persistence, worker crash rec
   );
 
   // Worker 1 CRASHES before deriving addresses. Worker 1 lease expires.
-  await pool.query(
+  await workerPool.query(
     "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = now() - interval '5 seconds' WHERE id = $1::uuid",
     [worker1Lease.id],
   );
@@ -904,7 +910,6 @@ test("two-stage provisioning: immediate credential persistence, worker crash rec
 });
 
 test("stale fencing token is rejected on Stage 1, Stage 2, and Stage 3 transitions", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "PERSONAL", "stale-fencing");
   await createProvisioningJob(db, account.accountId, randomUUID());
 
@@ -913,7 +918,7 @@ test("stale fencing token is rejected on Stage 1, Stage 2, and Stage 3 transitio
   assert.ok(w1 !== null);
 
   // Worker 1's lease expires before dispatch
-  await pool.query(
+  await workerPool.query(
     "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = now() - interval '5 seconds' WHERE id = $1::uuid",
     [w1.id],
   );
@@ -958,7 +963,7 @@ test("stale fencing token is rejected on Stage 1, Stage 2, and Stage 3 transitio
   assert.ok(walletId);
 
   // Worker 2's lease expires during address derivation
-  await pool.query(
+  await workerPool.query(
     "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = now() - interval '5 seconds' WHERE id = $1::uuid",
     [w2.id],
   );
@@ -1087,7 +1092,6 @@ test("stale fencing token is rejected on Stage 1, Stage 2, and Stage 3 transitio
 });
 
 test("public wallet projection strictly isolates credentials at query time and separates provisioningComplete from fundsReady", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(
     pool,
     "PERSONAL",
@@ -1210,7 +1214,6 @@ test("public wallet projection strictly isolates credentials at query time and s
 });
 
 test("provider error isolation: hostile upstream payloads are never persisted to PostgreSQL", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "PERSONAL", "hostile-err-iso");
   await createProvisioningJob(db, account.accountId, randomUUID());
   const leased = await claimJobLease(db, account.accountId, "worker-err", 30);
@@ -1321,7 +1324,6 @@ test("provider error isolation: hostile upstream payloads are never persisted to
 });
 
 test("adversarial PostgreSQL test: cross-account activation and address attachment using an unrelated valid job are blocked", async () => {
-  const db = getPrismaClient();
   const accountA = await createTestAccount(pool, "PERSONAL", "cross-acct-a");
   const accountB = await createTestAccount(pool, "BUSINESS", "cross-acct-b");
 
@@ -1473,7 +1475,6 @@ test("adversarial PostgreSQL test: cross-account activation and address attachme
 });
 
 test("adversarial PostgreSQL test: incomplete provisioning, missing addresses, mismatched wallet IDs, and invalid policy states are rejected", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "PERSONAL", "adv-invariants");
   await createProvisioningJob(db, account.accountId, randomUUID());
   const leased = await claimJobLease(db, account.accountId, "worker-adv", 30);
@@ -1785,7 +1786,6 @@ test("adversarial PostgreSQL test: incomplete provisioning, missing addresses, m
 });
 
 test("decoupled fund readiness enforces execution guards and unverified policy rejection on DB records", async () => {
-  const db = getPrismaClient();
   const account = await createTestAccount(pool, "PERSONAL", "fund-readiness");
   await createProvisioningJob(db, account.accountId, randomUUID());
   const leased = await claimJobLease(db, account.accountId, "worker-funds", 30);
@@ -1943,12 +1943,12 @@ test("decoupled fund readiness enforces execution guards and unverified policy r
 });
 
 test("the real PostgreSQL server has the migrated namespace and the correct runtime role", async () => {
-  await assertDatabaseReady(pool, database);
+  await assertDatabaseReady(pool, appDbConfig);
 });
 
 test("readiness rejects a mismatch between the expected and actual database", async () => {
   await assert.rejects(
-    assertDatabaseReady(pool, { ...database, name: "flow_local" }),
+    assertDatabaseReady(pool, { ...appDbConfig, name: "flow_local" }),
     {
       code: "DATABASE_NOT_READY",
     },
@@ -2017,7 +2017,7 @@ for (const [action, statement] of [
 }
 
 test("PostgreSQL denies the test runtime role access to the local database", async () => {
-  const otherDatabase = new URL(database.url);
+  const otherDatabase = new URL(appDbConfig.url);
   otherDatabase.pathname = "/flow_local";
   const client = new pg.Client({
     connectionString: otherDatabase.href,
@@ -2031,7 +2031,6 @@ test("PostgreSQL denies the test runtime role access to the local database", asy
 });
 
 test("M2 Phase 3 worker: end-to-end fixture-backed provisioning for personal onboarding and multiple business accounts with strict identity isolation", async () => {
-  const db = getPrismaClient();
   const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
   try {
     const personal = await createTestAccount(pool, "PERSONAL", "m23-personal");
@@ -2143,7 +2142,6 @@ test("M2 Phase 3 worker: end-to-end fixture-backed provisioning for personal onb
 });
 
 test("M2 Phase 3 worker: concurrent workers racing on same and multiple accounts never duplicate registration", async () => {
-  const db = getPrismaClient();
   const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
   try {
     const accounts = await Promise.all(
@@ -2201,7 +2199,6 @@ test("M2 Phase 3 worker: concurrent workers racing on same and multiple accounts
 });
 
 test("M2 Phase 3 worker: crash recovery across Stage 1 (after credential save), Stage 2 (after address attach), and post-dispatch quarantine without re-registering", async () => {
-  const db = getPrismaClient();
   const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
   const testKeyHex =
     "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -2238,7 +2235,7 @@ test("M2 Phase 3 worker: crash recovery across Stage 1 (after credential save), 
     assert.equal(mockServer.getRegisterCallCount(), 1);
 
     // Expire lease to simulate dead worker timeout
-    await pool.query(
+    await workerPool.query(
       "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = CURRENT_TIMESTAMP - interval '5 seconds' WHERE account_id = $1::uuid",
       [accStage1.accountId],
     );
@@ -2290,7 +2287,7 @@ test("M2 Phase 3 worker: crash recovery across Stage 1 (after credential save), 
     );
     assert.equal(mockServer.getRegisterCallCount(), 2);
 
-    await pool.query(
+    await workerPool.query(
       "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = CURRENT_TIMESTAMP - interval '5 seconds' WHERE account_id = $1::uuid",
       [accStage2.accountId],
     );
@@ -2339,7 +2336,7 @@ test("M2 Phase 3 worker: crash recovery across Stage 1 (after credential save), 
       "Crash happened right after recordJobDispatch before HTTP call",
     );
 
-    await pool.query(
+    await workerPool.query(
       "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = CURRENT_TIMESTAMP - interval '5 seconds' WHERE account_id = $1::uuid",
       [accAmbiguous.accountId],
     );
@@ -2369,7 +2366,6 @@ test("M2 Phase 3 worker: crash recovery across Stage 1 (after credential save), 
 });
 
 test("M2 Phase 3 worker: provider failures, unverified policy rejection, and graceful worker lifecycle diagnostics", async () => {
-  const db = getPrismaClient();
   const mockServer = await createOutLayerMockServer({
     multiWalletMode: true,
     policyState: "none",
@@ -2451,7 +2447,6 @@ test("M2 Phase 3 worker: provider failures, unverified policy rejection, and gra
 });
 
 test("M2 Phase 4 quarantine: uncertain registration outcomes (HTTP 200 corrupted JSON / schema mismatch / invalid NEAR address / HTTP 502) quarantine job to UNKNOWN and never re-register", async () => {
-  const db = getPrismaClient();
   const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
   const testKeyHex =
     "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -2527,7 +2522,6 @@ test("M2 Phase 4 quarantine: uncertain registration outcomes (HTTP 200 corrupted
 });
 
 test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNKNOWN/MANUAL_REVIEW jobs, cross-account protection, and resume without re-registration", async () => {
-  const db = getPrismaClient();
   const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
   const testKeyHex =
     "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -2582,7 +2576,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
     mockServer.setOptions({ multiWalletMode: true });
 
     // Read dispatch_attempt_id from the quarantined UNKNOWN job
-    const { rows: jobRows } = await pool.query<{
+    const { rows: jobRows } = await workerPool.query<{
       id: string;
       status: string;
       dispatch_attempt_id: string;
@@ -2596,7 +2590,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
 
     // 1. Reject escalation if accountId or expectedAccountKind does not match
     await assert.rejects(
-      escalateJobToManualReview(db, {
+      escalateJobToManualReview(operatorDb, {
         jobId: personalJob.id,
         accountId: accBusiness.accountId, // wrong account!
         expectedAccountKind: "PERSONAL",
@@ -2610,7 +2604,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
     );
 
     await assert.rejects(
-      escalateJobToManualReview(db, {
+      escalateJobToManualReview(operatorDb, {
         jobId: personalJob.id,
         accountId: accPersonal.accountId,
         expectedAccountKind: "BUSINESS", // wrong account kind!
@@ -2630,7 +2624,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
     const recoveredProviderWalletId = "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20";
     const recoveredApiKey = "wk_2a8b1f3c4d5e6789abcdef0123456789";
 
-    await escalateJobToManualReview(db, {
+    await escalateJobToManualReview(operatorDb, {
       jobId: personalJob.id,
       accountId: accPersonal.accountId,
       expectedAccountKind: "PERSONAL",
@@ -2641,7 +2635,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
       requestId: randomUUID(),
     });
 
-    const { rows: mrRows } = await pool.query<{
+    const { rows: mrRows } = await workerPool.query<{
       status: string;
       recovery_evidence: string;
     }>(
@@ -2663,7 +2657,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
 
     // 3. Reject single-operator self-approval (initiator === approver)
     await assert.rejects(
-      resolveQuarantinedProvisioningJob(db, {
+      resolveQuarantinedProvisioningJob(operatorDb, {
         resolution: "ATTACH_RECOVERED_WALLET",
         jobId: personalJob.id,
         accountId: accPersonal.accountId,
@@ -2684,7 +2678,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
 
     // 4. Reject attaching a wallet already bound to another account (Business B's wallet)
     await assert.rejects(
-      resolveQuarantinedProvisioningJob(db, {
+      resolveQuarantinedProvisioningJob(operatorDb, {
         resolution: "ATTACH_RECOVERED_WALLET",
         jobId: personalJob.id,
         accountId: accPersonal.accountId,
@@ -2707,7 +2701,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
     const wrongNearHex =
       "11113cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac";
     await assert.rejects(
-      resolveQuarantinedProvisioningJob(db, {
+      resolveQuarantinedProvisioningJob(operatorDb, {
         resolution: "ATTACH_RECOVERED_WALLET",
         jobId: personalJob.id,
         accountId: accPersonal.accountId,
@@ -2728,7 +2722,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
 
     // 6. Reject wrong resolution (RESET_CONFIRMED_PRE_CREATION_FAILURE when finding is REMOTE_WALLET_LOCATED)
     await assert.rejects(
-      resolveQuarantinedProvisioningJob(db, {
+      resolveQuarantinedProvisioningJob(operatorDb, {
         resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
         jobId: personalJob.id,
         accountId: accPersonal.accountId,
@@ -2742,7 +2736,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
     );
 
     // 7. Valid two-person approval attaches recovered wallet (Stage 1) and transitions job to REGISTERED
-    const attached = await resolveQuarantinedProvisioningJob(db, {
+    const attached = await resolveQuarantinedProvisioningJob(operatorDb, {
       resolution: "ATTACH_RECOVERED_WALLET",
       jobId: personalJob.id,
       accountId: accPersonal.accountId,
@@ -2797,7 +2791,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
     assert.equal(dropRes.outcome, "quarantined");
     mockServer.setOptions({ multiWalletMode: true });
 
-    const { rows: dropJobRows } = await pool.query<{
+    const { rows: dropJobRows } = await workerPool.query<{
       dispatch_attempt_id: string;
     }>(
       "SELECT dispatch_attempt_id FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
@@ -2805,7 +2799,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
     );
     const dropDispatchId = dropJobRows[0]!.dispatch_attempt_id;
 
-    await escalateJobToManualReview(db, {
+    await escalateJobToManualReview(operatorDb, {
       jobId: noRemoteJob.id,
       accountId: accNoRemote.accountId,
       expectedAccountKind: "PERSONAL",
@@ -2816,7 +2810,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
       requestId: randomUUID(),
     });
 
-    await resolveQuarantinedProvisioningJob(db, {
+    await resolveQuarantinedProvisioningJob(operatorDb, {
       resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
       jobId: noRemoteJob.id,
       accountId: accNoRemote.accountId,
@@ -2837,32 +2831,45 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
 });
 
 test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and verifyOperatorInDatabase reject unauthenticated operator IDs", async () => {
-  const db = getPrismaClient();
-
+  await operatorPool.query(
+    "DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
   // Create real registered auth users for operators
+  const secOfficer = await createTestAccount(pool, "PERSONAL", "sec-officer");
   const opRealA = await createTestAccount(pool, "PERSONAL", "real-op-a");
   const opRealB = await createTestAccount(pool, "PERSONAL", "real-op-b");
   const fakeOperatorAuthId = "unregistered-fake-operator-id";
 
   // 1. assertOperatorIdentityRegistered rejects fake operator ID
   await assert.rejects(
-    assertOperatorIdentityRegistered(db, fakeOperatorAuthId),
+    assertOperatorIdentityRegistered(operatorDb, fakeOperatorAuthId),
     { code: "INVALID_OPERATOR_IDENTITY" },
   );
 
   // 2. assertOperatorIdentityRegistered succeeds for real registered auth user
-  await assertOperatorIdentityRegistered(db, opRealA.authUserId);
-  await assertOperatorIdentityRegistered(db, opRealB.authUserId);
+  await assertOperatorIdentityRegistered(operatorDb, opRealA.authUserId);
+  await assertOperatorIdentityRegistered(operatorDb, opRealB.authUserId);
+
+  // Bootstrap initial security officer operator
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: secOfficer.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: opRealA.authUserId,
+  });
 
   // Enroll opRealA into flow.custody_operators
-  await enrollCustodyOperator(db, {
+  await enrollCustodyOperator(operatorDb, {
     authUserId: opRealA.authUserId,
-    enrolledBy: "security-officer-seed",
+    role: "CUSTODY_OPERATOR",
+    enrolledBy: secOfficer.authUserId,
   });
-  await assertOperatorAuthority(db, opRealA.authUserId);
-  await assert.rejects(assertOperatorAuthority(db, opRealB.authUserId), {
-    code: "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
-  });
+  await assertOperatorAuthority(operatorDb, opRealA.authUserId);
+  await assert.rejects(
+    assertOperatorAuthority(operatorDb, opRealB.authUserId),
+    {
+      code: "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+    },
+  );
 
   // 3. Test verifyOperatorInDatabase on escalateJobToManualReview
   const acc = await createTestAccount(pool, "PERSONAL", "op-verify-test");
@@ -2873,12 +2880,12 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
   );
 
   // Set job status to UNKNOWN to allow escalation
-  await pool.query(
+  await operatorPool.query(
     "UPDATE flow.wallet_provisioning_jobs SET status = 'UNKNOWN', failure_classification = 'POST_DISPATCH_AMBIGUOUS', dispatch_attempt_id = gen_random_uuid(), dispatched_at = CURRENT_TIMESTAMP WHERE id = $1::uuid",
     [job.id],
   );
 
-  const jobRows = await pool.query<{ dispatch_attempt_id: string }>(
+  const jobRows = await operatorPool.query<{ dispatch_attempt_id: string }>(
     "SELECT dispatch_attempt_id FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
     [job.id],
   );
@@ -2886,7 +2893,7 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
 
   // Escalation with fake operator and verifyOperatorInDatabase: true must be rejected
   await assert.rejects(
-    escalateJobToManualReview(db, {
+    escalateJobToManualReview(operatorDb, {
       jobId: job.id,
       accountId: acc.accountId,
       operatorAuthId: fakeOperatorAuthId,
@@ -2899,7 +2906,7 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
   );
 
   // Escalation with real operator and verifyOperatorInDatabase: true succeeds
-  await escalateJobToManualReview(db, {
+  await escalateJobToManualReview(operatorDb, {
     jobId: job.id,
     accountId: acc.accountId,
     operatorAuthId: opRealA.authUserId,
@@ -2911,7 +2918,7 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
 
   // Resolution with fake approver must be rejected
   await assert.rejects(
-    resolveQuarantinedProvisioningJob(db, {
+    resolveQuarantinedProvisioningJob(operatorDb, {
       resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
       jobId: job.id,
       accountId: acc.accountId,
@@ -2927,7 +2934,7 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
 
   // Resolution where approver is not enrolled in flow.custody_operators must be rejected
   await assert.rejects(
-    resolveQuarantinedProvisioningJob(db, {
+    resolveQuarantinedProvisioningJob(operatorDb, {
       resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
       jobId: job.id,
       accountId: acc.accountId,
@@ -2942,14 +2949,15 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
   );
 
   // Enroll opRealB as operator
-  await enrollCustodyOperator(db, {
+  await enrollCustodyOperator(operatorDb, {
     authUserId: opRealB.authUserId,
-    enrolledBy: "security-officer-seed",
+    role: "CUSTODY_OPERATOR",
+    enrolledBy: secOfficer.authUserId,
   });
 
   // Resolution without independent flow.custody_recovery_approvals record must be rejected
   await assert.rejects(
-    resolveQuarantinedProvisioningJob(db, {
+    resolveQuarantinedProvisioningJob(operatorDb, {
       resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
       jobId: job.id,
       accountId: acc.accountId,
@@ -2964,15 +2972,17 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
   );
 
   // Create valid independent recovery approval record
-  await createCustodyRecoveryApproval(db, {
+  await createCustodyRecoveryApproval(operatorDb, {
     jobId: job.id,
     accountId: acc.accountId,
+    initiatorOperatorAuthId: opRealA.authUserId,
     approverAuthId: opRealB.authUserId,
+    expectedDispatchAttemptId: dispatchAttemptId,
     resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
   });
 
   // Resolution now succeeds and atomically consumes the approval record
-  const resolutionResult = await resolveQuarantinedProvisioningJob(db, {
+  const resolutionResult = await resolveQuarantinedProvisioningJob(operatorDb, {
     resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
     jobId: job.id,
     accountId: acc.accountId,
@@ -2987,12 +2997,31 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
 });
 
 test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, racing claims, ambiguity consumption, and expiration", async () => {
-  const db = getPrismaClient();
+  await operatorPool.query(
+    "DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
   const acc = await createTestAccount(pool, "PERSONAL", "compat-budget-test");
+  const opAuthUser = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "compat-op-user",
+  );
+  const secUser = await createTestAccount(pool, "PERSONAL", "compat-sec-user");
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: secUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: opAuthUser.authUserId,
+  });
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: opAuthUser.authUserId,
+    role: "CUSTODY_OPERATOR",
+    enrolledBy: secUser.authUserId,
+  });
 
   // 1. Check constraints on max_registrations and registrations_attempted
   await assert.rejects(
-    pool.query(
+    operatorPool.query(
       `INSERT INTO flow.provider_compatibility_authorizations (
         account_id, environment, allowed_methods, max_registrations, expires_at
       ) VALUES ($1::uuid, 'testnet', ARRAY['POST /register'], 2, CURRENT_TIMESTAMP + interval '1 hour')`,
@@ -3002,12 +3031,23 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
   );
 
   // 2. Create durable single-use compatibility authorization record
-  const auth = await createCompatibilityAuthorization(db, {
+  const auth = await createCompatibilityAuthorization(operatorDb, {
     accountId: acc.accountId,
     environment: "testnet",
+    operatorAuthId: opAuthUser.authUserId,
   });
   assert.ok(auth.id);
   assert.ok(auth.expiresAt > new Date());
+
+  // Creating duplicate authorization while singleton scope exists must fail
+  await assert.rejects(
+    createCompatibilityAuthorization(operatorDb, {
+      accountId: acc.accountId,
+      environment: "testnet",
+      operatorAuthId: opAuthUser.authUserId,
+    }),
+    { code: "CUSTODY_REGISTRATION_BUDGET_EXCEEDED" },
+  );
 
   // 3. Concurrent workers race to claim the single-registration budget
   const dispatch1 = randomUUID();
@@ -3051,11 +3091,15 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
     { code: "CUSTODY_REGISTRATION_BUDGET_EXCEEDED" },
   );
 
-  // 5. Successful registration lifecycle
+  // 5. Successful registration lifecycle: clean up previous singleton before creating next test
+  await operatorPool.query(
+    "DELETE FROM flow.provider_compatibility_authorizations",
+  );
   const acc2 = await createTestAccount(pool, "PERSONAL", "compat-success-test");
-  const auth2 = await createCompatibilityAuthorization(db, {
+  const auth2 = await createCompatibilityAuthorization(operatorDb, {
     accountId: acc2.accountId,
     environment: "testnet",
+    operatorAuthId: opAuthUser.authUserId,
   });
   const dispatch3 = randomUUID();
   await claimCompatibilityRegistration(
@@ -3066,7 +3110,7 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
   );
   await completeCompatibilityRegistration(db, auth2.id, dispatch3);
 
-  const auth2Rows = await pool.query<{
+  const auth2Rows = await operatorPool.query<{
     status: string;
     registrations_completed: number;
     consumed_at: Date | null;
@@ -3078,9 +3122,12 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
   assert.equal(auth2Rows.rows[0]!.registrations_completed, 1);
   assert.ok(auth2Rows.rows[0]!.consumed_at);
 
-  // 6. Expired authorization cannot be claimed
+  // 6. Expired authorization cannot be claimed: clean up previous singleton first
+  await operatorPool.query(
+    "DELETE FROM flow.provider_compatibility_authorizations",
+  );
   const acc3 = await createTestAccount(pool, "PERSONAL", "compat-expired-test");
-  const expiredInsert = await pool.query<{ id: string }>(
+  const expiredInsert = await operatorPool.query<{ id: string }>(
     `INSERT INTO flow.provider_compatibility_authorizations (
       account_id, environment, allowed_methods, status, max_registrations, expires_at
     ) VALUES ($1::uuid, 'testnet', ARRAY['POST /register'], 'AUTHORIZED', 1, CURRENT_TIMESTAMP - interval '1 minute')
@@ -3126,4 +3173,392 @@ test("M2 Phase 5.1 OutLayerAdapter prohibited execution methods throw CUSTODY_EX
     name: "FlowError",
     code: "CUSTODY_EXECUTION_BLOCKED",
   });
+});
+
+test("M2 Phase 5.2 Adversarial Test: Database privilege separation blocks permission abuse across roles", async () => {
+  const acc = await createTestAccount(pool, "PERSONAL", "priv-abuse");
+  const dummyWalletId = randomUUID();
+
+  // 1. App role (pool) CANNOT insert into flow.wallets (42501 permission denied)
+  await assert.rejects(
+    pool.query(
+      `INSERT INTO flow.wallets (
+        id, account_id, provider, provider_wallet_id, near_account_id,
+        encrypted_credential, key_id, key_digest, status
+      ) VALUES ($1, $2, 'OUTLAYER', 'pw-bad', 'bad.near', 'v1:dummy', 'v1', 'digest', 'ACTIVE')`,
+      [dummyWalletId, acc.accountId],
+    ),
+    { code: "42501" },
+  );
+
+  // 2. App role (pool) CANNOT insert or update flow.custody_operators (42501)
+  await assert.rejects(
+    pool.query(
+      `INSERT INTO flow.custody_operators (auth_user_id, role, status, enrolled_by)
+       VALUES ($1, 'CUSTODY_ADMIN', 'ACTIVE', $1)`,
+      [acc.authUserId],
+    ),
+    { code: "42501" },
+  );
+
+  // 3. App role (pool) CANNOT insert or update flow.custody_recovery_approvals (42501)
+  await assert.rejects(
+    pool.query(
+      `INSERT INTO flow.custody_recovery_approvals (
+        job_id, account_id, approver_auth_id, initiator_operator_auth_id,
+        dispatch_attempt_id, resolution, approval_token_hash, status, expires_at
+      ) VALUES (gen_random_uuid(), $1, $2, $2, gen_random_uuid(), 'ATTACH_RECOVERED_WALLET', 'dummy-hash', 'PENDING', now() + interval '1 hour')`,
+      [acc.accountId, acc.authUserId],
+    ),
+    { code: "42501" },
+  );
+
+  // 4. App role (pool) CANNOT insert or update flow.provider_compatibility_authorizations (42501)
+  await assert.rejects(
+    pool.query(
+      `INSERT INTO flow.provider_compatibility_authorizations (
+        account_id, environment, allowed_methods, status, max_registrations, expires_at
+      ) VALUES ($1, 'testnet', ARRAY['POST /register'], 'AUTHORIZED', 1, now() + interval '1 hour')`,
+      [acc.accountId],
+    ),
+    { code: "42501" },
+  );
+
+  // 5. App role (pool) CANNOT update flow.wallet_capabilities (42501)
+  await assert.rejects(
+    pool.query(`UPDATE flow.wallet_capabilities SET can_sign_transfer = true`),
+    { code: "42501" },
+  );
+
+  // 6. Worker role (workerPool) CANNOT insert into flow.custody_operators (42501)
+  await assert.rejects(
+    workerPool.query(
+      `INSERT INTO flow.custody_operators (auth_user_id, role, status, enrolled_by)
+       VALUES ($1, 'CUSTODY_OPERATOR', 'ACTIVE', $1)`,
+      [acc.authUserId],
+    ),
+    { code: "42501" },
+  );
+
+  // 7. Worker role (workerPool) CANNOT insert into flow.custody_recovery_approvals (42501)
+  await assert.rejects(
+    workerPool.query(
+      `INSERT INTO flow.custody_recovery_approvals (
+        job_id, account_id, approver_auth_id, initiator_operator_auth_id,
+        dispatch_attempt_id, resolution, approval_token_hash, status, expires_at
+      ) VALUES (gen_random_uuid(), $1, $2, $2, gen_random_uuid(), 'ATTACH_RECOVERED_WALLET', 'dummy-hash-worker', 'PENDING', now() + interval '1 hour')`,
+      [acc.accountId, acc.authUserId],
+    ),
+    { code: "42501" },
+  );
+
+  // 8. Worker role (workerPool) CANNOT insert into flow.provider_compatibility_authorizations (42501)
+  await assert.rejects(
+    workerPool.query(
+      `INSERT INTO flow.provider_compatibility_authorizations (
+        account_id, environment, allowed_methods, status, max_registrations, expires_at
+      ) VALUES ($1, 'testnet', ARRAY['POST /register'], 'AUTHORIZED', 1, now() + interval '1 hour')`,
+      [acc.accountId],
+    ),
+    { code: "42501" },
+  );
+
+  // 9. Operator role (operatorPool) CANNOT insert into flow.wallet_addresses (42501)
+  await assert.rejects(
+    operatorPool.query(
+      `INSERT INTO flow.wallet_addresses (wallet_id, network, chain_id, address, public_key)
+       VALUES (gen_random_uuid(), 'near', 'near-testnet', 'alice.testnet', 'ed25519:dummy')`,
+    ),
+    { code: "42501" },
+  );
+
+  // 10. Operator role (operatorPool) CANNOT insert into flow.wallet_capabilities (42501)
+  await assert.rejects(
+    operatorPool.query(
+      `INSERT INTO flow.wallet_capabilities (wallet_id, network, can_derive_address, can_receive, can_sign_transfer, broadcast_mode)
+       VALUES (gen_random_uuid(), 'near', true, true, false, 'internal')`,
+    ),
+    { code: "42501" },
+  );
+});
+
+test("M2 Phase 5.2 Adversarial Test: Operator self-enrollment, self-approval, approval replay, and correlation mismatch rejection", async () => {
+  await operatorPool.query(
+    "DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const op1 = await createTestAccount(pool, "PERSONAL", "adv-op1");
+  const op2 = await createTestAccount(pool, "PERSONAL", "adv-op2");
+  const targetAcc = await createTestAccount(pool, "PERSONAL", "adv-target");
+
+  // 1. Operator self-enrollment rejection (initiator === approver / enrolledBy)
+  await assert.rejects(
+    enrollCustodyOperator(operatorDb, {
+      authUserId: op1.authUserId,
+      enrolledBy: op1.authUserId, // self-enrollment!
+    }),
+    { code: "TWO_PERSON_APPROVAL_REQUIRED" },
+  );
+
+  // Bootstrap initial security officer
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: op1.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: op2.authUserId,
+  });
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: op2.authUserId,
+    role: "CUSTODY_OPERATOR",
+    enrolledBy: op1.authUserId,
+  });
+
+  // Setup quarantined job
+  const job = await ensureProvisioningJobForAccount(
+    db,
+    targetAcc.accountId,
+    randomUUID(),
+  );
+  const dispatchAttemptId = randomUUID();
+  await operatorPool.query(
+    "UPDATE flow.wallet_provisioning_jobs SET status = 'UNKNOWN', failure_classification = 'POST_DISPATCH_AMBIGUOUS', dispatch_attempt_id = $1::uuid, dispatched_at = CURRENT_TIMESTAMP WHERE id = $2::uuid",
+    [dispatchAttemptId, job.id],
+  );
+
+  // Escalate to MANUAL_REVIEW with providerInspectionSummary='NO_REMOTE_WALLET_FOUND'
+  await escalateJobToManualReview(operatorDb, {
+    jobId: job.id,
+    accountId: targetAcc.accountId,
+    operatorAuthId: op1.authUserId,
+    reasonCode: "AMBIGUOUS_REGISTRATION_OUTCOME",
+    providerInspectionSummary: "NO_REMOTE_WALLET_FOUND",
+    requestId: randomUUID(),
+    verifyOperatorInDatabase: true,
+  });
+
+  // 2. Recovery self-approval rejection (initiator === approver)
+  await assert.rejects(
+    createCustodyRecoveryApproval(operatorDb, {
+      jobId: job.id,
+      accountId: targetAcc.accountId,
+      initiatorOperatorAuthId: op1.authUserId,
+      approverAuthId: op1.authUserId, // self-approval!
+      expectedDispatchAttemptId: dispatchAttemptId,
+      resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+    }),
+    { code: "TWO_PERSON_APPROVAL_REQUIRED" },
+  );
+
+  // Direct DB insert check constraint rejection: custody_recovery_approvals_self_approval_check
+  await assert.rejects(
+    operatorPool.query(
+      `INSERT INTO flow.custody_recovery_approvals (
+        job_id, account_id, approver_auth_id, initiator_operator_auth_id,
+        dispatch_attempt_id, resolution, approval_token_hash, status, expires_at
+      ) VALUES ($1::uuid, $2::uuid, $3, $3, $4::uuid, 'RESET_CONFIRMED_PRE_CREATION_FAILURE', 'hash-self', 'PENDING', now() + interval '1 hour')`,
+      [job.id, targetAcc.accountId, op1.authUserId, dispatchAttemptId],
+    ),
+    { code: "23514" }, // CHECK constraint violation
+  );
+
+  // 3. Dispatch attempt ID mismatch: approval created for dispatch attempt A cannot be used for B
+  const wrongDispatchId = randomUUID();
+  await assert.rejects(
+    createCustodyRecoveryApproval(operatorDb, {
+      jobId: job.id,
+      accountId: targetAcc.accountId,
+      initiatorOperatorAuthId: op1.authUserId,
+      approverAuthId: op2.authUserId,
+      expectedDispatchAttemptId: wrongDispatchId, // wrong dispatch ID!
+      resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+    }),
+    { code: "CUSTODY_PROVIDER_CORRELATION_ERROR" },
+  );
+
+  // 4. Valid recovery approval creation
+  const approval = await createCustodyRecoveryApproval(operatorDb, {
+    jobId: job.id,
+    accountId: targetAcc.accountId,
+    initiatorOperatorAuthId: op1.authUserId,
+    approverAuthId: op2.authUserId,
+    expectedDispatchAttemptId: dispatchAttemptId,
+    resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+  });
+  assert.ok(approval.id);
+  assert.ok(approval.token);
+
+  // 5. Recovery resolution consumes the approval record
+  await resolveQuarantinedProvisioningJob(operatorDb, {
+    resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+    jobId: job.id,
+    accountId: targetAcc.accountId,
+    expectedAccountKind: "PERSONAL",
+    expectedDispatchAttemptId: dispatchAttemptId,
+    initiatorOperatorAuthId: op1.authUserId,
+    approverOperatorAuthId: op2.authUserId,
+    approvalToken: approval.token,
+    requestId: randomUUID(),
+    verifyOperatorInDatabase: true,
+  });
+
+  // Check approval record is now CONSUMED in PostgreSQL
+  const { rows: appRows } = await operatorPool.query<{
+    status: string;
+    consumed_at: Date | null;
+  }>(
+    "SELECT status, consumed_at FROM flow.custody_recovery_approvals WHERE id = $1::uuid",
+    [approval.id],
+  );
+  assert.equal(appRows[0]!.status, "CONSUMED");
+  assert.ok(appRows[0]!.consumed_at);
+
+  // 6. Approval replay rejection: attempting to resolve again with same consumed approval MUST FAIL
+  await operatorPool.query(
+    "UPDATE flow.wallet_provisioning_jobs SET status = 'MANUAL_REVIEW' WHERE id = $1::uuid",
+    [job.id],
+  );
+  await assert.rejects(
+    resolveQuarantinedProvisioningJob(operatorDb, {
+      resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+      jobId: job.id,
+      accountId: targetAcc.accountId,
+      expectedAccountKind: "PERSONAL",
+      expectedDispatchAttemptId: dispatchAttemptId,
+      initiatorOperatorAuthId: op1.authUserId,
+      approverOperatorAuthId: op2.authUserId,
+      approvalToken: approval.token, // REPLAY!
+      requestId: randomUUID(),
+      verifyOperatorInDatabase: true,
+    }),
+    { code: "CUSTODY_INDEPENDENT_APPROVAL_REQUIRED" },
+  );
+});
+
+test("M2 Phase 5.2 Adversarial Test: Database singleton_scope UNIQUE constraint prevents multiple authorization grants", async () => {
+  await operatorPool.query(
+    "DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const accA = await createTestAccount(pool, "PERSONAL", "adv-singleton-a");
+  const accB = await createTestAccount(pool, "PERSONAL", "adv-singleton-b");
+  const opUser = await createTestAccount(pool, "PERSONAL", "adv-singleton-op");
+  const secUser = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "adv-singleton-sec",
+  );
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: secUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: opUser.authUserId,
+  });
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: opUser.authUserId,
+    role: "CUSTODY_OPERATOR",
+    enrolledBy: secUser.authUserId,
+  });
+
+  await operatorPool.query(
+    "DELETE FROM flow.provider_compatibility_authorizations",
+  );
+
+  // Create first authorization record
+  const authA = await createCompatibilityAuthorization(operatorDb, {
+    accountId: accA.accountId,
+    environment: "testnet",
+    operatorAuthId: opUser.authUserId,
+  });
+  assert.ok(authA.id);
+
+  // Attempting to insert a 2nd record directly via SQL fails with UNIQUE constraint violation on singleton_scope (23505)
+  await assert.rejects(
+    operatorPool.query(
+      `INSERT INTO flow.provider_compatibility_authorizations (
+        account_id, environment, allowed_methods, status, max_registrations, singleton_scope, expires_at
+      ) VALUES ($1::uuid, 'testnet', ARRAY['POST /register'], 'AUTHORIZED', 1, 'GLOBAL_TESTNET_REHEARSAL', now() + interval '1 hour')`,
+      [accB.accountId],
+    ),
+    { code: "23505" }, // Unique constraint violation
+  );
+
+  // Attempting to bypass singleton_scope with a different scope value fails with CHECK constraint violation (23514)
+  await assert.rejects(
+    operatorPool.query(
+      `INSERT INTO flow.provider_compatibility_authorizations (
+        account_id, environment, allowed_methods, status, max_registrations, singleton_scope, expires_at
+      ) VALUES ($1::uuid, 'testnet', ARRAY['POST /register'], 'AUTHORIZED', 1, 'BYPASS_ATTEMPT', now() + interval '1 hour')`,
+      [accB.accountId],
+    ),
+    { code: "23514" }, // Check constraint violation
+  );
+
+  // Clean up
+  await operatorPool.query(
+    "DELETE FROM flow.provider_compatibility_authorizations",
+  );
+});
+
+test("M2 Phase 5.2 Testnet wallet projection segregation: never eligible for deposits and displays deposit warning", async () => {
+  const accTestnet = await createTestAccount(pool, "PERSONAL", "proj-testnet");
+  const accMainnet = await createTestAccount(pool, "PERSONAL", "proj-mainnet");
+
+  // Create testnet wallet
+  const wTestnetId = randomUUID();
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state,
+      controller_account_id, environment
+    ) VALUES (
+      $1, $2, 'OUTLAYER', 'pw-testnet-1', 'testnet-wallet.near',
+      'v1:dummy', 'v1', 'digest', 'ACTIVE', 'stored', 'controller.near', 'testnet'
+    )`,
+    [wTestnetId, accTestnet.accountId],
+  );
+
+  // Create mainnet wallet
+  const wMainnetId = randomUUID();
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state,
+      controller_account_id, environment
+    ) VALUES (
+      $1, $2, 'OUTLAYER', 'pw-mainnet-1', 'mainnet-wallet.near',
+      'v1:dummy', 'v1', 'digest', 'ACTIVE', 'stored', 'controller.near', 'mainnet'
+    )`,
+    [wMainnetId, accMainnet.accountId],
+  );
+
+  // Public projection for testnet wallet
+  const testnetProj = await getAccountWalletPublicProjection(
+    appDb,
+    accTestnet.accountId,
+  );
+  assert.ok(testnetProj !== null);
+  assert.equal(testnetProj.environment, "testnet");
+  assert.equal(testnetProj.isTestnet, true);
+  assert.equal(
+    testnetProj.eligibleForDeposits,
+    false,
+    "Testnet wallet must NEVER be eligible for deposits",
+  );
+  assert.equal(
+    testnetProj.fundsReady,
+    false,
+    "Testnet wallet must NEVER be fundsReady",
+  );
+  assert.ok(
+    testnetProj.depositWarning !== null,
+    "Testnet wallet must include deposit warning",
+  );
+  assert.match(testnetProj.depositWarning!, /NEVER send mainnet or real funds/);
+
+  // Public projection for mainnet wallet
+  const mainnetProj = await getAccountWalletPublicProjection(
+    appDb,
+    accMainnet.accountId,
+  );
+  assert.ok(mainnetProj !== null);
+  assert.equal(mainnetProj.environment, "mainnet");
+  assert.equal(mainnetProj.isTestnet, false);
+  assert.equal(mainnetProj.depositWarning, null);
 });

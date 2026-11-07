@@ -8,18 +8,24 @@ const environmentSchema = z.object({
 });
 
 type EnvironmentInput = Readonly<Record<string, string | undefined>>;
-type DatabasePurpose = "runtime" | "migration";
+export type DatabasePurpose = "runtime" | "worker" | "operator" | "migration";
 
 const databaseUrlKeys = {
   runtime: "FLOW_DATABASE_URL",
+  worker: "FLOW_WORKER_DATABASE_URL",
+  operator: "FLOW_OPERATOR_DATABASE_URL",
   migration: "FLOW_MIGRATION_DATABASE_URL",
 } as const;
 
 const otherDatabaseCredentialKeys = [
   "FLOW_POSTGRES_ADMIN_PASSWORD",
   "FLOW_LOCAL_APP_PASSWORD",
+  "FLOW_LOCAL_WORKER_PASSWORD",
+  "FLOW_LOCAL_OPERATOR_PASSWORD",
   "FLOW_LOCAL_MIGRATOR_PASSWORD",
   "FLOW_TEST_APP_PASSWORD",
+  "FLOW_TEST_WORKER_PASSWORD",
+  "FLOW_TEST_OPERATOR_PASSWORD",
   "FLOW_TEST_MIGRATOR_PASSWORD",
   "POSTGRES_PASSWORD",
   "POSTGRES_PASSWORD_FILE",
@@ -47,9 +53,16 @@ function assertCredentialScope(
   if (Object.keys(source).some((key) => key.startsWith("NEXT_PUBLIC_"))) {
     invalidConfig("Public environment variables are disabled for FLOW M0.");
   }
-  const otherPurpose = purpose === "runtime" ? "migration" : "runtime";
+  const disallowedUrls =
+    purpose === "migration"
+      ? [
+          "FLOW_DATABASE_URL",
+          "FLOW_WORKER_DATABASE_URL",
+          "FLOW_OPERATOR_DATABASE_URL",
+        ]
+      : ["FLOW_MIGRATION_DATABASE_URL"];
   if (
-    source[databaseUrlKeys[otherPurpose]] !== undefined ||
+    disallowedUrls.some((k) => source[k] !== undefined) ||
     otherDatabaseCredentialKeys.some((key) => source[key] !== undefined)
   ) {
     invalidConfig(
@@ -65,10 +78,37 @@ export function assertWebEnvironment(source: EnvironmentInput): void {
       "Supply only the FLOW web runtime credentials to this process. Custody encryption keys are isolated to the wallet worker.",
     );
   }
+  if (source.FLOW_OPERATOR_DATABASE_URL !== undefined) {
+    invalidConfig(
+      "Supply only the FLOW web runtime credentials to this process. Privileged operator database credentials are strictly isolated.",
+    );
+  }
 }
 
 export function assertWorkerEnvironment(source: EnvironmentInput): void {
-  assertCredentialScope(source, "runtime");
+  if (source.FLOW_MIGRATION_DATABASE_URL !== undefined) {
+    invalidConfig(
+      "Migration credentials must remain strictly isolated and are prohibited in worker runtime.",
+    );
+  }
+  if (source.FLOW_OPERATOR_DATABASE_URL !== undefined) {
+    invalidConfig(
+      "Operator credentials must remain strictly isolated and are prohibited in worker runtime.",
+    );
+  }
+}
+
+export function assertOperatorEnvironment(source: EnvironmentInput): void {
+  if (source.FLOW_MIGRATION_DATABASE_URL !== undefined) {
+    invalidConfig(
+      "Migration credentials must remain strictly isolated and are prohibited in operator runtime.",
+    );
+  }
+  if (source.FLOW_WALLET_ENCRYPTION_KEY !== undefined) {
+    invalidConfig(
+      "Wallet encryption key is strictly isolated to the wallet worker and is prohibited in operator runtime.",
+    );
+  }
 }
 
 function parseDatabaseUrl(value: string | undefined, variable: string): URL {
@@ -101,7 +141,7 @@ function hasExpectedTls(
     return url.search === "";
   }
 
-  if (purpose === "runtime") {
+  if (purpose !== "migration") {
     return (
       url.searchParams.size === 1 &&
       url.searchParams.get("sslmode") === "verify-full"
@@ -130,7 +170,15 @@ export function readConfig(source: EnvironmentInput, purpose: DatabasePurpose) {
   const tls = environment === "staging" || environment === "production";
   const variable = databaseUrlKeys[purpose];
   const databaseName = `flow_${environment}`;
-  const role = `${databaseName}_${purpose === "runtime" ? "app" : "migrator"}`;
+  const roleSuffix =
+    purpose === "runtime"
+      ? "app"
+      : purpose === "worker"
+        ? "worker"
+        : purpose === "operator"
+          ? "operator"
+          : "migrator";
+  const role = `${databaseName}_${roleSuffix}`;
   const url = parseDatabaseUrl(source[variable], variable);
 
   if (

@@ -6,9 +6,13 @@
 
 CREATE ROLE flow_staging_migrator LOGIN PASSWORD 'replace-with-staging-migrator-password';
 CREATE ROLE flow_staging_app LOGIN PASSWORD 'replace-with-staging-app-password';
+CREATE ROLE flow_staging_worker LOGIN PASSWORD 'replace-with-staging-worker-password';
+CREATE ROLE flow_staging_operator LOGIN PASSWORD 'replace-with-staging-operator-password';
 
 CREATE DATABASE flow_staging OWNER flow_staging_migrator;
 
 REVOKE ALL ON DATABASE flow_staging FROM PUBLIC;
 GRANT CONNECT ON DATABASE flow_staging TO flow_staging_app;
+GRANT CONNECT ON DATABASE flow_staging TO flow_staging_worker;
+GRANT CONNECT ON DATABASE flow_staging TO flow_staging_operator;
 

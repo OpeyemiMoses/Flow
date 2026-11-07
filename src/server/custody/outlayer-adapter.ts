@@ -301,6 +301,16 @@ export class OutLayerAdapter {
       );
     }
 
+    // 3b. Fail-closed testnet coordinator enforcement (Requirement 7)
+    if (this.compatibilityConfig.providerEnvironment === "testnet") {
+      if (parsed.hostname.toLowerCase() !== "testnet-api.outlayer.ai") {
+        throw new FlowError(
+          "INVALID_CONFIGURATION",
+          "Testnet compatibility rehearsal strictly requires coordinator to be https://testnet-api.outlayer.ai; mainnet or legacy endpoints are strictly prohibited.",
+        );
+      }
+    }
+
     // 4. Exact endpoint allowlist for compatibility rehearsal
     const ALLOWED_ENDPOINTS = new Set([
       "/register",

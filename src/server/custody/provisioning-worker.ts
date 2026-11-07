@@ -66,6 +66,7 @@ export interface WalletProvisioningWorkerOptions {
   readonly maxBackoffMs?: number;
   readonly hooks?: ProvisioningWorkerHooks;
   readonly compatibilityAuthorizationId?: string;
+  readonly providerEnvironment?: "testnet" | "mainnet";
 }
 
 export type ProvisioningJobOutcome =
@@ -204,6 +205,7 @@ export class WalletProvisioningWorker {
   private readonly maxBackoffMs: number;
   private readonly hooks?: ProvisioningWorkerHooks;
   private readonly compatibilityAuthorizationId?: string;
+  private readonly providerEnvironment?: "testnet" | "mainnet";
 
   private running = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -231,6 +233,7 @@ export class WalletProvisioningWorker {
     );
     this.hooks = options.hooks;
     this.compatibilityAuthorizationId = options.compatibilityAuthorizationId;
+    this.providerEnvironment = options.providerEnvironment;
   }
 
   computeBackoffDelayMs(attempt: number): number {
@@ -527,6 +530,9 @@ export class WalletProvisioningWorker {
           keyId: this.walletConfig.keyId,
           keyDigest,
           handoffUrl: safeHandoffUrl,
+          environment:
+            this.providerEnvironment ??
+            (this.compatibilityAuthorizationId ? "testnet" : "mainnet"),
         },
       );
       walletStatus = "SETUP_PENDING";
