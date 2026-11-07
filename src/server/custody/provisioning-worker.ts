@@ -135,13 +135,38 @@ function mapErrorToFailureClassification(
   return "NETWORK_ERROR";
 }
 
-function isAmbiguousRegistrationError(error: unknown): boolean {
+/**
+ * Determines whether an error thrown during `POST /register` (after `recordJobDispatch`)
+ * has uncertain remote side effects and MUST be quarantined into `UNKNOWN` (`POST_DISPATCH_AMBIGUOUS`)
+ * rather than marked as a clean pre-creation `FAILED`.
+ *
+ * Only explicit, deterministic pre-execution rejections (`INVALID_CONFIGURATION` local guard,
+ * `CUSTODY_PROVIDER_RATE_LIMITED` HTTP 429, or deterministic HTTP 400/401/403/404/422 rejections)
+ * are known not to have created a remote wallet.
+ *
+ * Any timeout, network drop, 5xx/408/409/425 upstream error, or HTTP 200 OK response whose body
+ * was truncated/invalid JSON, failed schema parsing, or returned an invalid NEAR account ID
+ * means OutLayer may have created (or did create) a wallet whose bearer key could not be safely
+ * ingested — so it MUST be quarantined into `UNKNOWN`.
+ */
+export function isAmbiguousRegistrationError(error: unknown): boolean {
   if (error instanceof FlowError) {
-    return (
+    if (
       error.code === "CUSTODY_PROVIDER_TIMEOUT" ||
       error.code === "CUSTODY_PROVIDER_NETWORK_ERROR" ||
-      error.code === "CUSTODY_PROVIDER_UNAVAILABLE"
-    );
+      error.code === "CUSTODY_PROVIDER_UNAVAILABLE" ||
+      error.code === "CUSTODY_INVALID_ADDRESS"
+    ) {
+      return true;
+    }
+    if (
+      error.code === "CUSTODY_PROVIDER_ERROR" &&
+      (error.message.includes("Invalid JSON") ||
+        error.message.includes("schema mismatch"))
+    ) {
+      return true;
+    }
+    return false;
   }
   return true;
 }

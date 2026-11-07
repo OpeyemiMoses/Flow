@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { test } from "node:test";
 import {
   decodeBase58,
+  deriveEvmAddressFromSecp256k1PublicKey,
+  encodeBase58,
   evaluatePolicyReadiness,
   evaluateWalletFundReadiness,
   isValidEvmAddress,
@@ -13,6 +16,7 @@ import {
   validateAddressForNetwork,
   validateRequiredWalletProvisioning,
   verifyCustodyPolicyEvidence,
+  verifyPublicKeyMatchesAddress,
 } from "../src/domain/custody.ts";
 
 test("validates NEAR implicit addresses requiring 64 hexadecimal characters (32 bytes) and non-zero", () => {
@@ -503,4 +507,238 @@ test("evaluateWalletFundReadiness unconditionally blocks fund movement when FLOW
   });
   assert.equal(missingChainCheck.isReady, false);
   assert.ok(missingChainCheck.reason?.includes("Missing verified addresses"));
+});
+
+test("verifyPublicKeyMatchesAddress and deriveEvmAddressFromSecp256k1PublicKey verify cryptographic consistency across NEAR, Base (secp256k1 compressed and uncompressed), and Solana", () => {
+  // 1. NEAR implicit address === hex(ed25519 32-byte public key)
+  const nearImplicitHex =
+    "98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac";
+  const nearPubKeyBase58 = `ed25519:${encodeBase58(Buffer.from(nearImplicitHex, "hex"))}`;
+  assert.equal(
+    verifyPublicKeyMatchesAddress(
+      "near",
+      nearImplicitHex,
+      nearPubKeyHexOrBase58(nearPubKeyBase58),
+      {
+        strict: true,
+      },
+    ).valid,
+    true,
+  );
+  assert.equal(
+    verifyPublicKeyMatchesAddress(
+      "near",
+      nearImplicitHex,
+      `ed25519:${nearImplicitHex}`,
+      {
+        strict: true,
+      },
+    ).valid,
+    true,
+  );
+
+  // Mismatched NEAR public key must fail
+  const wrongNearHex =
+    "11113cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac";
+  assert.equal(
+    verifyPublicKeyMatchesAddress(
+      "near",
+      nearImplicitHex,
+      `ed25519:${encodeBase58(Buffer.from(wrongNearHex, "hex"))}`,
+      { strict: true },
+    ).valid,
+    false,
+  );
+
+  // Wrong curve prefix on NEAR must fail even in non-strict mode
+  assert.equal(
+    verifyPublicKeyMatchesAddress(
+      "near",
+      nearImplicitHex,
+      "secp256k1:nearKey",
+      {
+        strict: false,
+      },
+    ).valid,
+    false,
+  );
+
+  // 2. Base / EVM secp256k1 key (both 65-byte uncompressed and 33-byte compressed) -> Keccak-256 -> EIP-55 address
+  const ecdh = crypto.createECDH("secp256k1");
+  ecdh.setPrivateKey(
+    crypto
+      .createHash("sha256")
+      .update("flow-m2-phase4-secp256k1-test")
+      .digest(),
+  );
+  const uncompressedHex = ecdh.getPublicKey("hex", "uncompressed"); // 65 bytes (04 || x || y)
+  const compressedHex = ecdh.getPublicKey("hex", "compressed"); // 33 bytes (02/03 || x)
+  const uncompressed64Base58 = encodeBase58(
+    Buffer.from(uncompressedHex.slice(2), "hex"),
+  );
+
+  const derivedFromUncompressed = deriveEvmAddressFromSecp256k1PublicKey(
+    `secp256k1:${uncompressedHex}`,
+  );
+  const derivedFromCompressed = deriveEvmAddressFromSecp256k1PublicKey(
+    `secp256k1:${compressedHex}`,
+  );
+  const derivedFromBase58 = deriveEvmAddressFromSecp256k1PublicKey(
+    `secp256k1:${uncompressed64Base58}`,
+  );
+
+  assert.ok(derivedFromUncompressed !== null);
+  assert.equal(derivedFromUncompressed, derivedFromCompressed);
+  assert.equal(derivedFromUncompressed, derivedFromBase58);
+  assert.equal(isValidEvmAddress(derivedFromUncompressed), true);
+
+  assert.equal(
+    verifyPublicKeyMatchesAddress(
+      "base",
+      derivedFromUncompressed,
+      `secp256k1:${compressedHex}`,
+      { strict: true },
+    ).valid,
+    true,
+  );
+
+  // Mismatched EVM address for valid secp256k1 public key must fail
+  assert.equal(
+    verifyPublicKeyMatchesAddress(
+      "base",
+      "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      `secp256k1:${compressedHex}`,
+      { strict: true },
+    ).valid,
+    false,
+  );
+
+  // Off-curve secp256k1 point (corrupted y coordinate) must return null / fail verification
+  const corruptedUncompressed = `${uncompressedHex.slice(0, -2)}${uncompressedHex.endsWith("00") ? "01" : "00"}`;
+  assert.equal(
+    deriveEvmAddressFromSecp256k1PublicKey(
+      `secp256k1:${corruptedUncompressed}`,
+    ),
+    null,
+  );
+
+  // 3. Solana address === Base58(ed25519 32-byte public key)
+  const solanaAddress = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+  assert.equal(
+    verifyPublicKeyMatchesAddress(
+      "solana",
+      solanaAddress,
+      `ed25519:${solanaAddress}`,
+      {
+        strict: true,
+      },
+    ).valid,
+    true,
+  );
+  assert.equal(
+    verifyPublicKeyMatchesAddress(
+      "solana",
+      solanaAddress,
+      `ed25519:${encodeBase58(Buffer.from(nearImplicitHex, "hex"))}`,
+      { strict: true },
+    ).valid,
+    false,
+  );
+});
+
+function nearPubKeyHexOrBase58(val: string): string {
+  return val;
+}
+
+test("verifyCustodyPolicyEvidence validates documented OutLayer OpenAPI 0.1.0-alpha.4 PolicyResponse rules and capabilities", () => {
+  const expectedWalletId = "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20";
+
+  // 1. Documented OutLayer PolicyResponse with explicit empty transaction_types: [] and all signing/movement capabilities false succeeds
+  const verifiedOpenApiShape = verifyCustodyPolicyEvidence(
+    mintTrustedAdapterPolicyEvidence({
+      wallet_id: expectedWalletId,
+      controller: "controller.near",
+      frozen: false,
+      policy: "stored",
+      rules: {
+        transaction_types: [],
+      },
+      capabilities: {
+        raw_sign: false,
+        evm_sign: false,
+        solana_sign: false,
+        swap: false,
+        cross_chain_withdraw: false,
+        limit_order: false,
+        payment_check: false,
+        confidential: false,
+        sign_message: true,
+      },
+    }),
+    expectedWalletId,
+  );
+  assert.equal(verifiedOpenApiShape.policyState, "stored");
+
+  // 2. Documented OutLayer PolicyResponse where policy is omitted (undefined when chain unreadable) must be rejected
+  assert.throws(
+    () =>
+      verifyCustodyPolicyEvidence(
+        mintTrustedAdapterPolicyEvidence({
+          wallet_id: expectedWalletId,
+          controller: "controller.near",
+          frozen: false,
+          policy: undefined,
+          rules: { transaction_types: [] },
+        }),
+        expectedWalletId,
+      ),
+    { code: "POLICY_VERIFICATION_FAILED" },
+  );
+
+  // 3. Documented OutLayer PolicyResponse with non-empty transaction_types (e.g. ["near_call"]) must be rejected while FLOW_EXECUTION=disabled
+  assert.throws(
+    () =>
+      verifyCustodyPolicyEvidence(
+        mintTrustedAdapterPolicyEvidence({
+          wallet_id: expectedWalletId,
+          controller: "controller.near",
+          frozen: false,
+          policy: "stored",
+          rules: {
+            transaction_types: ["near_call"],
+          },
+        }),
+        expectedWalletId,
+      ),
+    { code: "POLICY_VERIFICATION_FAILED" },
+  );
+
+  // 4. Documented OutLayer PolicyResponse with active capabilities (e.g. evm_sign: true or raw_sign: true) must be rejected while FLOW_EXECUTION=disabled
+  for (const activeCap of [
+    "raw_sign",
+    "evm_sign",
+    "solana_sign",
+    "swap",
+    "cross_chain_withdraw",
+    "limit_order",
+    "payment_check",
+    "confidential",
+  ]) {
+    assert.throws(
+      () =>
+        verifyCustodyPolicyEvidence(
+          mintTrustedAdapterPolicyEvidence({
+            wallet_id: expectedWalletId,
+            controller: "controller.near",
+            frozen: false,
+            policy: "stored",
+            rules: { defaultAction: "DENY", transaction_types: [] },
+            capabilities: { [activeCap]: true },
+          }),
+          expectedWalletId,
+        ),
+      { code: "POLICY_VERIFICATION_FAILED" },
+      `Active capability '${activeCap}: true' must be rejected when financial execution is disabled`,
+    );
+  }
 });

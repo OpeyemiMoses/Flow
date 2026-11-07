@@ -4,6 +4,7 @@ import {
   isValidPolicyState,
   validateRequiredWalletProvisioning,
   verifyCustodyPolicyEvidence,
+  verifyPublicKeyMatchesAddress,
   type OutLayerPolicyState,
   type ProviderPolicyEvidenceInput,
 } from "../../domain/custody.ts";
@@ -1381,4 +1382,560 @@ export async function getAccountWalletPublicProjection(
     addresses,
     capabilities,
   };
+}
+
+export const ALLOWED_MANUAL_REVIEW_REASON_CODES = [
+  "AMBIGUOUS_REGISTRATION_OUTCOME",
+  "CORRUPTED_PROVIDER_RESPONSE",
+  "POLICY_VERIFICATION_ESCALATION",
+  "OPERATOR_SECURITY_HOLD",
+] as const;
+
+export type ManualReviewReasonCode =
+  (typeof ALLOWED_MANUAL_REVIEW_REASON_CODES)[number];
+
+export const ALLOWED_PROVIDER_INSPECTION_SUMMARIES = [
+  "NO_REMOTE_WALLET_FOUND",
+  "REMOTE_WALLET_LOCATED",
+  "PROVIDER_AUDIT_PENDING",
+] as const;
+
+export type ProviderInspectionSummary =
+  (typeof ALLOWED_PROVIDER_INSPECTION_SUMMARIES)[number];
+
+const OPERATOR_AUTH_ID_REGEX = /^[a-zA-Z0-9._:@-]{3,128}$/;
+
+export interface EscalateToManualReviewInput {
+  readonly jobId: string;
+  readonly accountId: string;
+  readonly expectedAccountKind?: "PERSONAL" | "BUSINESS";
+  readonly operatorAuthId: string;
+  readonly reasonCode: ManualReviewReasonCode;
+  readonly providerInspectionSummary: ProviderInspectionSummary;
+  readonly expectedDispatchAttemptId?: string;
+  readonly requestId: string;
+}
+
+/**
+ * Operator-only workflow step 1: Escalates a quarantined `UNKNOWN` (or `FAILED`)
+ * provisioning job into `MANUAL_REVIEW`, recording sanitized, allowlisted recovery
+ * evidence in `flow.wallet_provisioning_jobs.recovery_evidence` and appending an
+ * immutable audit event to `flow.security_audit_events`.
+ */
+export async function escalateJobToManualReview(
+  db: FlowDb,
+  input: EscalateToManualReviewInput,
+): Promise<{ readonly jobId: string; readonly fencingToken: bigint }> {
+  if (!OPERATOR_AUTH_ID_REGEX.test(input.operatorAuthId.trim())) {
+    throw new FlowError(
+      "INVALID_OPERATOR_IDENTITY",
+      "Operator authentication identifier is missing or invalid.",
+    );
+  }
+  if (!UUID_REGEX.test(input.requestId.trim())) {
+    throw new FlowError(
+      "INVALID_REQUEST_ID",
+      "Recovery escalation requires a valid UUID requestId.",
+    );
+  }
+  if (
+    !(ALLOWED_MANUAL_REVIEW_REASON_CODES as readonly string[]).includes(
+      input.reasonCode,
+    )
+  ) {
+    throw new FlowError(
+      "INVALID_RECOVERY_EVIDENCE",
+      "Unallowlisted manual review reason code.",
+    );
+  }
+  if (
+    !(ALLOWED_PROVIDER_INSPECTION_SUMMARIES as readonly string[]).includes(
+      input.providerInspectionSummary,
+    )
+  ) {
+    throw new FlowError(
+      "INVALID_RECOVERY_EVIDENCE",
+      "Unallowlisted provider inspection summary.",
+    );
+  }
+
+  return await db.$transaction(async (tx) => {
+    const jobs = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+        fencingToken: bigint;
+        dispatchAttemptId: string | null;
+      }>
+    >`
+      SELECT
+        id, account_id AS "accountId", status, fencing_token AS "fencingToken",
+        dispatch_attempt_id AS "dispatchAttemptId"
+      FROM flow.wallet_provisioning_jobs
+      WHERE id = ${input.jobId}::uuid
+      FOR UPDATE
+    `;
+
+    const job = jobs[0];
+    if (!job || job.accountId !== input.accountId) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Job ${input.jobId} does not belong to account ${input.accountId}.`,
+      );
+    }
+
+    if (input.expectedAccountKind !== undefined) {
+      const accounts = await tx.$queryRaw<
+        Array<{ id: string; kind: "PERSONAL" | "BUSINESS" }>
+      >`
+        SELECT id, kind::text AS kind
+        FROM flow.accounts
+        WHERE id = ${input.accountId}::uuid
+      `;
+      if (!accounts[0] || accounts[0].kind !== input.expectedAccountKind) {
+        throw new FlowError(
+          "WALLET_ACCOUNT_MISMATCH",
+          `Account ${input.accountId} does not match expected kind ${input.expectedAccountKind}.`,
+        );
+      }
+    }
+
+    if (job.status !== "UNKNOWN" && job.status !== "FAILED") {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Job ${input.jobId} cannot escalate to MANUAL_REVIEW from status ${job.status}.`,
+      );
+    }
+
+    if (
+      input.expectedDispatchAttemptId !== undefined &&
+      job.dispatchAttemptId !== input.expectedDispatchAttemptId
+    ) {
+      throw new FlowError(
+        "CUSTODY_PROVIDER_CORRELATION_ERROR",
+        `Job ${input.jobId} dispatch_attempt_id does not match expected dispatch correlation ID.`,
+      );
+    }
+
+    const nextFencingToken = job.fencingToken + 1n;
+    const sanitizedEvidence = JSON.stringify({
+      stage: "MANUAL_REVIEW_ESCALATED",
+      initiatorOperatorAuthId: input.operatorAuthId.trim(),
+      reasonCode: input.reasonCode,
+      providerInspectionSummary: input.providerInspectionSummary,
+      dispatchAttemptId: job.dispatchAttemptId,
+      requestId: input.requestId.trim().toLowerCase(),
+      escalatedAt: new Date().toISOString(),
+    });
+
+    await tx.$executeRaw`
+      UPDATE flow.wallet_provisioning_jobs
+      SET
+        status = 'MANUAL_REVIEW',
+        fencing_token = ${nextFencingToken},
+        lease_holder = NULL,
+        lease_expires_at = NULL,
+        recovery_evidence = ${sanitizedEvidence},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${input.jobId}::uuid
+        AND account_id = ${input.accountId}::uuid
+    `;
+
+    await tx.$executeRaw`
+      INSERT INTO flow.security_audit_events (
+        kind, actor_auth_id, account_id, target_id, request_id, created_at
+      ) VALUES (
+        'wallet_recovery_escalated',
+        ${input.operatorAuthId.trim()},
+        ${input.accountId}::uuid,
+        ${input.jobId},
+        ${input.requestId.trim()}::uuid,
+        CURRENT_TIMESTAMP
+      )
+    `;
+
+    return { jobId: input.jobId, fencingToken: nextFencingToken };
+  });
+}
+
+export type QuarantinedJobResolutionInput =
+  | {
+      readonly resolution: "ATTACH_RECOVERED_WALLET";
+      readonly jobId: string;
+      readonly accountId: string;
+      readonly expectedAccountKind: "PERSONAL" | "BUSINESS";
+      readonly expectedDispatchAttemptId: string;
+      readonly initiatorOperatorAuthId: string;
+      readonly approverOperatorAuthId: string;
+      readonly providerWalletId: string;
+      readonly nearAccountId: string;
+      readonly nearPublicKey: string;
+      readonly encryptedCredential: string;
+      readonly keyId: string;
+      readonly keyDigest: string;
+      readonly handoffUrl?: string;
+      readonly requestId: string;
+    }
+  | {
+      readonly resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE";
+      readonly jobId: string;
+      readonly accountId: string;
+      readonly expectedAccountKind: "PERSONAL" | "BUSINESS";
+      readonly expectedDispatchAttemptId: string;
+      readonly initiatorOperatorAuthId: string;
+      readonly approverOperatorAuthId: string;
+      readonly requestId: string;
+    };
+
+/**
+ * Operator-only workflow step 2: Resolves a quarantined job in `UNKNOWN` or `MANUAL_REVIEW`
+ * with mandatory two-person approval (`initiatorOperatorAuthId !== approverOperatorAuthId`),
+ * account ownership and account-kind (`PERSONAL` vs. `BUSINESS`) verification, dispatch
+ * attempt correlation verification, unrelated-wallet attachment prevention, cryptographic
+ * NEAR public-key-to-address verification, and append-only `flow.security_audit_events` logging.
+ */
+export async function resolveQuarantinedProvisioningJob(
+  db: FlowDb,
+  input: QuarantinedJobResolutionInput,
+): Promise<{
+  readonly jobId: string;
+  readonly status: string;
+  readonly fencingToken: bigint;
+  readonly walletId?: string;
+}> {
+  const initiator = input.initiatorOperatorAuthId.trim();
+  const approver = input.approverOperatorAuthId.trim();
+  if (
+    !OPERATOR_AUTH_ID_REGEX.test(initiator) ||
+    !OPERATOR_AUTH_ID_REGEX.test(approver)
+  ) {
+    throw new FlowError(
+      "INVALID_OPERATOR_IDENTITY",
+      "Both initiator and approver operator auth IDs must be valid non-empty identifiers.",
+    );
+  }
+  if (initiator.toLowerCase() === approver.toLowerCase()) {
+    throw new FlowError(
+      "TWO_PERSON_APPROVAL_REQUIRED",
+      "Quarantined wallet recovery requires two distinct operators (initiatorOperatorAuthId !== approverOperatorAuthId).",
+    );
+  }
+  if (!UUID_REGEX.test(input.requestId.trim())) {
+    throw new FlowError(
+      "INVALID_REQUEST_ID",
+      "Recovery resolution requires a valid UUID requestId.",
+    );
+  }
+  if (!UUID_REGEX.test(input.expectedDispatchAttemptId.trim())) {
+    throw new FlowError(
+      "CUSTODY_PROVIDER_CORRELATION_ERROR",
+      "Recovery resolution requires a valid UUID expectedDispatchAttemptId.",
+    );
+  }
+
+  return await db.$transaction(async (tx) => {
+    const accounts = await tx.$queryRaw<
+      Array<{ id: string; kind: "PERSONAL" | "BUSINESS" }>
+    >`
+      SELECT id, kind::text AS kind
+      FROM flow.accounts
+      WHERE id = ${input.accountId}::uuid
+    `;
+    const account = accounts[0];
+    if (!account || account.kind !== input.expectedAccountKind) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Target account ${input.accountId} does not exist or does not match expected kind ${input.expectedAccountKind}.`,
+      );
+    }
+
+    const jobs = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+        fencingToken: bigint;
+        dispatchAttemptId: string | null;
+        dispatchedAt: Date | null;
+        recoveryEvidence: string | null;
+      }>
+    >`
+      SELECT
+        id, account_id AS "accountId", status, fencing_token AS "fencingToken",
+        dispatch_attempt_id AS "dispatchAttemptId", dispatched_at AS "dispatchedAt",
+        recovery_evidence AS "recoveryEvidence"
+      FROM flow.wallet_provisioning_jobs
+      WHERE id = ${input.jobId}::uuid
+      FOR UPDATE
+    `;
+
+    const job = jobs[0];
+    if (!job || job.accountId !== input.accountId) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Job ${input.jobId} does not belong to account ${input.accountId}.`,
+      );
+    }
+
+    if (input.expectedAccountKind !== undefined) {
+      const accounts = await tx.$queryRaw<
+        Array<{ id: string; kind: "PERSONAL" | "BUSINESS" }>
+      >`
+        SELECT id, kind::text AS kind
+        FROM flow.accounts
+        WHERE id = ${input.accountId}::uuid
+      `;
+      if (!accounts[0] || accounts[0].kind !== input.expectedAccountKind) {
+        throw new FlowError(
+          "WALLET_ACCOUNT_MISMATCH",
+          `Account ${input.accountId} does not match expected kind ${input.expectedAccountKind}.`,
+        );
+      }
+    }
+
+    if (job.status !== "UNKNOWN" && job.status !== "MANUAL_REVIEW") {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Operator recovery can only resolve jobs in UNKNOWN or MANUAL_REVIEW, not ${job.status}.`,
+      );
+    }
+
+    if (
+      !job.dispatchedAt ||
+      !job.dispatchAttemptId ||
+      job.dispatchAttemptId.toLowerCase() !==
+        input.expectedDispatchAttemptId.trim().toLowerCase()
+    ) {
+      throw new FlowError(
+        "CUSTODY_PROVIDER_CORRELATION_ERROR",
+        `Job ${input.jobId} dispatch_attempt_id does not match expectedDispatchAttemptId.`,
+      );
+    }
+
+    // If previously escalated, enforce that approver is not the escalation initiator
+    let previousInspectionSummary: string | undefined;
+    if (job.recoveryEvidence) {
+      try {
+        const parsedPrev = JSON.parse(job.recoveryEvidence) as Record<
+          string,
+          unknown
+        >;
+        if (
+          typeof parsedPrev.initiatorOperatorAuthId === "string" &&
+          parsedPrev.initiatorOperatorAuthId.trim().toLowerCase() ===
+            approver.toLowerCase()
+        ) {
+          throw new FlowError(
+            "TWO_PERSON_APPROVAL_REQUIRED",
+            "Approver operator cannot be the same operator who initiated manual review escalation.",
+          );
+        }
+        if (typeof parsedPrev.providerInspectionSummary === "string") {
+          previousInspectionSummary = parsedPrev.providerInspectionSummary;
+        }
+      } catch (err) {
+        if (err instanceof FlowError) throw err;
+      }
+    }
+
+    const nextFencingToken = job.fencingToken + 1n;
+
+    if (input.resolution === "ATTACH_RECOVERED_WALLET") {
+      if (
+        !UUID_REGEX.test(input.providerWalletId.trim()) ||
+        !isValidNearAddress(input.nearAccountId)
+      ) {
+        throw new FlowError(
+          "CUSTODY_INVALID_ADDRESS",
+          "Recovered wallet requires a valid UUID providerWalletId and valid NEAR account ID.",
+        );
+      }
+
+      const keyCheck = verifyPublicKeyMatchesAddress(
+        "near",
+        input.nearAccountId,
+        input.nearPublicKey,
+        { strict: true },
+      );
+      if (!keyCheck.valid || !keyCheck.verifiedCryptographically) {
+        throw new FlowError(
+          "CUSTODY_INVALID_ADDRESS",
+          `Recovered NEAR public key is not cryptographically consistent with NEAR address: ${keyCheck.error ?? "unverified"}`,
+        );
+      }
+
+      // Prevent attaching a wallet that is already bound to ANY account (or if target account already has a wallet)
+      const conflictingWallets = await tx.$queryRaw<
+        Array<{ id: string; accountId: string }>
+      >`
+        SELECT id, account_id AS "accountId"
+        FROM flow.wallets
+        WHERE account_id = ${input.accountId}::uuid
+           OR provider_wallet_id = ${input.providerWalletId.trim()}
+           OR lower(near_account_id) = lower(${input.nearAccountId.trim()})
+      `;
+      if (conflictingWallets.length > 0) {
+        throw new FlowError(
+          "WALLET_ACCOUNT_MISMATCH",
+          "Cannot attach recovered wallet: provider_wallet_id, near_account_id, or target account is already bound to an existing wallet.",
+        );
+      }
+
+      const safeHandoffUrl = scrubHandoffUrl(input.handoffUrl) ?? null;
+      const insertedWallets = await tx.$queryRaw<Array<{ id: string }>>`
+        INSERT INTO flow.wallets (
+          account_id, provider, provider_wallet_id, near_account_id,
+          encrypted_credential, key_id, key_digest, status, policy_state,
+          controller_account_id, handoff_url, created_at, updated_at
+        ) VALUES (
+          ${input.accountId}::uuid, 'OUTLAYER', ${input.providerWalletId.trim()}, ${input.nearAccountId.trim().toLowerCase()},
+          ${input.encryptedCredential}, ${input.keyId}, ${input.keyDigest}, 'SETUP_PENDING'::flow.wallet_status,
+          'none', NULL, ${safeHandoffUrl}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        )
+        RETURNING id
+      `;
+      const wallet = insertedWallets[0];
+      if (!wallet) {
+        throw new FlowError(
+          "DATABASE_UNAVAILABLE",
+          "Failed to persist recovered wallet.",
+        );
+      }
+
+      const resolutionEvidence = JSON.stringify({
+        stage: "RESOLVED_ATTACH_WALLET",
+        resolution: input.resolution,
+        accountKind: account.kind,
+        initiatorOperatorAuthId: initiator,
+        approverOperatorAuthId: approver,
+        dispatchAttemptId: job.dispatchAttemptId,
+        providerWalletId: input.providerWalletId.trim(),
+        walletId: wallet.id,
+        requestId: input.requestId.trim().toLowerCase(),
+        resolvedAt: new Date().toISOString(),
+      });
+
+      await tx.$executeRaw`
+        UPDATE flow.wallet_provisioning_jobs
+        SET
+          status = 'REGISTERED',
+          fencing_token = ${nextFencingToken},
+          lease_holder = NULL,
+          lease_expires_at = NULL,
+          last_error = NULL,
+          failure_classification = NULL,
+          recovery_evidence = ${resolutionEvidence},
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${input.jobId}::uuid
+          AND account_id = ${input.accountId}::uuid
+      `;
+
+      await tx.$executeRaw`
+        INSERT INTO flow.security_audit_events (
+          kind, actor_auth_id, account_id, target_id, request_id, created_at
+        ) VALUES
+          (
+            'wallet_recovery_initiated',
+            ${initiator},
+            ${input.accountId}::uuid,
+            ${wallet.id},
+            ${input.requestId.trim()}::uuid,
+            CURRENT_TIMESTAMP
+          ),
+          (
+            'wallet_recovery_approved_attach',
+            ${approver},
+            ${input.accountId}::uuid,
+            ${wallet.id},
+            ${input.requestId.trim()}::uuid,
+            CURRENT_TIMESTAMP
+          )
+      `;
+
+      return {
+        jobId: input.jobId,
+        status: "REGISTERED",
+        fencingToken: nextFencingToken,
+        walletId: wallet.id,
+      };
+    }
+
+    // Resolution Mode B: RESET_CONFIRMED_PRE_CREATION_FAILURE
+    if (
+      job.status !== "MANUAL_REVIEW" ||
+      previousInspectionSummary !== "NO_REMOTE_WALLET_FOUND"
+    ) {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        "Resetting a quarantined job to PENDING requires prior escalation to MANUAL_REVIEW with providerInspectionSummary='NO_REMOTE_WALLET_FOUND'.",
+      );
+    }
+
+    const existingWallets = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM flow.wallets WHERE account_id = ${input.accountId}::uuid
+    `;
+    if (existingWallets.length > 0) {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        "Cannot reset job to PENDING when a wallet record already exists for the account.",
+      );
+    }
+
+    const resetEvidence = JSON.stringify({
+      stage: "RESOLVED_RESET_PRE_CREATION",
+      resolution: input.resolution,
+      accountKind: account.kind,
+      initiatorOperatorAuthId: initiator,
+      approverOperatorAuthId: approver,
+      previousDispatchAttemptId: job.dispatchAttemptId,
+      requestId: input.requestId.trim().toLowerCase(),
+      resolvedAt: new Date().toISOString(),
+    });
+
+    await tx.$executeRaw`
+      UPDATE flow.wallet_provisioning_jobs
+      SET
+        status = 'PENDING',
+        fencing_token = ${nextFencingToken},
+        lease_holder = NULL,
+        lease_expires_at = NULL,
+        dispatched_at = NULL,
+        dispatch_attempt_id = NULL,
+        last_error = NULL,
+        failure_classification = NULL,
+        recovery_evidence = ${resetEvidence},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${input.jobId}::uuid
+        AND account_id = ${input.accountId}::uuid
+    `;
+
+    await tx.$executeRaw`
+      INSERT INTO flow.security_audit_events (
+        kind, actor_auth_id, account_id, target_id, request_id, created_at
+      ) VALUES
+        (
+          'wallet_recovery_initiated',
+          ${initiator},
+          ${input.accountId}::uuid,
+          ${input.jobId},
+          ${input.requestId.trim()}::uuid,
+          CURRENT_TIMESTAMP
+        ),
+        (
+          'wallet_recovery_approved_reset',
+          ${approver},
+          ${input.accountId}::uuid,
+          ${input.jobId},
+          ${input.requestId.trim()}::uuid,
+          CURRENT_TIMESTAMP
+        )
+    `;
+
+    return {
+      jobId: input.jobId,
+      status: "PENDING",
+      fencingToken: nextFencingToken,
+    };
+  });
 }

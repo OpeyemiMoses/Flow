@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import pg from "pg";
 import {
+  encodeBase58,
   evaluateWalletFundReadiness,
   mintTrustedAdapterPolicyEvidence,
   type OutLayerPolicyState,
@@ -28,12 +29,14 @@ import {
   commitJobSuccess,
   createProvisioningJob,
   ensureProvisioningJobForAccount,
+  escalateJobToManualReview,
   getAccountWalletPublicProjection,
   persistRegisteredWallet,
   recordJobAmbiguous,
   recordJobDispatch,
   recordJobTerminalFailure,
   reconcileCrashedJobs,
+  resolveQuarantinedProvisioningJob,
 } from "../src/server/custody/job-repository.ts";
 import { OutLayerAdapter } from "../src/server/custody/outlayer-adapter.ts";
 import { WalletProvisioningWorker } from "../src/server/custody/provisioning-worker.ts";
@@ -2425,6 +2428,392 @@ test("M2 Phase 3 worker: provider failures, unverified policy rejection, and gra
     const serializedDiag = JSON.stringify(diag);
     assert.ok(!serializedDiag.includes("wk_"));
     assert.ok(!serializedDiag.includes(testKeyHex));
+  } finally {
+    await mockServer.close();
+  }
+});
+
+test("M2 Phase 4 quarantine: uncertain registration outcomes (HTTP 200 corrupted JSON / schema mismatch / invalid NEAR address / HTTP 502) quarantine job to UNKNOWN and never re-register", async () => {
+  const db = getPrismaClient();
+  const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
+  const testKeyHex =
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+  const adapter = new OutLayerAdapter(mockServer.url);
+  const worker = new WalletProvisioningWorker({
+    db,
+    adapter,
+    walletConfig: { encryptionKey: testKeyHex, keyId: "v1" },
+    workerId: "worker-m24-quarantine",
+  });
+
+  try {
+    // 1. HTTP 200 with truncated/corrupted JSON during /register -> Quarantined to UNKNOWN (never retried!)
+    const accCorruptJson = await createTestAccount(
+      pool,
+      "PERSONAL",
+      "m24-corrupt-json",
+    );
+    await ensureProvisioningJobForAccount(
+      db,
+      accCorruptJson.accountId,
+      randomUUID(),
+    );
+
+    mockServer.setOptions({
+      multiWalletMode: true,
+      forceStatus: 200,
+      rawErrorBody: '{"wallet_id":"partial-200-body',
+      rawErrorContentType: "application/json",
+    });
+
+    const resCorrupt = await worker.processAccountJob(accCorruptJson.accountId);
+    assert.equal(resCorrupt.outcome, "quarantined");
+    assert.equal(resCorrupt.failureClassification, "POST_DISPATCH_AMBIGUOUS");
+    assert.equal(mockServer.getRegisterCallCount(), 1);
+
+    // Restore healthy server and verify worker skips the quarantined UNKNOWN job without calling /register again
+    mockServer.setOptions({ multiWalletMode: true });
+    const resRetryCorrupt = await worker.processAccountJob(
+      accCorruptJson.accountId,
+    );
+    assert.equal(resRetryCorrupt.outcome, "skipped");
+    assert.equal(
+      mockServer.getRegisterCallCount(),
+      1,
+      "Quarantined UNKNOWN job from corrupted HTTP 200 MUST NOT call /register again",
+    );
+
+    // 2. HTTP 200 with invalid NEAR address on /register -> Quarantined to UNKNOWN
+    const accCorruptNear = await createTestAccount(
+      pool,
+      "BUSINESS",
+      "m24-corrupt-near",
+    );
+    await ensureProvisioningJobForAccount(
+      db,
+      accCorruptNear.accountId,
+      randomUUID(),
+    );
+
+    mockServer.setOptions({
+      multiWalletMode: true,
+      corruptNearId: true,
+    });
+
+    const resNear = await worker.processAccountJob(accCorruptNear.accountId);
+    assert.equal(resNear.outcome, "quarantined");
+    assert.equal(resNear.failureClassification, "POST_DISPATCH_AMBIGUOUS");
+    assert.equal(mockServer.getRegisterCallCount(), 2);
+  } finally {
+    await mockServer.close();
+  }
+});
+
+test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNKNOWN/MANUAL_REVIEW jobs, cross-account protection, and resume without re-registration", async () => {
+  const db = getPrismaClient();
+  const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
+  const testKeyHex =
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+  const adapter = new OutLayerAdapter(mockServer.url);
+  const worker = new WalletProvisioningWorker({
+    db,
+    adapter,
+    walletConfig: { encryptionKey: testKeyHex, keyId: "v1" },
+    workerId: "worker-m24-recovery",
+  });
+
+  try {
+    // Create two accounts (Personal A and Business B) and two distinct operator auth users
+    const accPersonal = await createTestAccount(
+      pool,
+      "PERSONAL",
+      "m24-rec-personal",
+    );
+    const accBusiness = await createTestAccount(
+      pool,
+      "BUSINESS",
+      "m24-rec-business",
+    );
+    const opInitiatorAuthId = `op-init-${randomUUID().slice(0, 8)}`;
+    const opApproverAuthId = `op-approve-${randomUUID().slice(0, 8)}`;
+
+    // Provision Business B normally first so it owns a wallet
+    await ensureProvisioningJobForAccount(
+      db,
+      accBusiness.accountId,
+      randomUUID(),
+    );
+    const bizRes = await worker.processAccountJob(accBusiness.accountId);
+    assert.equal(bizRes.outcome, "activated");
+    const bizProj = await getAccountWalletPublicProjection(
+      db,
+      accBusiness.accountId,
+    );
+    assert.ok(bizProj !== null);
+    assert.equal(mockServer.getRegisterCallCount(), 1);
+
+    // Now trigger an ambiguous HTTP 502 during /register for Personal A -> Quarantined to UNKNOWN
+    const personalJob = await ensureProvisioningJobForAccount(
+      db,
+      accPersonal.accountId,
+      randomUUID(),
+    );
+    mockServer.setOptions({ multiWalletMode: true, forceStatus: 502 });
+    const ambRes = await worker.processAccountJob(accPersonal.accountId);
+    assert.equal(ambRes.outcome, "quarantined");
+    assert.equal(mockServer.getRegisterCallCount(), 2);
+    mockServer.setOptions({ multiWalletMode: true });
+
+    // Read dispatch_attempt_id from the quarantined UNKNOWN job
+    const { rows: jobRows } = await pool.query<{
+      id: string;
+      status: string;
+      dispatch_attempt_id: string;
+    }>(
+      "SELECT id, status::text AS status, dispatch_attempt_id FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
+      [personalJob.id],
+    );
+    assert.equal(jobRows[0]!.status, "UNKNOWN");
+    const dispatchAttemptId = jobRows[0]!.dispatch_attempt_id;
+    assert.ok(dispatchAttemptId);
+
+    // 1. Reject escalation if accountId or expectedAccountKind does not match
+    await assert.rejects(
+      escalateJobToManualReview(db, {
+        jobId: personalJob.id,
+        accountId: accBusiness.accountId, // wrong account!
+        expectedAccountKind: "PERSONAL",
+        operatorAuthId: opInitiatorAuthId,
+        reasonCode: "AMBIGUOUS_REGISTRATION_OUTCOME",
+        providerInspectionSummary: "REMOTE_WALLET_LOCATED",
+        expectedDispatchAttemptId: dispatchAttemptId,
+        requestId: randomUUID(),
+      }),
+      { code: "WALLET_ACCOUNT_MISMATCH" },
+    );
+
+    await assert.rejects(
+      escalateJobToManualReview(db, {
+        jobId: personalJob.id,
+        accountId: accPersonal.accountId,
+        expectedAccountKind: "BUSINESS", // wrong account kind!
+        operatorAuthId: opInitiatorAuthId,
+        reasonCode: "AMBIGUOUS_REGISTRATION_OUTCOME",
+        providerInspectionSummary: "REMOTE_WALLET_LOCATED",
+        expectedDispatchAttemptId: dispatchAttemptId,
+        requestId: randomUUID(),
+      }),
+      { code: "WALLET_ACCOUNT_MISMATCH" },
+    );
+
+    // 2. Operator 1 escalates UNKNOWN job to MANUAL_REVIEW with investigation evidence
+    const recoveredNearAccountId =
+      "98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac";
+    const recoveredNearPublicKey = `ed25519:${encodeBase58(Buffer.from(recoveredNearAccountId, "hex"))}`;
+    const recoveredProviderWalletId = "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20";
+    const recoveredApiKey = "wk_2a8b1f3c4d5e6789abcdef0123456789";
+
+    await escalateJobToManualReview(db, {
+      jobId: personalJob.id,
+      accountId: accPersonal.accountId,
+      expectedAccountKind: "PERSONAL",
+      operatorAuthId: opInitiatorAuthId,
+      reasonCode: "AMBIGUOUS_REGISTRATION_OUTCOME",
+      providerInspectionSummary: "REMOTE_WALLET_LOCATED",
+      expectedDispatchAttemptId: dispatchAttemptId,
+      requestId: randomUUID(),
+    });
+
+    const { rows: mrRows } = await pool.query<{
+      status: string;
+      recovery_evidence: string;
+    }>(
+      "SELECT status::text AS status, recovery_evidence FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
+      [personalJob.id],
+    );
+    assert.equal(mrRows[0]!.status, "MANUAL_REVIEW");
+    const parsedMrEvidence = JSON.parse(mrRows[0]!.recovery_evidence) as Record<
+      string,
+      unknown
+    >;
+    assert.equal(parsedMrEvidence.stage, "MANUAL_REVIEW_ESCALATED");
+    assert.equal(parsedMrEvidence.initiatorOperatorAuthId, opInitiatorAuthId);
+
+    const encryptedEnvelope = serializeEnvelope(
+      encryptSecret(recoveredApiKey, testKeyHex, "v1"),
+    );
+    const keyDigest = deriveKeyDigest(testKeyHex);
+
+    // 3. Reject single-operator self-approval (initiator === approver)
+    await assert.rejects(
+      resolveQuarantinedProvisioningJob(db, {
+        resolution: "ATTACH_RECOVERED_WALLET",
+        jobId: personalJob.id,
+        accountId: accPersonal.accountId,
+        expectedAccountKind: "PERSONAL",
+        expectedDispatchAttemptId: dispatchAttemptId,
+        initiatorOperatorAuthId: opInitiatorAuthId,
+        approverOperatorAuthId: opInitiatorAuthId, // SAME operator!
+        providerWalletId: recoveredProviderWalletId,
+        nearAccountId: recoveredNearAccountId,
+        nearPublicKey: recoveredNearPublicKey,
+        encryptedCredential: encryptedEnvelope,
+        keyId: "v1",
+        keyDigest,
+        requestId: randomUUID(),
+      }),
+      { code: "TWO_PERSON_APPROVAL_REQUIRED" },
+    );
+
+    // 4. Reject attaching a wallet already bound to another account (Business B's wallet)
+    await assert.rejects(
+      resolveQuarantinedProvisioningJob(db, {
+        resolution: "ATTACH_RECOVERED_WALLET",
+        jobId: personalJob.id,
+        accountId: accPersonal.accountId,
+        expectedAccountKind: "PERSONAL",
+        expectedDispatchAttemptId: dispatchAttemptId,
+        initiatorOperatorAuthId: opInitiatorAuthId,
+        approverOperatorAuthId: opApproverAuthId,
+        providerWalletId: bizProj.providerWalletId!, // Already bound to Business B!
+        nearAccountId: recoveredNearAccountId,
+        nearPublicKey: recoveredNearPublicKey,
+        encryptedCredential: encryptedEnvelope,
+        keyId: "v1",
+        keyDigest,
+        requestId: randomUUID(),
+      }),
+      { code: "WALLET_ACCOUNT_MISMATCH" },
+    );
+
+    // 5. Reject attaching a wallet whose nearPublicKey does not cryptographically match nearAccountId
+    const wrongNearHex =
+      "11113cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac";
+    await assert.rejects(
+      resolveQuarantinedProvisioningJob(db, {
+        resolution: "ATTACH_RECOVERED_WALLET",
+        jobId: personalJob.id,
+        accountId: accPersonal.accountId,
+        expectedAccountKind: "PERSONAL",
+        expectedDispatchAttemptId: dispatchAttemptId,
+        initiatorOperatorAuthId: opInitiatorAuthId,
+        approverOperatorAuthId: opApproverAuthId,
+        providerWalletId: recoveredProviderWalletId,
+        nearAccountId: recoveredNearAccountId,
+        nearPublicKey: `ed25519:${encodeBase58(Buffer.from(wrongNearHex, "hex"))}`,
+        encryptedCredential: encryptedEnvelope,
+        keyId: "v1",
+        keyDigest,
+        requestId: randomUUID(),
+      }),
+      { code: "CUSTODY_INVALID_ADDRESS" },
+    );
+
+    // 6. Reject wrong resolution (RESET_CONFIRMED_PRE_CREATION_FAILURE when finding is REMOTE_WALLET_LOCATED)
+    await assert.rejects(
+      resolveQuarantinedProvisioningJob(db, {
+        resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+        jobId: personalJob.id,
+        accountId: accPersonal.accountId,
+        expectedAccountKind: "PERSONAL",
+        expectedDispatchAttemptId: dispatchAttemptId,
+        initiatorOperatorAuthId: opInitiatorAuthId,
+        approverOperatorAuthId: opApproverAuthId,
+        requestId: randomUUID(),
+      }),
+      { code: "INVALID_STATE_TRANSITION" },
+    );
+
+    // 7. Valid two-person approval attaches recovered wallet (Stage 1) and transitions job to REGISTERED
+    const attached = await resolveQuarantinedProvisioningJob(db, {
+      resolution: "ATTACH_RECOVERED_WALLET",
+      jobId: personalJob.id,
+      accountId: accPersonal.accountId,
+      expectedAccountKind: "PERSONAL",
+      expectedDispatchAttemptId: dispatchAttemptId,
+      initiatorOperatorAuthId: opInitiatorAuthId,
+      approverOperatorAuthId: opApproverAuthId,
+      providerWalletId: recoveredProviderWalletId,
+      nearAccountId: recoveredNearAccountId,
+      nearPublicKey: recoveredNearPublicKey,
+      encryptedCredential: encryptedEnvelope,
+      keyId: "v1",
+      keyDigest,
+      requestId: randomUUID(),
+    });
+    assert.ok(attached.walletId);
+    assert.equal(attached.status, "REGISTERED");
+
+    // Now run WalletProvisioningWorker on Personal A: it resumes from Stage 1 (REGISTERED) -> Stage 2 -> Stage 3 (ACTIVE) WITHOUT calling /register!
+    const registerCallsBeforeResume = mockServer.getRegisterCallCount();
+    const resumeRes = await worker.processAccountJob(accPersonal.accountId);
+    assert.equal(resumeRes.outcome, "activated");
+    assert.equal(resumeRes.recoveredFromStage, "STAGE_1_REGISTERED");
+    assert.equal(
+      mockServer.getRegisterCallCount(),
+      registerCallsBeforeResume,
+      "Worker resuming after operator ATTACH_RECOVERED_WALLET MUST NOT call /register again",
+    );
+
+    const personalProj = await getAccountWalletPublicProjection(
+      db,
+      accPersonal.accountId,
+    );
+    assert.ok(personalProj !== null);
+    assert.equal(personalProj.status, "ACTIVE");
+    assert.equal(personalProj.providerWalletId, recoveredProviderWalletId);
+    assert.equal(personalProj.fundsReady, false);
+
+    // 8. Also test RESET_CONFIRMED_PRE_CREATION_FAILURE when operator investigation confirms NO_REMOTE_WALLET_FOUND
+    const accNoRemote = await createTestAccount(
+      pool,
+      "PERSONAL",
+      "m24-rec-noremote",
+    );
+    const noRemoteJob = await ensureProvisioningJobForAccount(
+      db,
+      accNoRemote.accountId,
+      randomUUID(),
+    );
+    mockServer.setOptions({ multiWalletMode: true, dropConnection: true });
+    const dropRes = await worker.processAccountJob(accNoRemote.accountId);
+    assert.equal(dropRes.outcome, "quarantined");
+    mockServer.setOptions({ multiWalletMode: true });
+
+    const { rows: dropJobRows } = await pool.query<{
+      dispatch_attempt_id: string;
+    }>(
+      "SELECT dispatch_attempt_id FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
+      [noRemoteJob.id],
+    );
+    const dropDispatchId = dropJobRows[0]!.dispatch_attempt_id;
+
+    await escalateJobToManualReview(db, {
+      jobId: noRemoteJob.id,
+      accountId: accNoRemote.accountId,
+      expectedAccountKind: "PERSONAL",
+      operatorAuthId: opInitiatorAuthId,
+      reasonCode: "AMBIGUOUS_REGISTRATION_OUTCOME",
+      providerInspectionSummary: "NO_REMOTE_WALLET_FOUND",
+      expectedDispatchAttemptId: dropDispatchId,
+      requestId: randomUUID(),
+    });
+
+    await resolveQuarantinedProvisioningJob(db, {
+      resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+      jobId: noRemoteJob.id,
+      accountId: accNoRemote.accountId,
+      expectedAccountKind: "PERSONAL",
+      expectedDispatchAttemptId: dropDispatchId,
+      initiatorOperatorAuthId: opInitiatorAuthId,
+      approverOperatorAuthId: opApproverAuthId,
+      requestId: randomUUID(),
+    });
+
+    const resetProvisionRes = await worker.processAccountJob(
+      accNoRemote.accountId,
+    );
+    assert.equal(resetProvisionRes.outcome, "activated");
   } finally {
     await mockServer.close();
   }

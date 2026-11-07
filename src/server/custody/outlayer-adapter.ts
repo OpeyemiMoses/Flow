@@ -4,8 +4,10 @@ import {
   isValidNearAddress,
   mintTrustedAdapterPolicyEvidence,
   validateAddressForNetwork,
+  verifyPublicKeyMatchesAddress,
   type TrustedProviderPolicyEvidence,
 } from "../../domain/custody.ts";
+import type { NetworkId } from "../../domain/providers.ts";
 import { FlowError } from "../../foundation/errors.ts";
 import { log } from "../../foundation/logger.ts";
 
@@ -92,14 +94,18 @@ export function classifyProviderError(
       ...metadata,
     };
   }
-  if (safeStatus === 504) {
+  if (safeStatus === 408 || safeStatus === 504) {
     return {
       classification: "GATEWAY_TIMEOUT",
-      safeMessage: "OutLayer upstream gateway timed out (HTTP 504).",
+      safeMessage: `OutLayer request timed out (HTTP ${safeStatus}).`,
       ...metadata,
     };
   }
-  if (safeStatus && safeStatus >= 500 && safeStatus < 600) {
+  if (
+    safeStatus === 409 ||
+    safeStatus === 425 ||
+    (safeStatus && safeStatus >= 500 && safeStatus < 600)
+  ) {
     return {
       classification: "UPSTREAM_UNAVAILABLE",
       safeMessage: `OutLayer service temporarily unavailable (HTTP ${safeStatus}).`,
@@ -113,6 +119,9 @@ export function classifyProviderError(
   };
 }
 
+/**
+ * Authoritative Chain enum aligned with OutLayer OpenAPI 0.1.0-alpha.4 (`components.schemas.Chain`).
+ */
 export const outlayerChainSchema = z.enum([
   "near",
   "ethereum",
@@ -122,6 +131,8 @@ export const outlayerChainSchema = z.enum([
   "optimism",
   "bsc",
   "avalanche",
+  "hyperevm",
+  "hood",
   "solana",
   "bitcoin",
 ]);
@@ -133,15 +144,27 @@ const registerResponseSchema = z.object({
   api_key: z.string().regex(/^wk_[\w-]+$/),
   near_account_id: z.string().min(2).max(64),
   handoff_url: z.string().optional(),
+  trial: z
+    .object({
+      available: z.boolean().optional(),
+      calls: z.number().int().optional(),
+      days: z.number().int().optional(),
+      claim_url: z.string().optional(),
+      scope: z.string().optional(),
+    })
+    .optional(),
 });
 
 const addressResponseSchema = z.object({
   wallet_id: z.string().uuid(),
   chain: outlayerChainSchema,
+  sub_path: z.string().nullable().optional(),
   address: z.string().min(1).max(128),
   public_key: z.string().min(1).max(256),
+  vault_id: z.string().nullable().optional(),
   asset_account_id: z.string().nullable().optional(),
-  executor_account_id: z.string().optional(),
+  executor_account_id: z.string().nullable().optional(),
+  gas_balance: z.string().nullable().optional(),
 });
 
 const policyResponseSchema = z.object({
@@ -150,6 +173,11 @@ const policyResponseSchema = z.object({
   frozen: z.boolean(),
   policy: z.enum(["none", "stored"]).optional(),
   rules: z.record(z.string(), z.unknown()).optional(),
+  approval: z.record(z.string(), z.unknown()).optional(),
+  capabilities: z.record(z.string(), z.unknown()).optional(),
+  authorized_key_hashes: z.array(z.string()).optional(),
+  refund_addresses: z.record(z.string(), z.string()).optional(),
+  usage: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type OutLayerRegisterResult = z.infer<typeof registerResponseSchema>;
@@ -303,10 +331,20 @@ export class OutLayerAdapter {
       const sanitized = classifyProviderError(response.status, {
         endpoint: "/register",
       });
+      if (sanitized.classification === "GATEWAY_TIMEOUT") {
+        throw new FlowError("CUSTODY_PROVIDER_TIMEOUT", sanitized.safeMessage);
+      }
+      const isDeterministicPreCreationRejection =
+        response.status === 400 ||
+        response.status === 401 ||
+        response.status === 403 ||
+        response.status === 404 ||
+        response.status === 405 ||
+        response.status === 422;
       throw new FlowError(
-        response.status >= 500
-          ? "CUSTODY_PROVIDER_UNAVAILABLE"
-          : "CUSTODY_PROVIDER_ERROR",
+        isDeterministicPreCreationRejection
+          ? "CUSTODY_PROVIDER_ERROR"
+          : "CUSTODY_PROVIDER_UNAVAILABLE",
         sanitized.safeMessage,
       );
     }
@@ -423,13 +461,40 @@ export class OutLayerAdapter {
 
     // 3. Network-specific address validation
     const validation = validateAddressForNetwork(
-      validChain.data,
+      validChain.data as NetworkId,
       parsed.data.address,
     );
     if (!validation.valid) {
       throw new FlowError(
         "CUSTODY_INVALID_ADDRESS",
         `Provider returned invalid address format for ${validChain.data}.`,
+      );
+    }
+
+    // 4. Cryptographic public-key-to-address consistency check
+    const keyConsistency = verifyPublicKeyMatchesAddress(
+      validChain.data as NetworkId,
+      parsed.data.address,
+      parsed.data.public_key,
+      { strict: true },
+    );
+    if (!keyConsistency.valid) {
+      throw new FlowError(
+        "CUSTODY_INVALID_ADDRESS",
+        `Provider returned public key inconsistent with derived ${validChain.data} address.`,
+      );
+    }
+
+    // 5. OpenAPI AddressResponse contract: for chain=near, executor_account_id (if present) must equal address
+    if (
+      validChain.data === "near" &&
+      typeof parsed.data.executor_account_id === "string" &&
+      parsed.data.executor_account_id.trim().toLowerCase() !==
+        parsed.data.address.trim().toLowerCase()
+    ) {
+      throw new FlowError(
+        "CUSTODY_PROVIDER_CORRELATION_ERROR",
+        "Provider returned NEAR executor_account_id that does not match derived NEAR address.",
       );
     }
 

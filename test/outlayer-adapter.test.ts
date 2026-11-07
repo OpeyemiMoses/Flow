@@ -9,8 +9,10 @@ import {
   OutLayerAdapter,
   scrubHandoffUrl,
 } from "../src/server/custody/outlayer-adapter.ts";
+import { isAmbiguousRegistrationError } from "../src/server/custody/provisioning-worker.ts";
 import {
   createOutLayerMockServer,
+  DEFAULT_MOCK_BASE_ADDRESS,
   type OutLayerMockServer,
 } from "./support/outlayer-fixture.ts";
 
@@ -49,8 +51,9 @@ test("OutLayerAdapter derives addresses for NEAR, Base, and Solana", async () =>
   assert.equal(near.chain, "near");
 
   const base = await adapter.getAddress(apiKey, "base");
-  assert.equal(base.address, "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+  assert.equal(base.address, DEFAULT_MOCK_BASE_ADDRESS);
   assert.equal(base.chain, "base");
+  assert.equal(base.executor_account_id, null);
 
   const solana = await adapter.getAddress(apiKey, "solana");
   assert.equal(solana.address, "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU");
@@ -390,5 +393,161 @@ test("OutLayerAdapter.getPolicy mints unforgeable adapter provenance and scrubHa
     assert.ok(!scrubbed?.includes("wk_"));
   } finally {
     mockServer.setOptions({});
+  }
+});
+
+test("OutLayerAdapter enforces cryptographic public-key-to-address consistency across NEAR, Base, and Solana", async () => {
+  mockServer.setOptions({ corruptPublicKey: true });
+  try {
+    const adapter = new OutLayerAdapter(mockServer.url);
+    const apiKey = "wk_2a8b1f3c4d5e6789abcdef0123456789";
+
+    for (const chain of ["near", "base", "solana"] as const) {
+      await assert.rejects(
+        adapter.getAddress(apiKey, chain),
+        (err: unknown) => {
+          return (
+            err !== null &&
+            typeof err === "object" &&
+            "code" in err &&
+            err.code === "CUSTODY_INVALID_ADDRESS"
+          );
+        },
+        `Expected getAddress(${chain}) to reject mismatched public_key with CUSTODY_INVALID_ADDRESS`,
+      );
+    }
+  } finally {
+    mockServer.setOptions({});
+  }
+});
+
+test("OutLayerAdapter enforces executor_account_id correlation on NEAR and accepts null on non-NEAR chains per OpenAPI 0.1.0-alpha.4", async () => {
+  const adapter = new OutLayerAdapter(mockServer.url);
+  const apiKey = "wk_2a8b1f3c4d5e6789abcdef0123456789";
+
+  // Valid NEAR response has executor_account_id === address
+  const near = await adapter.getAddress(apiKey, "near");
+  assert.equal(near.executor_account_id, near.address);
+
+  // Valid Base and Solana responses have executor_account_id === null per OpenAPI 0.1.0-alpha.4
+  const base = await adapter.getAddress(apiKey, "base");
+  assert.equal(base.executor_account_id, null);
+  const solana = await adapter.getAddress(apiKey, "solana");
+  assert.equal(solana.executor_account_id, null);
+
+  // Corrupted executor_account_id on NEAR must be rejected with CUSTODY_PROVIDER_CORRELATION_ERROR
+  mockServer.setOptions({ corruptExecutorId: true });
+  try {
+    await assert.rejects(adapter.getAddress(apiKey, "near"), (err: unknown) => {
+      return (
+        err !== null &&
+        typeof err === "object" &&
+        "code" in err &&
+        err.code === "CUSTODY_PROVIDER_CORRELATION_ERROR"
+      );
+    });
+  } finally {
+    mockServer.setOptions({});
+  }
+});
+
+test("isAmbiguousRegistrationError classifies all uncertain post-dispatch registration outcomes for UNKNOWN quarantine", async () => {
+  const adapter = new OutLayerAdapter(mockServer.url, 150);
+
+  // 1. Timeout during /register -> ambiguous (true)
+  mockServer.setOptions({ forceTimeout: true });
+  try {
+    await adapter.register({});
+    assert.fail("Expected timeout");
+  } catch (err) {
+    assert.equal(isAmbiguousRegistrationError(err), true);
+  } finally {
+    mockServer.setOptions({});
+  }
+
+  // 2. Upstream connection drop during /register -> ambiguous (true)
+  mockServer.setOptions({ dropConnection: true });
+  try {
+    await adapter.register({});
+    assert.fail("Expected drop");
+  } catch (err) {
+    assert.equal(isAmbiguousRegistrationError(err), true);
+  } finally {
+    mockServer.setOptions({});
+  }
+
+  // 3. HTTP 408 / 409 / 425 / 500 / 502 / 503 / 504 -> ambiguous (true)
+  for (const status of [408, 409, 425, 500, 502, 503, 504]) {
+    mockServer.setOptions({ forceStatus: status });
+    try {
+      await adapter.register({});
+      assert.fail(`Expected HTTP ${status} error`);
+    } catch (err) {
+      assert.equal(
+        isAmbiguousRegistrationError(err),
+        true,
+        `HTTP ${status} during /register must be classified as ambiguous`,
+      );
+    } finally {
+      mockServer.setOptions({});
+    }
+  }
+
+  // 4. HTTP 200 with truncated/non-JSON body -> ambiguous (true) because wallet was likely created!
+  mockServer.setOptions({
+    forceStatus: 200,
+    rawErrorBody: '{"wallet_id":"9c3c9e10-1c1f-4f5e',
+    rawErrorContentType: "application/json",
+  });
+  try {
+    await adapter.register({});
+    assert.fail("Expected invalid JSON error");
+  } catch (err) {
+    assert.equal(isAmbiguousRegistrationError(err), true);
+  } finally {
+    mockServer.setOptions({});
+  }
+
+  // 5. HTTP 200 with schema mismatch -> ambiguous (true)
+  mockServer.setOptions({
+    forceStatus: 200,
+    rawErrorBody: JSON.stringify({ unexpected: "shape" }),
+    rawErrorContentType: "application/json",
+  });
+  try {
+    await adapter.register({});
+    assert.fail("Expected schema mismatch error");
+  } catch (err) {
+    assert.equal(isAmbiguousRegistrationError(err), true);
+  } finally {
+    mockServer.setOptions({});
+  }
+
+  // 6. HTTP 200 with corrupted near_account_id -> ambiguous (true)
+  mockServer.setOptions({ corruptNearId: true });
+  try {
+    await adapter.register({});
+    assert.fail("Expected invalid address error");
+  } catch (err) {
+    assert.equal(isAmbiguousRegistrationError(err), true);
+  } finally {
+    mockServer.setOptions({});
+  }
+
+  // 7. Deterministic pre-creation HTTP 400 / 401 / 403 / 429 -> NOT ambiguous (false)
+  for (const status of [400, 401, 403, 429]) {
+    mockServer.setOptions({ forceStatus: status });
+    try {
+      await adapter.register({});
+      assert.fail(`Expected HTTP ${status} error`);
+    } catch (err) {
+      assert.equal(
+        isAmbiguousRegistrationError(err),
+        false,
+        `HTTP ${status} during /register is a deterministic pre-creation rejection`,
+      );
+    } finally {
+      mockServer.setOptions({});
+    }
   }
 });
