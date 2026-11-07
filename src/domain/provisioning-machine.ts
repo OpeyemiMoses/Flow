@@ -111,10 +111,10 @@ export function reduceProvisioningState(
     }
 
     case "RECEIVE_REGISTRATION_SUCCESS": {
-      if (state.status !== "SUBMITTED" && state.status !== "LEASED") {
+      if (state.status !== "SUBMITTED") {
         throw new FlowError(
           "INVALID_STATE_TRANSITION",
-          `Cannot record registration success for account ${state.accountId} in status ${state.status}.`,
+          `Cannot record registration success for account ${state.accountId} in status ${state.status}. Must be SUBMITTED.`,
         );
       }
       return {
@@ -127,10 +127,13 @@ export function reduceProvisioningState(
     }
 
     case "COMPLETE_ADDRESS_DERIVATION": {
-      if (state.status !== "REGISTERED" && state.status !== "LEASED") {
+      if (
+        state.status !== "REGISTERED" &&
+        !(state.status === "LEASED" && Boolean(state.walletId))
+      ) {
         throw new FlowError(
           "INVALID_STATE_TRANSITION",
-          `Cannot complete address derivation in status ${state.status}. Must be REGISTERED or LEASED.`,
+          `Cannot complete address derivation in status ${state.status}. Must be REGISTERED or a leased recovery with an existing walletId.`,
         );
       }
       return {
@@ -140,11 +143,7 @@ export function reduceProvisioningState(
     }
 
     case "RECEIVE_SUCCESS": {
-      if (
-        state.status !== "SUBMITTED" &&
-        state.status !== "LEASED" &&
-        state.status !== "REGISTERED"
-      ) {
+      if (state.status !== "SUBMITTED" && state.status !== "REGISTERED") {
         throw new FlowError(
           "INVALID_STATE_TRANSITION",
           `Cannot receive success for account ${state.accountId} in status ${state.status}.`,

@@ -1,3 +1,4 @@
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { FlowError } from "../foundation/errors.ts";
 import type { NetworkId } from "./providers.ts";
 
@@ -37,42 +38,205 @@ export type WalletLifecycleStatus =
   | "RECOVERY_PENDING";
 
 /**
- * Validates a NEAR Protocol address.
- * Standard NEAR addresses are either:
- * - Implicit: exactly 64 hexadecimal characters (representing a 32-byte ed25519 public key).
- * - Named: 2-64 character identifier with segments separated by '.', '-', or '_'.
+ * Validates a NEAR Protocol address with strict implicit and named account rules:
+ * - Implicit: exactly 64 lowercase hexadecimal characters (representing a 32-byte Ed25519 public key)
+ *   and not all zeros.
+ * - Named: 2-64 characters, lowercase alphanumeric labels separated by '.', where each label
+ *   contains no leading, trailing, or consecutive '-' or '_' separators.
  */
 export function isValidNearAddress(address: string): boolean {
   if (typeof address !== "string") return false;
   const trimmed = address.trim();
   if (trimmed.length < 2 || trimmed.length > 64) return false;
 
-  // In NEAR, an address composed entirely of hexadecimal characters is an implicit account,
-  // which MUST be exactly 64 lowercase hexadecimal characters (representing a 32-byte ed25519 public key).
-  if (/^[0-9a-fA-F]+$/.test(trimmed)) {
-    return /^[0-9a-f]{64}$/.test(trimmed);
+  // Implicit account: hex-only or dot-less account IDs must be 64 lowercase hex chars (32 bytes) and non-zero
+  if (/^[0-9a-fA-F]+$/.test(trimmed) || !trimmed.includes(".")) {
+    if (!/^[0-9a-f]{64}$/.test(trimmed)) return false;
+    return !/^0{64}$/.test(trimmed);
   }
 
-  // Named account: 2-64 chars, segments separated by '.', '-', or '_' (e.g. "alice.near", "treasury.org")
-  return /^(([a-z0-9_-]+\.)*[a-z0-9_-]+)$/.test(trimmed);
+  // Named account: must consist of >=2 dot-separated segments; each segment must start and end
+  // with [a-z0-9] and cannot have consecutive '-' or '_' separators.
+  return /^([a-z0-9]+([_-][a-z0-9]+)*\.)+[a-z0-9]+([_-][a-z0-9]+)*$/.test(
+    trimmed,
+  );
+}
+
+const KECCAK_RC: readonly bigint[] = [
+  0x0000000000000001n,
+  0x0000000000008082n,
+  0x800000000000808an,
+  0x8000000080008000n,
+  0x000000000000808bn,
+  0x0000000080000001n,
+  0x8000000080008081n,
+  0x8000000000008009n,
+  0x000000000000008an,
+  0x0000000000000088n,
+  0x0000000080008009n,
+  0x000000008000000an,
+  0x000000008000808bn,
+  0x800000000000008bn,
+  0x8000000000008089n,
+  0x8000000000008003n,
+  0x8000000000008002n,
+  0x8000000000000080n,
+  0x000000000000800an,
+  0x800000008000000an,
+  0x8000000080008081n,
+  0x8000000000008080n,
+  0x0000000080000001n,
+  0x8000000080008008n,
+];
+const KECCAK_ROTC: readonly number[] = [
+  1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39,
+  61, 20, 44,
+];
+const KECCAK_PILN: readonly number[] = [
+  10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22,
+  9, 6, 1,
+];
+const MASK_64 = 0xffffffffffffffffn;
+
+function rotl64(x: bigint, n: number): bigint {
+  return ((x << BigInt(n)) | (x >> BigInt(64 - n))) & MASK_64;
+}
+
+/**
+ * Computes raw Keccak-256 (0x01 padding as required by Ethereum EIP-55).
+ */
+function keccak256Hex(asciiInput: string): string {
+  const rate = 136;
+  const msg = Buffer.from(asciiInput, "utf8");
+  const padLen = rate - (msg.length % rate);
+  const buf = Buffer.alloc(msg.length + padLen);
+  msg.copy(buf);
+  buf[msg.length] = 0x01;
+  buf[buf.length - 1]! |= 0x80;
+
+  const st: bigint[] = new Array<bigint>(25).fill(0n);
+  const bc: bigint[] = new Array<bigint>(5).fill(0n);
+
+  for (let off = 0; off < buf.length; off += rate) {
+    for (let i = 0; i < 17; i++) {
+      st[i] = st[i]! ^ buf.readBigUInt64LE(off + i * 8);
+    }
+    for (let r = 0; r < 24; r++) {
+      for (let i = 0; i < 5; i++) {
+        bc[i] = st[i]! ^ st[i + 5]! ^ st[i + 10]! ^ st[i + 15]! ^ st[i + 20]!;
+      }
+      for (let i = 0; i < 5; i++) {
+        const t = bc[(i + 4) % 5]! ^ rotl64(bc[(i + 1) % 5]!, 1);
+        for (let j = 0; j < 25; j += 5) {
+          st[j + i] = st[j + i]! ^ t;
+        }
+      }
+      let t = st[1]!;
+      for (let i = 0; i < 24; i++) {
+        const j = KECCAK_PILN[i]!;
+        const tmp = st[j]!;
+        st[j] = rotl64(t, KECCAK_ROTC[i]!);
+        t = tmp;
+      }
+      for (let j = 0; j < 25; j += 5) {
+        for (let i = 0; i < 5; i++) bc[i] = st[j + i]!;
+        for (let i = 0; i < 5; i++) {
+          st[j + i] =
+            st[j + i]! ^ (~bc[(i + 1) % 5]! & MASK_64 & bc[(i + 2) % 5]!);
+        }
+      }
+      st[0] = st[0]! ^ KECCAK_RC[r]!;
+    }
+  }
+
+  const out = Buffer.alloc(32);
+  for (let i = 0; i < 4; i++) {
+    out.writeBigUInt64LE(st[i]!, i * 8);
+  }
+  return out.toString("hex");
+}
+
+/**
+ * Computes the canonical EIP-55 mixed-case checksum address for an EVM address.
+ */
+export function toEip55ChecksumAddress(address: string): string {
+  const lower = address.trim().slice(2).toLowerCase();
+  const hash = keccak256Hex(lower);
+  let checksummed = "0x";
+  for (let i = 0; i < 40; i++) {
+    const ch = lower[i]!;
+    const nibble = Number.parseInt(hash[i]!, 16);
+    checksummed += nibble >= 8 ? ch.toUpperCase() : ch;
+  }
+  return checksummed;
 }
 
 /**
  * Validates an EVM address (e.g. Base, Ethereum).
- * Standard EVM address is "0x" followed by exactly 40 hexadecimal characters.
+ * Enforces:
+ * - "0x" followed by 40 hexadecimal characters
+ * - Rejects the all-zero burn address
+ * - Enforces EIP-55 Keccak-256 checksum whenever mixed-case hex characters are present
  */
 export function isValidEvmAddress(address: string): boolean {
   if (typeof address !== "string") return false;
-  return /^0x[0-9a-fA-F]{40}$/.test(address.trim());
+  const trimmed = address.trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed)) return false;
+
+  const body = trimmed.slice(2);
+  if (/^0{40}$/.test(body)) return false;
+
+  // All-lowercase or all-uppercase is valid unchecksummed format
+  if (body === body.toLowerCase() || body === body.toUpperCase()) {
+    return true;
+  }
+
+  // Mixed-case MUST match exact EIP-55 Keccak-256 checksum
+  return trimmed === toEip55ChecksumAddress(trimmed);
+}
+
+const BASE58_ALPHABET =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/**
+ * Decodes a Base58 string into raw bytes, returning `null` if any invalid character is present.
+ */
+export function decodeBase58(input: string): Uint8Array | null {
+  if (typeof input !== "string" || input.length === 0) return null;
+  let leadingZeros = 0;
+  while (leadingZeros < input.length && input[leadingZeros] === "1") {
+    leadingZeros++;
+  }
+
+  let num = 0n;
+  for (let i = leadingZeros; i < input.length; i++) {
+    const idx = BASE58_ALPHABET.indexOf(input[i]!);
+    if (idx === -1) return null;
+    num = num * 58n + BigInt(idx);
+  }
+
+  const rawHex = num === 0n ? "" : num.toString(16);
+  const paddedHex = rawHex.length % 2 === 0 ? rawHex : `0${rawHex}`;
+  const tailBytes =
+    paddedHex.length === 0 ? Buffer.alloc(0) : Buffer.from(paddedHex, "hex");
+
+  const out = new Uint8Array(leadingZeros + tailBytes.length);
+  out.set(tailBytes, leadingZeros);
+  return out;
 }
 
 /**
  * Validates a Solana address.
- * Standard Solana address is a Base58-encoded string of 32 to 44 characters.
+ * Standard Solana address is a Base58-encoded Ed25519 public key that decodes to
+ * EXACTLY 32 bytes and is not all zeros.
  */
 export function isValidSolanaAddress(address: string): boolean {
   if (typeof address !== "string") return false;
-  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address.trim());
+  const trimmed = address.trim();
+  if (trimmed.length < 32 || trimmed.length > 44) return false;
+  const decoded = decodeBase58(trimmed);
+  if (!decoded || decoded.length !== 32) return false;
+  return decoded.some((byte) => byte !== 0);
 }
 
 /**
@@ -246,7 +410,8 @@ export function isValidPolicyState(
 
 /**
  * Structured provider-backed policy evidence returned by OutLayer `/wallet/v1/policy`.
- * Raw caller-supplied strings are never accepted to promote custody policy state.
+ * Raw caller-supplied strings or plain objects are never accepted to promote custody policy state;
+ * evidence must be minted through `mintTrustedAdapterPolicyEvidence` inside `OutLayerAdapter.getPolicy`.
  */
 export interface ProviderPolicyEvidenceInput {
   readonly wallet_id: string;
@@ -254,6 +419,77 @@ export interface ProviderPolicyEvidenceInput {
   readonly frozen: boolean;
   readonly policy?: string;
   readonly rules?: Record<string, unknown>;
+}
+
+const ADAPTER_POLICY_BRAND: unique symbol = Symbol(
+  "flow.outlayer.adapter.policy.provenance",
+);
+const ADAPTER_ATTESTATION_KEY = randomBytes(32);
+
+export type TrustedProviderPolicyEvidence = ProviderPolicyEvidenceInput & {
+  readonly [ADAPTER_POLICY_BRAND]: string;
+};
+
+function computePolicyEvidenceHmac(
+  evidence: ProviderPolicyEvidenceInput,
+): string {
+  const canonical = JSON.stringify({
+    wallet_id: evidence.wallet_id,
+    controller: evidence.controller ?? null,
+    frozen: evidence.frozen,
+    policy: evidence.policy ?? null,
+    rules: evidence.rules ?? null,
+  });
+  return createHmac("sha256", ADAPTER_ATTESTATION_KEY)
+    .update(canonical)
+    .digest("hex");
+}
+
+/**
+ * Mints an unforgeable provider adapter provenance token onto validated
+ * `/wallet/v1/policy` response payloads. Only `OutLayerAdapter.getPolicy()`
+ * may produce evidence accepted by `verifyCustodyPolicyEvidence`.
+ */
+export function mintTrustedAdapterPolicyEvidence(
+  evidence: ProviderPolicyEvidenceInput,
+): TrustedProviderPolicyEvidence {
+  const signature = computePolicyEvidenceHmac(evidence);
+  const copy: ProviderPolicyEvidenceInput = {
+    wallet_id: evidence.wallet_id,
+    controller: evidence.controller,
+    frozen: evidence.frozen,
+    policy: evidence.policy,
+    rules: evidence.rules ? { ...evidence.rules } : undefined,
+  };
+  Object.defineProperty(copy, ADAPTER_POLICY_BRAND, {
+    value: signature,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return Object.freeze(copy) as TrustedProviderPolicyEvidence;
+}
+
+export function hasTrustedAdapterPolicyProvenance(
+  evidence: unknown,
+): evidence is TrustedProviderPolicyEvidence {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    return false;
+  }
+  const branded = evidence as Record<symbol, unknown>;
+  const token = branded[ADAPTER_POLICY_BRAND];
+  if (typeof token !== "string" || token.length !== 64) {
+    return false;
+  }
+  const expected = computePolicyEvidenceHmac(
+    evidence as ProviderPolicyEvidenceInput,
+  );
+  const tokenBuf = Buffer.from(token, "hex");
+  const expectedBuf = Buffer.from(expected, "hex");
+  if (tokenBuf.length !== expectedBuf.length) {
+    return false;
+  }
+  return timingSafeEqual(tokenBuf, expectedBuf);
 }
 
 export interface VerifiedCustodyPolicy {
@@ -266,12 +502,14 @@ export interface VerifiedCustodyPolicy {
 /**
  * Validates provider-backed custody policy evidence before a wallet can transition
  * to `ACTIVE` or receive `policy_state = 'stored'`.
- * Rejects caller-supplied strings, mismatched wallet IDs, frozen wallets,
- * unverified/none policies, missing/invalid NEAR controller accounts, or missing rules.
+ * Rejects caller-supplied strings, caller-fabricated objects lacking trusted adapter provenance,
+ * mismatched wallet IDs, frozen wallets, unverified/none policies, missing/invalid NEAR controller
+ * accounts, or empty/permissive rules.
  */
 export function verifyCustodyPolicyEvidence(
   evidence: unknown,
   expectedProviderWalletId: string,
+  options?: { readonly expectedController?: string },
 ): VerifiedCustodyPolicy {
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
     throw new FlowError(
@@ -280,7 +518,14 @@ export function verifyCustodyPolicyEvidence(
     );
   }
 
-  const record = evidence as Record<string, unknown>;
+  if (!hasTrustedAdapterPolicyProvenance(evidence)) {
+    throw new FlowError(
+      "POLICY_VERIFICATION_FAILED",
+      "Custody policy evidence was not obtained through the trusted OutLayer provider adapter.",
+    );
+  }
+
+  const record = evidence as unknown as Record<string, unknown>;
   const walletId = record.wallet_id;
   if (typeof walletId !== "string" || walletId.trim().length === 0) {
     throw new FlowError(
@@ -320,6 +565,17 @@ export function verifyCustodyPolicyEvidence(
     );
   }
 
+  const normalizedController = record.controller.trim().toLowerCase();
+  if (
+    options?.expectedController &&
+    normalizedController !== options.expectedController.trim().toLowerCase()
+  ) {
+    throw new FlowError(
+      "POLICY_VERIFICATION_FAILED",
+      `Custody policy controller (${normalizedController}) does not match expected controller (${options.expectedController}).`,
+    );
+  }
+
   if (
     !record.rules ||
     typeof record.rules !== "object" ||
@@ -331,9 +587,34 @@ export function verifyCustodyPolicyEvidence(
     );
   }
 
+  const rulesObj = record.rules as Record<string, unknown>;
+  if (Object.keys(rulesObj).length === 0) {
+    throw new FlowError(
+      "POLICY_VERIFICATION_FAILED",
+      "Custody policy verification requires non-empty policy rules.",
+    );
+  }
+
+  if (rulesObj.defaultAction !== "DENY") {
+    throw new FlowError(
+      "POLICY_VERIFICATION_FAILED",
+      "Custody policy verification requires rules.defaultAction === 'DENY'.",
+    );
+  }
+
+  if (
+    rulesObj.transferSigning === "enabled" ||
+    rulesObj.allowTransfers === true
+  ) {
+    throw new FlowError(
+      "POLICY_VERIFICATION_FAILED",
+      "Custody policy rules must not enable transfer signing while FLOW_EXECUTION=disabled.",
+    );
+  }
+
   return {
     providerWalletId: expectedProviderWalletId,
-    controllerAccountId: record.controller.trim().toLowerCase(),
+    controllerAccountId: normalizedController,
     policyState: "stored",
     frozen: false,
   };

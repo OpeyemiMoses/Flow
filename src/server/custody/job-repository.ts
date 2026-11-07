@@ -11,6 +11,7 @@ import { FlowError } from "../../foundation/errors.ts";
 import type { FlowDb } from "../../foundation/prisma.ts";
 import {
   outlayerChainSchema,
+  scrubHandoffUrl,
   type OutLayerChain,
   type SanitizedProviderErrorCode,
 } from "./outlayer-adapter.ts";
@@ -308,12 +309,47 @@ export async function createProvisioningJob(
 }
 
 /**
+ * Idempotently ensures a provisioning job record exists for an account.
+ * Safe to invoke inside the personal onboarding or business creation database
+ * transaction without calling external providers or blocking on wallet registration.
+ */
+export async function ensureProvisioningJobForAccount(
+  db: FlowDb,
+  accountId: string,
+  idempotencyKey: string,
+): Promise<ProvisioningJobRow> {
+  const result = await db.$queryRaw<ProvisioningJobRow[]>`
+    INSERT INTO flow.wallet_provisioning_jobs (
+      account_id, idempotency_key, status, fencing_token, attempts
+    ) VALUES (
+      ${accountId}::uuid, ${idempotencyKey}::uuid, 'PENDING', 0, 0
+    )
+    ON CONFLICT (account_id) DO UPDATE
+    SET account_id = EXCLUDED.account_id
+    RETURNING
+      id, account_id AS "accountId", idempotency_key AS "idempotencyKey",
+      status, fencing_token AS "fencingToken", lease_holder AS "leaseHolder",
+      lease_expires_at AS "leaseExpiresAt", dispatch_attempt_id AS "dispatchAttemptId",
+      dispatched_at AS "dispatchedAt", attempts, max_attempts AS "maxAttempts",
+      failure_classification AS "failureClassification", last_error AS "lastError"
+  `;
+  const row = result[0];
+  if (!row) {
+    throw new FlowError(
+      "DATABASE_UNAVAILABLE",
+      "Failed to ensure provisioning job for account.",
+    );
+  }
+  return row;
+}
+
+/**
  * Atomically claims an execution lease for a provisioning job.
  * Enforces pre-dispatch retry safety: only claims if PENDING or if previous lease
  * expired BEFORE any external network dispatch occurred (dispatched_at IS NULL),
- * OR if the job is already REGISTERED or PROVISIONED (bearer key durably persisted)
+ * OR if the job is already REGISTERED, PROVISIONED, or POLICY_VERIFYING (bearer key durably persisted)
  * and lease expired during address derivation / policy verification, allowing safe
- * recovery without duplicate registration.
+ * recovery without duplicate registration. Enforces bounded retries (`attempts < max_attempts`).
  */
 export async function claimJobLease(
   db: FlowDb,
@@ -331,10 +367,11 @@ export async function claimJobLease(
       attempts = attempts + 1,
       updated_at = CURRENT_TIMESTAMP
     WHERE account_id = ${accountId}::uuid
+      AND attempts < max_attempts
       AND (
         (status = 'PENDING')
         OR (status = 'LEASED' AND lease_expires_at <= CURRENT_TIMESTAMP AND dispatched_at IS NULL)
-        OR (status IN ('REGISTERED', 'PROVISIONED') AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP))
+        OR (status IN ('REGISTERED', 'PROVISIONED', 'POLICY_VERIFYING') AND (lease_expires_at IS NULL OR lease_expires_at <= CURRENT_TIMESTAMP))
       )
     RETURNING
       id, account_id AS "accountId", idempotency_key AS "idempotencyKey",
@@ -543,9 +580,12 @@ export async function persistRegisteredWallet(
         accountId: string;
         status: string;
         fencingToken: bigint;
+        dispatchedAt: Date | null;
       }>
     >`
-      SELECT id, account_id AS "accountId", status, fencing_token AS "fencingToken"
+      SELECT
+        id, account_id AS "accountId", status, fencing_token AS "fencingToken",
+        dispatched_at AS "dispatchedAt"
       FROM flow.wallet_provisioning_jobs
       WHERE id = ${jobId}::uuid
       FOR UPDATE
@@ -566,10 +606,10 @@ export async function persistRegisteredWallet(
       );
     }
 
-    if (job.status !== "SUBMITTED" && job.status !== "LEASED") {
+    if (job.status !== "SUBMITTED" || !job.dispatchedAt) {
       throw new FlowError(
         "INVALID_STATE_TRANSITION",
-        `Job ${jobId} cannot transition to REGISTERED from status ${job.status}.`,
+        `Job ${jobId} cannot transition to REGISTERED from status ${job.status} without recorded dispatch.`,
       );
     }
 
@@ -583,7 +623,7 @@ export async function persistRegisteredWallet(
       WHERE id = ${jobId}::uuid
         AND account_id = ${input.accountId}::uuid
         AND fencing_token = ${fencingToken}
-        AND status IN ('SUBMITTED', 'LEASED')
+        AND status = 'SUBMITTED'
     `;
 
     if (jobUpdate === 0) {
@@ -593,6 +633,8 @@ export async function persistRegisteredWallet(
       );
     }
 
+    const safeHandoffUrl = scrubHandoffUrl(input.handoffUrl) ?? null;
+
     const walletResult = await tx.$queryRaw<{ id: string }[]>`
       INSERT INTO flow.wallets (
         account_id, provider, provider_wallet_id, near_account_id,
@@ -601,7 +643,7 @@ export async function persistRegisteredWallet(
       ) VALUES (
         ${input.accountId}::uuid, 'OUTLAYER', ${input.providerWalletId}, ${input.nearAccountId},
         ${input.encryptedCredential}, ${input.keyId}, ${input.keyDigest}, 'SETUP_PENDING'::flow.wallet_status,
-        'none', NULL, ${input.handoffUrl ?? null}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+        'none', NULL, ${safeHandoffUrl}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
       )
       RETURNING id
     `;
@@ -771,9 +813,95 @@ export async function attachWalletAddressesAndCapabilities(
 }
 
 /**
+ * Transitions a provisioned job into `POLICY_VERIFYING` before querying `/wallet/v1/policy`.
+ */
+export async function startPolicyVerification(
+  db: FlowDb,
+  jobId: string,
+  fencingToken: bigint,
+  walletId: string,
+): Promise<void> {
+  await db.$transaction(async (tx) => {
+    const jobs = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+        fencingToken: bigint;
+      }>
+    >`
+      SELECT id, account_id AS "accountId", status, fencing_token AS "fencingToken"
+      FROM flow.wallet_provisioning_jobs
+      WHERE id = ${jobId}::uuid
+      FOR UPDATE
+    `;
+
+    const wallets = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+      }>
+    >`
+      SELECT id, account_id AS "accountId", status::text AS status
+      FROM flow.wallets
+      WHERE id = ${walletId}::uuid
+      FOR UPDATE
+    `;
+
+    const job = jobs[0];
+    const wallet = wallets[0];
+
+    if (!job || !wallet || job.accountId !== wallet.accountId) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Cannot start policy verification for wallet ${walletId}: job ${jobId} does not belong to the same account.`,
+      );
+    }
+
+    if (job.fencingToken !== fencingToken) {
+      throw new FlowError(
+        "STALE_FENCING_TOKEN",
+        `Job ${jobId} fencing token ${fencingToken} is stale on policy verification start.`,
+      );
+    }
+
+    if (
+      job.status !== "PROVISIONED" &&
+      job.status !== "LEASED" &&
+      job.status !== "POLICY_VERIFYING"
+    ) {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Job ${jobId} in status ${job.status} cannot transition to POLICY_VERIFYING.`,
+      );
+    }
+
+    if (wallet.status !== "PROVISIONING") {
+      throw new FlowError(
+        "INVALID_STATE_TRANSITION",
+        `Wallet ${walletId} in status ${wallet.status} cannot start policy verification; must be PROVISIONING.`,
+      );
+    }
+
+    await tx.$executeRaw`
+      UPDATE flow.wallet_provisioning_jobs
+      SET
+        status = 'POLICY_VERIFYING',
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${jobId}::uuid
+        AND account_id = ${job.accountId}::uuid
+        AND fencing_token = ${fencingToken}
+    `;
+  });
+}
+
+/**
  * Stage 3: Validates job-to-wallet-to-account binding, active fencing token,
- * state transition, persisted multi-chain addresses/capabilities, and provider-backed
- * custody policy evidence before transitioning the wallet to `ACTIVE` (`policy_state='stored'`).
+ * tightened state transition (must be in `PROVISIONING` / `PROVISIONED` or `POLICY_VERIFYING`,
+ * never directly from `SETUP_PENDING`, `PENDING`, `SUBMITTED`, or `REGISTERED`),
+ * persisted multi-chain addresses/capabilities, and trusted-adapter custody policy evidence
+ * before transitioning the wallet to `ACTIVE` (`policy_state='stored'`).
  *
  * NOTE: `ACTIVE` means custodial provisioning and policy verification are complete.
  * Live fund movement and fund readiness remain governed by `evaluateWalletFundReadiness()`
@@ -836,21 +964,20 @@ export async function activateWalletIfReady(
     }
 
     if (
-      job.status !== "LEASED" &&
-      job.status !== "REGISTERED" &&
       job.status !== "PROVISIONED" &&
-      job.status !== "POLICY_VERIFYING"
+      job.status !== "POLICY_VERIFYING" &&
+      job.status !== "LEASED"
     ) {
       throw new FlowError(
         "INVALID_STATE_TRANSITION",
-        `Job ${jobId} in status ${job.status} cannot transition to ACTIVE.`,
+        `Job ${jobId} in status ${job.status} cannot transition directly to ACTIVE. Must complete address derivation (PROVISIONED or POLICY_VERIFYING) first.`,
       );
     }
 
-    if (wallet.status !== "SETUP_PENDING" && wallet.status !== "PROVISIONING") {
+    if (wallet.status !== "PROVISIONING") {
       throw new FlowError(
         "INVALID_STATE_TRANSITION",
-        `Wallet ${walletId} in status ${wallet.status} cannot transition to ACTIVE.`,
+        `Wallet ${walletId} in status ${wallet.status} cannot transition directly to ACTIVE. Must complete Stage 2 address attachment (PROVISIONING) first.`,
       );
     }
 
@@ -1037,6 +1164,8 @@ export async function commitJobSuccess(
       );
     }
 
+    const safeHandoffUrl = scrubHandoffUrl(input.handoffUrl) ?? null;
+
     const walletResult = await tx.$queryRaw<{ id: string }[]>`
       INSERT INTO flow.wallets (
         account_id, provider, provider_wallet_id, near_account_id,
@@ -1045,7 +1174,7 @@ export async function commitJobSuccess(
       ) VALUES (
         ${input.accountId}::uuid, 'OUTLAYER', ${input.providerWalletId}, ${input.nearAccountId},
         ${input.encryptedCredential}, ${input.keyId}, ${input.keyDigest}, 'ACTIVE'::flow.wallet_status,
-        ${verifiedPolicy.policyState}, ${verifiedPolicy.controllerAccountId}, ${input.handoffUrl ?? null},
+        ${verifiedPolicy.policyState}, ${verifiedPolicy.controllerAccountId}, ${safeHandoffUrl},
         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
       )
       RETURNING id
@@ -1137,7 +1266,7 @@ export async function reconcileCrashedJobs(db: FlowDb): Promise<number> {
       lease_holder = NULL,
       lease_expires_at = NULL,
       updated_at = CURRENT_TIMESTAMP
-    WHERE j.status IN ('LEASED', 'REGISTERED', 'PROVISIONED')
+    WHERE j.status IN ('LEASED', 'REGISTERED', 'PROVISIONED', 'POLICY_VERIFYING')
       AND j.lease_expires_at <= CURRENT_TIMESTAMP
       AND EXISTS (
         SELECT 1 FROM flow.wallets w WHERE w.account_id = j.account_id

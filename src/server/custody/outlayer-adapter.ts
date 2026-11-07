@@ -1,7 +1,10 @@
 import { z } from "zod";
 import {
+  isFinancialExecutionDisabled,
   isValidNearAddress,
+  mintTrustedAdapterPolicyEvidence,
   validateAddressForNetwork,
+  type TrustedProviderPolicyEvidence,
 } from "../../domain/custody.ts";
 import { FlowError } from "../../foundation/errors.ts";
 import { log } from "../../foundation/logger.ts";
@@ -151,7 +154,39 @@ const policyResponseSchema = z.object({
 
 export type OutLayerRegisterResult = z.infer<typeof registerResponseSchema>;
 export type OutLayerAddressResult = z.infer<typeof addressResponseSchema>;
-export type OutLayerPolicyResult = z.infer<typeof policyResponseSchema>;
+export type OutLayerPolicyResult = TrustedProviderPolicyEvidence;
+
+/**
+ * Strips any one-time bearer credential (`key`, `api_key`, `token`, or `wk_...`)
+ * from an OutLayer handoff URL before persisting it to `flow.wallets.handoff_url`.
+ */
+export function scrubHandoffUrl(
+  handoffUrl?: string | null,
+): string | undefined {
+  if (!handoffUrl || typeof handoffUrl !== "string") {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(handoffUrl);
+    for (const key of Array.from(parsed.searchParams.keys())) {
+      const val = parsed.searchParams.get(key) ?? "";
+      if (
+        /^(key|api_key|apikey|token|secret)$/i.test(key) ||
+        val.startsWith("wk_")
+      ) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    if (parsed.hash.includes("wk_") || parsed.hash.includes("key=")) {
+      parsed.hash = "";
+    }
+    return parsed.toString().replace(/wk_[\w-]+/g, "[REDACTED]");
+  } catch {
+    return handoffUrl
+      .replace(/([?&](key|api_key|token)=)[^&#]+/gi, "$1[REDACTED]")
+      .replace(/wk_[\w-]+/g, "[REDACTED]");
+  }
+}
 
 export interface OutLayerRegisterInput {
   readonly seed?: string;
@@ -169,6 +204,8 @@ const ALLOWED_REGISTER_FIELDS = new Set([
   "handoff_url",
 ]);
 
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
+
 export class OutLayerAdapter {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -178,10 +215,32 @@ export class OutLayerAdapter {
     this.timeoutMs = timeoutMs;
   }
 
+  private assertLoopbackWhenExecutionDisabled(): void {
+    if (!isFinancialExecutionDisabled()) {
+      return;
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(this.baseUrl);
+    } catch {
+      throw new FlowError(
+        "INVALID_CONFIGURATION",
+        "OutLayer adapter baseUrl is not a valid URL.",
+      );
+    }
+    if (!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+      throw new FlowError(
+        "INVALID_CONFIGURATION",
+        "Live OutLayer network requests are prohibited while FLOW_EXECUTION=disabled; only local simulated loopback endpoints are permitted.",
+      );
+    }
+  }
+
   private async fetchWithTimeout(
     endpoint: string,
     options: RequestInit,
   ): Promise<Response> {
+    this.assertLoopbackWhenExecutionDisabled();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -420,6 +479,6 @@ export class OutLayerAdapter {
       );
     }
 
-    return parsed.data;
+    return mintTrustedAdapterPolicyEvidence(parsed.data);
   }
 }

@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  decodeBase58,
   evaluatePolicyReadiness,
   evaluateWalletFundReadiness,
   isValidEvmAddress,
   isValidNearAddress,
   isValidSolanaAddress,
+  mintTrustedAdapterPolicyEvidence,
   OUTLAYER_CAPABILITIES,
+  toEip55ChecksumAddress,
   validateAddressForNetwork,
   validateRequiredWalletProvisioning,
   verifyCustodyPolicyEvidence,
 } from "../src/domain/custody.ts";
 
-test("validates NEAR implicit addresses requiring 64 hexadecimal characters (32 bytes)", () => {
+test("validates NEAR implicit addresses requiring 64 hexadecimal characters (32 bytes) and non-zero", () => {
   const validImplicit =
     "98793cd91a3f870fb126f66285808c7e094afcfc4eda8a970f6644ac0a4961ac";
   assert.equal(isValidNearAddress(validImplicit), true);
@@ -21,20 +24,43 @@ test("validates NEAR implicit addresses requiring 64 hexadecimal characters (32 
   assert.equal(isValidNearAddress(truncatedImplicit), false);
 
   assert.equal(isValidNearAddress(validImplicit.toUpperCase()), false);
+  assert.equal(isValidNearAddress("0".repeat(64)), false);
 });
 
-test("validates NEAR named account identifiers", () => {
+test("validates NEAR named account identifiers and rejects edge-case separator violations", () => {
   assert.equal(isValidNearAddress("alice.near"), true);
   assert.equal(isValidNearAddress("treasury.sputnik-dao.near"), true);
   assert.equal(isValidNearAddress("flow_app.near"), true);
   assert.equal(isValidNearAddress("a"), false);
   assert.equal(isValidNearAddress("a".repeat(65)), false);
+  assert.equal(isValidNearAddress("alicenear"), false);
+  assert.equal(isValidNearAddress("-alice.near"), false);
+  assert.equal(isValidNearAddress("alice-.near"), false);
+  assert.equal(isValidNearAddress("alice--bob.near"), false);
+  assert.equal(isValidNearAddress("alice__bob.near"), false);
+  assert.equal(isValidNearAddress("alice..near"), false);
+  assert.equal(isValidNearAddress(".alice.near"), false);
+  assert.equal(isValidNearAddress("alice.near."), false);
 });
 
-test("validates EVM addresses for Base and Ethereum", () => {
+test("validates EVM addresses with EIP-55 Keccak-256 mixed-case checksum and rejects zero address", () => {
   const validEvm = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  assert.equal(toEip55ChecksumAddress(validEvm.toLowerCase()), validEvm);
   assert.equal(isValidEvmAddress(validEvm), true);
   assert.equal(isValidEvmAddress(validEvm.toLowerCase()), true);
+  assert.equal(isValidEvmAddress(`0x${validEvm.slice(2).toUpperCase()}`), true);
+
+  // Corrupted mixed-case EIP-55 checksum ('f' instead of 'F' at index 9) MUST be rejected
+  assert.equal(
+    isValidEvmAddress("0x833589fcd6eDb6E08f4c7C32D4f71b54bdA02913"),
+    false,
+  );
+
+  // All-zero burn address MUST be rejected
+  assert.equal(
+    isValidEvmAddress("0x0000000000000000000000000000000000000000"),
+    false,
+  );
 
   assert.equal(
     isValidEvmAddress("833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
@@ -47,9 +73,26 @@ test("validates EVM addresses for Base and Ethereum", () => {
   );
 });
 
-test("validates Solana Base58 addresses", () => {
+test("validates Solana Base58 addresses requiring decoded byte length of exactly 32 bytes", () => {
   const validSolana = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+  const decoded = decodeBase58(validSolana);
+  assert.ok(decoded !== null);
+  assert.equal(decoded.length, 32);
   assert.equal(isValidSolanaAddress(validSolana), true);
+
+  // 32-character Base58 string that decodes to 23 bytes (not 32 bytes) MUST be rejected
+  const twentyThreeByteBase58 = "2".repeat(32);
+  assert.equal(decodeBase58(twentyThreeByteBase58)?.length, 23);
+  assert.equal(isValidSolanaAddress(twentyThreeByteBase58), false);
+
+  // 44-character Base58 string that decodes to 33 bytes (not 32 bytes) MUST be rejected
+  const thirtyThreeByteBase58 = "z".repeat(44);
+  assert.equal(decodeBase58(thirtyThreeByteBase58)?.length, 33);
+  assert.equal(isValidSolanaAddress(thirtyThreeByteBase58), false);
+
+  // All-zero 32-byte Solana address ("1".repeat(32)) MUST be rejected
+  assert.equal(decodeBase58("1".repeat(32))?.length, 32);
+  assert.equal(isValidSolanaAddress("1".repeat(32)), false);
 
   assert.equal(
     isValidSolanaAddress("0xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"),
@@ -113,7 +156,7 @@ test("distinguishes address derivation, broadcast mode and balance reading acros
   assert.equal(btc.canSignTransfer, false);
 });
 
-test("verifyCustodyPolicyEvidence rejects caller-supplied strings and requires provider-backed evidence", () => {
+test("verifyCustodyPolicyEvidence rejects caller-supplied strings, caller-fabricated objects, and requires trusted adapter provenance with meaningful rules", () => {
   const expectedWalletId = "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20";
 
   // 1. Caller-supplied raw string must be rejected
@@ -121,39 +164,55 @@ test("verifyCustodyPolicyEvidence rejects caller-supplied strings and requires p
     code: "POLICY_VERIFICATION_FAILED",
   });
 
-  // 2. Mismatched provider wallet_id must be rejected
-  assert.throws(
-    () =>
-      verifyCustodyPolicyEvidence(
-        {
-          wallet_id: "00000000-0000-0000-0000-000000000000",
-          controller: "controller.near",
-          frozen: false,
-          policy: "stored",
-          rules: { maxPerTx: "0" },
-        },
-        expectedWalletId,
-      ),
-    { code: "CUSTODY_PROVIDER_CORRELATION_ERROR" },
-  );
-
-  // 3. Frozen wallet must be rejected
+  // 2. Caller-fabricated plain object (not minted by OutLayerAdapter) must be rejected even if fields look valid!
   assert.throws(
     () =>
       verifyCustodyPolicyEvidence(
         {
           wallet_id: expectedWalletId,
           controller: "controller.near",
-          frozen: true,
+          frozen: false,
           policy: "stored",
-          rules: {},
+          rules: { defaultAction: "DENY" },
         },
         expectedWalletId,
       ),
     { code: "POLICY_VERIFICATION_FAILED" },
   );
 
-  // 4. Policy 'none' or arbitrary string must be rejected
+  // 3. Mismatched provider wallet_id must be rejected
+  assert.throws(
+    () =>
+      verifyCustodyPolicyEvidence(
+        mintTrustedAdapterPolicyEvidence({
+          wallet_id: "00000000-0000-0000-0000-000000000000",
+          controller: "controller.near",
+          frozen: false,
+          policy: "stored",
+          rules: { defaultAction: "DENY" },
+        }),
+        expectedWalletId,
+      ),
+    { code: "CUSTODY_PROVIDER_CORRELATION_ERROR" },
+  );
+
+  // 4. Frozen wallet must be rejected
+  assert.throws(
+    () =>
+      verifyCustodyPolicyEvidence(
+        mintTrustedAdapterPolicyEvidence({
+          wallet_id: expectedWalletId,
+          controller: "controller.near",
+          frozen: true,
+          policy: "stored",
+          rules: { defaultAction: "DENY" },
+        }),
+        expectedWalletId,
+      ),
+    { code: "POLICY_VERIFICATION_FAILED" },
+  );
+
+  // 5. Policy 'none' or arbitrary string must be rejected
   for (const invalidPolicy of [
     "none",
     "unverified",
@@ -164,59 +223,67 @@ test("verifyCustodyPolicyEvidence rejects caller-supplied strings and requires p
     assert.throws(
       () =>
         verifyCustodyPolicyEvidence(
-          {
+          mintTrustedAdapterPolicyEvidence({
             wallet_id: expectedWalletId,
             controller: "controller.near",
             frozen: false,
             policy: invalidPolicy,
-            rules: {},
-          },
+            rules: { defaultAction: "DENY" },
+          }),
           expectedWalletId,
         ),
       { code: "POLICY_VERIFICATION_FAILED" },
     );
   }
 
-  // 5. Missing or invalid NEAR controller account must be rejected
+  // 6. Missing or invalid NEAR controller account must be rejected
   assert.throws(
     () =>
       verifyCustodyPolicyEvidence(
-        {
+        mintTrustedAdapterPolicyEvidence({
           wallet_id: expectedWalletId,
           controller: "invalid controller!!!",
           frozen: false,
           policy: "stored",
-          rules: {},
-        },
+          rules: { defaultAction: "DENY" },
+        }),
         expectedWalletId,
       ),
     { code: "POLICY_VERIFICATION_FAILED" },
   );
 
-  // 6. Missing rules object must be rejected
-  assert.throws(
-    () =>
-      verifyCustodyPolicyEvidence(
-        {
-          wallet_id: expectedWalletId,
-          controller: "controller.near",
-          frozen: false,
-          policy: "stored",
-        },
-        expectedWalletId,
-      ),
-    { code: "POLICY_VERIFICATION_FAILED" },
-  );
+  // 7. Missing rules, empty rules {}, or rules without defaultAction='DENY' must be rejected
+  for (const invalidRules of [
+    undefined,
+    {},
+    { defaultAction: "ALLOW" },
+    { defaultAction: "DENY", transferSigning: "enabled" },
+  ]) {
+    assert.throws(
+      () =>
+        verifyCustodyPolicyEvidence(
+          mintTrustedAdapterPolicyEvidence({
+            wallet_id: expectedWalletId,
+            controller: "controller.near",
+            frozen: false,
+            policy: "stored",
+            rules: invalidRules,
+          }),
+          expectedWalletId,
+        ),
+      { code: "POLICY_VERIFICATION_FAILED" },
+    );
+  }
 
-  // 7. Complete, provider-backed policy evidence succeeds
+  // 8. Complete, adapter-minted policy evidence with meaningful rules succeeds
   const verified = verifyCustodyPolicyEvidence(
-    {
+    mintTrustedAdapterPolicyEvidence({
       wallet_id: expectedWalletId,
       controller: "controller.near",
       frozen: false,
       policy: "stored",
-      rules: { defaultAction: "DENY" },
-    },
+      rules: { defaultAction: "DENY", requireControllerApproval: true },
+    }),
     expectedWalletId,
   );
   assert.equal(verified.providerWalletId, expectedWalletId);

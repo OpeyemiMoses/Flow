@@ -27,7 +27,15 @@ export default async function AccountPage({
             : "Business account"}{" "}
           · {account.role.toLowerCase()}
         </p>
-        <p className="flow-tag">Wallet setup pending</p>
+        <p className="flow-tag">
+          {account.walletStatus === "active"
+            ? "Wallet provisioned (execution disabled)"
+            : account.walletStatus === "provisioning"
+              ? "Wallet provisioning in progress"
+              : account.walletStatus === "setup_failed"
+                ? "Wallet setup failed"
+                : "Wallet setup pending"}
+        </p>
         {account.kind === "BUSINESS" && account.role !== "MEMBER" && (
           <div>
             <Link prefetch={false} href={`/accounts/${account.id}/team`}>

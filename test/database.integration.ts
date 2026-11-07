@@ -4,6 +4,7 @@ import { after, test } from "node:test";
 import pg from "pg";
 import {
   evaluateWalletFundReadiness,
+  mintTrustedAdapterPolicyEvidence,
   type OutLayerPolicyState,
   type ProviderPolicyEvidenceInput,
 } from "../src/domain/custody.ts";
@@ -26,6 +27,7 @@ import {
   claimJobLease,
   commitJobSuccess,
   createProvisioningJob,
+  ensureProvisioningJobForAccount,
   getAccountWalletPublicProjection,
   persistRegisteredWallet,
   recordJobAmbiguous,
@@ -33,6 +35,9 @@ import {
   recordJobTerminalFailure,
   reconcileCrashedJobs,
 } from "../src/server/custody/job-repository.ts";
+import { OutLayerAdapter } from "../src/server/custody/outlayer-adapter.ts";
+import { WalletProvisioningWorker } from "../src/server/custody/provisioning-worker.ts";
+import { createOutLayerMockServer } from "./support/outlayer-fixture.ts";
 
 assert.equal(
   process.env.FLOW_ENV,
@@ -536,13 +541,13 @@ test("credential isolation: encrypted envelope at rest, plaintext never stored, 
     keyId: "v1",
     keyDigest,
     handoffUrl: "https://handoff.outlayer.fastnear.com/?key=scrubbed",
-    policyEvidence: {
+    policyEvidence: mintTrustedAdapterPolicyEvidence({
       wallet_id: "outlayer-w-999",
       controller: "controller.near",
       frozen: false,
       policy: "stored",
       rules: { defaultAction: "DENY" },
-    },
+    }),
     addresses: [
       {
         network: "near",
@@ -554,13 +559,13 @@ test("credential isolation: encrypted envelope at rest, plaintext never stored, 
       {
         network: "base",
         chainId: "8453",
-        address: "0x1234567890123456789012345678901234567890",
+        address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
         publicKey: "secp256k1:0x04...",
       },
       {
         network: "solana",
         chainId: "solana-mainnet",
-        address: "7YttLkHDoNj9wyDur5pM1x9XYf42G4y9m5t5aZ5r4i4o",
+        address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
         publicKey: "ed25519:7Ytt...",
       },
     ],
@@ -854,13 +859,13 @@ test("two-stage provisioning: immediate credential persistence, worker crash rec
     worker2Lease.id,
     worker2Lease.fencingToken,
     walletId,
-    {
+    mintTrustedAdapterPolicyEvidence({
       wallet_id: "outlayer-w-stage1",
       controller: "controller.near",
       frozen: false,
       policy: "stored",
       rules: { defaultAction: "DENY" },
-    },
+    }),
   );
 
   // Verify wallet is now ACTIVE with policy_state='stored' and controller_account_id='controller.near'
@@ -1029,13 +1034,14 @@ test("stale fencing token is rejected on Stage 1, Stage 2, and Stage 3 transitio
     validAddressesAndCaps,
   );
 
-  const validPolicyEvidence: ProviderPolicyEvidenceInput = {
-    wallet_id: "outlayer-active-cas",
-    controller: "controller.near",
-    frozen: false,
-    policy: "stored",
-    rules: { defaultAction: "DENY" },
-  };
+  const validPolicyEvidence: ProviderPolicyEvidenceInput =
+    mintTrustedAdapterPolicyEvidence({
+      wallet_id: "outlayer-active-cas",
+      controller: "controller.near",
+      frozen: false,
+      policy: "stored",
+      rules: { defaultAction: "DENY" },
+    });
 
   // Worker 1 and Worker 2 attempt to activate wallet with stale tokens -> MUST FAIL
   await assert.rejects(
@@ -1096,13 +1102,13 @@ test("public wallet projection strictly isolates credentials at query time and s
     encryptedCredential: envelope,
     keyId: "v1",
     keyDigest,
-    policyEvidence: {
+    policyEvidence: mintTrustedAdapterPolicyEvidence({
       wallet_id: "outlayer-proj-1",
       controller: "controller.near",
       frozen: false,
       policy: "stored",
       rules: { defaultAction: "DENY" },
-    },
+    }),
     addresses: [
       {
         network: "near",
@@ -1485,15 +1491,16 @@ test("adversarial PostgreSQL test: incomplete provisioning, missing addresses, m
     },
   );
 
-  const validPolicyEvidence: ProviderPolicyEvidenceInput = {
-    wallet_id: "outlayer-adv-wallet-1",
-    controller: "controller.near",
-    frozen: false,
-    policy: "stored",
-    rules: { defaultAction: "DENY" },
-  };
+  const validPolicyEvidence: ProviderPolicyEvidenceInput =
+    mintTrustedAdapterPolicyEvidence({
+      wallet_id: "outlayer-adv-wallet-1",
+      controller: "controller.near",
+      frozen: false,
+      policy: "stored",
+      rules: { defaultAction: "DENY" },
+    });
 
-  // 1. Attempting to activate before addresses/capabilities are attached -> INCOMPLETE_WALLET_PROVISIONING
+  // 1. Attempting to activate directly from SETUP_PENDING / REGISTERED before Stage 2 -> INVALID_STATE_TRANSITION
   await assert.rejects(
     activateWalletIfReady(
       db,
@@ -1502,7 +1509,7 @@ test("adversarial PostgreSQL test: incomplete provisioning, missing addresses, m
       walletId,
       validPolicyEvidence,
     ),
-    { code: "INCOMPLETE_WALLET_PROVISIONING" },
+    { code: "INVALID_STATE_TRANSITION" },
   );
 
   // 2. Attempting to attach incomplete addresses (missing Solana) -> INCOMPLETE_WALLET_PROVISIONING
@@ -1618,7 +1625,7 @@ test("adversarial PostgreSQL test: incomplete provisioning, missing addresses, m
     },
   );
 
-  // 4. Attempting to promote policy using a caller-supplied string ("stored") -> POLICY_VERIFICATION_FAILED
+  // 4. Attempting to promote policy using a caller-supplied string ("stored") or caller-fabricated plain object -> POLICY_VERIFICATION_FAILED
   await assert.rejects(
     activateWalletIfReady(
       db,
@@ -1629,36 +1636,98 @@ test("adversarial PostgreSQL test: incomplete provisioning, missing addresses, m
     ),
     { code: "POLICY_VERIFICATION_FAILED" },
   );
+  await assert.rejects(
+    activateWalletIfReady(db, leased.id, leased.fencingToken, walletId, {
+      wallet_id: "outlayer-adv-wallet-1",
+      controller: "controller.near",
+      frozen: false,
+      policy: "stored",
+      rules: { defaultAction: "DENY" },
+    }),
+    { code: "POLICY_VERIFICATION_FAILED" },
+  );
 
   // 5. Attempting to activate with mismatched provider wallet_id -> CUSTODY_PROVIDER_CORRELATION_ERROR
   await assert.rejects(
-    activateWalletIfReady(db, leased.id, leased.fencingToken, walletId, {
-      ...validPolicyEvidence,
-      wallet_id: "outlayer-wrong-wallet-id",
-    }),
+    activateWalletIfReady(
+      db,
+      leased.id,
+      leased.fencingToken,
+      walletId,
+      mintTrustedAdapterPolicyEvidence({
+        wallet_id: "outlayer-wrong-wallet-id",
+        controller: "controller.near",
+        frozen: false,
+        policy: "stored",
+        rules: { defaultAction: "DENY" },
+      }),
+    ),
     { code: "CUSTODY_PROVIDER_CORRELATION_ERROR" },
   );
 
-  // 6. Attempting to activate with policy='none' or frozen=true or invalid controller -> POLICY_VERIFICATION_FAILED
+  // 6. Attempting to activate with policy='none' or frozen=true or invalid controller or empty rules -> POLICY_VERIFICATION_FAILED
   await assert.rejects(
-    activateWalletIfReady(db, leased.id, leased.fencingToken, walletId, {
-      ...validPolicyEvidence,
-      policy: "none",
-    }),
+    activateWalletIfReady(
+      db,
+      leased.id,
+      leased.fencingToken,
+      walletId,
+      mintTrustedAdapterPolicyEvidence({
+        wallet_id: "outlayer-adv-wallet-1",
+        controller: "controller.near",
+        frozen: false,
+        policy: "none",
+        rules: { defaultAction: "DENY" },
+      }),
+    ),
     { code: "POLICY_VERIFICATION_FAILED" },
   );
   await assert.rejects(
-    activateWalletIfReady(db, leased.id, leased.fencingToken, walletId, {
-      ...validPolicyEvidence,
-      frozen: true,
-    }),
+    activateWalletIfReady(
+      db,
+      leased.id,
+      leased.fencingToken,
+      walletId,
+      mintTrustedAdapterPolicyEvidence({
+        wallet_id: "outlayer-adv-wallet-1",
+        controller: "controller.near",
+        frozen: true,
+        policy: "stored",
+        rules: { defaultAction: "DENY" },
+      }),
+    ),
     { code: "POLICY_VERIFICATION_FAILED" },
   );
   await assert.rejects(
-    activateWalletIfReady(db, leased.id, leased.fencingToken, walletId, {
-      ...validPolicyEvidence,
-      controller: "invalid controller!",
-    }),
+    activateWalletIfReady(
+      db,
+      leased.id,
+      leased.fencingToken,
+      walletId,
+      mintTrustedAdapterPolicyEvidence({
+        wallet_id: "outlayer-adv-wallet-1",
+        controller: "invalid controller!",
+        frozen: false,
+        policy: "stored",
+        rules: { defaultAction: "DENY" },
+      }),
+    ),
+    { code: "POLICY_VERIFICATION_FAILED" },
+  );
+  await assert.rejects(
+    activateWalletIfReady(
+      db,
+      leased.id,
+      leased.fencingToken,
+      walletId,
+      mintTrustedAdapterPolicyEvidence({
+        wallet_id: "outlayer-adv-wallet-1",
+        controller: "controller.near",
+        frozen: false,
+        policy: "stored",
+        rules: {},
+      }),
+    ),
     { code: "POLICY_VERIFICATION_FAILED" },
   );
 
@@ -1728,13 +1797,13 @@ test("decoupled fund readiness enforces execution guards and unverified policy r
       encryptedCredential: envelope,
       keyId: "v1",
       keyDigest: deriveKeyDigest(testKeyHex),
-      policyEvidence: {
+      policyEvidence: mintTrustedAdapterPolicyEvidence({
         wallet_id: "outlayer-funds-1",
         controller: "controller.near",
         frozen: false,
         policy: "none",
         rules: {},
-      },
+      }),
       addresses: [],
       capabilities: [],
     }),
@@ -1750,13 +1819,13 @@ test("decoupled fund readiness enforces execution guards and unverified policy r
     encryptedCredential: envelope,
     keyId: "v1",
     keyDigest: deriveKeyDigest(testKeyHex),
-    policyEvidence: {
+    policyEvidence: mintTrustedAdapterPolicyEvidence({
       wallet_id: "outlayer-funds-1",
       controller: "controller.near",
       frozen: false,
       policy: "stored",
       rules: { defaultAction: "DENY" },
-    },
+    }),
     addresses: [
       {
         network: "near",
@@ -1938,5 +2007,425 @@ test("PostgreSQL denies the test runtime role access to the local database", asy
     await assert.rejects(client.connect(), { code: "42501" });
   } finally {
     await client.end();
+  }
+});
+
+test("M2 Phase 3 worker: end-to-end fixture-backed provisioning for personal onboarding and multiple business accounts with strict identity isolation", async () => {
+  const db = getPrismaClient();
+  const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
+  try {
+    const personal = await createTestAccount(pool, "PERSONAL", "m23-personal");
+    const bizAlpha = await createTestAccount(pool, "BUSINESS", "m23-biz-alpha");
+    const bizBeta = await createTestAccount(pool, "BUSINESS", "m23-biz-beta");
+
+    const personalKey = randomUUID();
+    const bizAlphaKey = randomUUID();
+    const bizBetaKey = randomUUID();
+
+    // Idempotent job enqueue (simulating repeated onboarding / business creation calls)
+    const j1 = await ensureProvisioningJobForAccount(
+      db,
+      personal.accountId,
+      personalKey,
+    );
+    const j1Replay = await ensureProvisioningJobForAccount(
+      db,
+      personal.accountId,
+      personalKey,
+    );
+    assert.equal(j1.id, j1Replay.id);
+    assert.equal(
+      mockServer.getRegisterCallCount(),
+      0,
+      "Account creation job enqueue must NEVER call external provider",
+    );
+
+    await ensureProvisioningJobForAccount(db, bizAlpha.accountId, bizAlphaKey);
+    await ensureProvisioningJobForAccount(db, bizBeta.accountId, bizBetaKey);
+
+    const testKeyHex =
+      "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    const adapter = new OutLayerAdapter(mockServer.url);
+    const worker = new WalletProvisioningWorker({
+      db,
+      adapter,
+      walletConfig: { encryptionKey: testKeyHex, keyId: "v1" },
+      workerId: "worker-m23-e2e",
+      maxConcurrency: 2,
+    });
+
+    const r1 = await worker.processAccountJob(personal.accountId);
+    const r2 = await worker.processAccountJob(bizAlpha.accountId);
+    const r3 = await worker.processAccountJob(bizBeta.accountId);
+
+    assert.equal(r1.outcome, "activated");
+    assert.equal(r2.outcome, "activated");
+    assert.equal(r3.outcome, "activated");
+
+    // Repeated call on already-ACTIVE account is a no-op ("skipped") and does not call /register again
+    const r1Duplicate = await worker.processAccountJob(personal.accountId);
+    assert.equal(r1Duplicate.outcome, "skipped");
+    assert.equal(mockServer.getRegisterCallCount(), 3);
+
+    const pProj = await getAccountWalletPublicProjection(
+      db,
+      personal.accountId,
+    );
+    const aProj = await getAccountWalletPublicProjection(
+      db,
+      bizAlpha.accountId,
+    );
+    const bProj = await getAccountWalletPublicProjection(db, bizBeta.accountId);
+
+    assert.ok(pProj && aProj && bProj);
+    assert.equal(pProj.status, "ACTIVE");
+    assert.equal(aProj.status, "ACTIVE");
+    assert.equal(bProj.status, "ACTIVE");
+
+    // Separate wallet identities, provider wallet IDs, and NEAR accounts across personal & business accounts
+    assert.equal(
+      new Set([pProj.id, aProj.id, bProj.id]).size,
+      3,
+      "Each account must have a distinct wallet ID",
+    );
+    assert.equal(
+      new Set([
+        pProj.providerWalletId,
+        aProj.providerWalletId,
+        bProj.providerWalletId,
+      ]).size,
+      3,
+      "Each account must have a distinct OutLayer provider_wallet_id",
+    );
+    assert.equal(
+      new Set([pProj.nearAccountId, aProj.nearAccountId, bProj.nearAccountId])
+        .size,
+      3,
+      "Each account must have a distinct NEAR account ID",
+    );
+
+    // Verify provisioningComplete=true while fundsReady=false and handoffUrl is scrubbed of bearer keys
+    for (const proj of [pProj, aProj, bProj]) {
+      assert.equal(proj.provisioningComplete, true);
+      assert.equal(proj.policyVerified, true);
+      assert.equal(proj.fundsReady, false);
+      assert.equal(proj.canReceiveFunds, false);
+      assert.equal(proj.canSignTransfers, false);
+      assert.equal(proj.addresses.length, 3);
+      assert.ok(
+        !proj.handoffUrl?.includes("wk_"),
+        "handoff_url must NEVER retain bearer key",
+      );
+    }
+  } finally {
+    await mockServer.close();
+  }
+});
+
+test("M2 Phase 3 worker: concurrent workers racing on same and multiple accounts never duplicate registration", async () => {
+  const db = getPrismaClient();
+  const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
+  try {
+    const accounts = await Promise.all(
+      Array.from({ length: 4 }, (_, i) =>
+        createTestAccount(
+          pool,
+          i % 2 === 0 ? "PERSONAL" : "BUSINESS",
+          `race-${i}`,
+        ),
+      ),
+    );
+    for (const acc of accounts) {
+      await ensureProvisioningJobForAccount(db, acc.accountId, randomUUID());
+    }
+
+    const testKeyHex =
+      "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    const adapter = new OutLayerAdapter(mockServer.url);
+
+    const workers = Array.from(
+      { length: 3 },
+      (_, idx) =>
+        new WalletProvisioningWorker({
+          db,
+          adapter,
+          walletConfig: { encryptionKey: testKeyHex, keyId: "v1" },
+          workerId: `racing-worker-${idx}`,
+          maxConcurrency: 2,
+        }),
+    );
+
+    // All 3 workers concurrently race on each account
+    for (const acc of accounts) {
+      const outcomes = await Promise.all(
+        workers.map((w) => w.processAccountJob(acc.accountId)),
+      );
+      const activated = outcomes.filter((o) => o.outcome === "activated");
+      const skipped = outcomes.filter((o) => o.outcome === "skipped");
+      assert.equal(
+        activated.length,
+        1,
+        "Exactly one worker must claim and activate each account",
+      );
+      assert.equal(skipped.length, 2);
+    }
+
+    assert.equal(
+      mockServer.getRegisterCallCount(),
+      accounts.length,
+      "OutLayer /register must be called at most once per account across racing workers",
+    );
+  } finally {
+    await mockServer.close();
+  }
+});
+
+test("M2 Phase 3 worker: crash recovery across Stage 1 (after credential save), Stage 2 (after address attach), and post-dispatch quarantine without re-registering", async () => {
+  const db = getPrismaClient();
+  const mockServer = await createOutLayerMockServer({ multiWalletMode: true });
+  const testKeyHex =
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+  const adapter = new OutLayerAdapter(mockServer.url);
+
+  try {
+    // Case A: Worker crashes AFTER Stage 1 credential persistence, BEFORE Stage 2 address derivation
+    const accStage1 = await createTestAccount(
+      pool,
+      "PERSONAL",
+      "crash-after-s1",
+    );
+    await ensureProvisioningJobForAccount(
+      db,
+      accStage1.accountId,
+      randomUUID(),
+    );
+
+    const crashingStage1Worker = new WalletProvisioningWorker({
+      db,
+      adapter,
+      walletConfig: { encryptionKey: testKeyHex, keyId: "v1" },
+      workerId: "crash-s1-worker",
+      hooks: {
+        onAfterStage1Persist: () => {
+          throw new Error("Simulated process crash after Stage 1 persistence");
+        },
+      },
+    });
+
+    await assert.rejects(() =>
+      crashingStage1Worker.processAccountJob(accStage1.accountId),
+    );
+    assert.equal(mockServer.getRegisterCallCount(), 1);
+
+    // Expire lease to simulate dead worker timeout
+    await pool.query(
+      "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = CURRENT_TIMESTAMP - interval '5 seconds' WHERE account_id = $1::uuid",
+      [accStage1.accountId],
+    );
+
+    const recoveryWorker = new WalletProvisioningWorker({
+      db,
+      adapter,
+      walletConfig: { encryptionKey: testKeyHex, keyId: "v1" },
+      workerId: "recovery-worker",
+    });
+
+    const recoveredStage1 = await recoveryWorker.processAccountJob(
+      accStage1.accountId,
+    );
+    assert.equal(recoveredStage1.outcome, "activated");
+    assert.equal(recoveredStage1.recoveredFromStage, "STAGE_1_REGISTERED");
+    assert.equal(
+      mockServer.getRegisterCallCount(),
+      1,
+      "Recovery after Stage 1 MUST NOT call /register again",
+    );
+
+    // Case B: Worker crashes AFTER Stage 2 address attachment, BEFORE Stage 3 policy verification
+    const accStage2 = await createTestAccount(
+      pool,
+      "BUSINESS",
+      "crash-after-s2",
+    );
+    await ensureProvisioningJobForAccount(
+      db,
+      accStage2.accountId,
+      randomUUID(),
+    );
+
+    const crashingStage2Worker = new WalletProvisioningWorker({
+      db,
+      adapter,
+      walletConfig: { encryptionKey: testKeyHex, keyId: "v1" },
+      workerId: "crash-s2-worker",
+      hooks: {
+        onAfterStage2Attach: () => {
+          throw new Error("Simulated process crash after Stage 2 attachment");
+        },
+      },
+    });
+
+    await assert.rejects(() =>
+      crashingStage2Worker.processAccountJob(accStage2.accountId),
+    );
+    assert.equal(mockServer.getRegisterCallCount(), 2);
+
+    await pool.query(
+      "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = CURRENT_TIMESTAMP - interval '5 seconds' WHERE account_id = $1::uuid",
+      [accStage2.accountId],
+    );
+
+    const recoveredStage2 = await recoveryWorker.processAccountJob(
+      accStage2.accountId,
+    );
+    assert.equal(recoveredStage2.outcome, "activated");
+    assert.equal(recoveredStage2.recoveredFromStage, "STAGE_2_PROVISIONED");
+    assert.equal(
+      mockServer.getRegisterCallCount(),
+      2,
+      "Recovery after Stage 2 MUST NOT call /register again",
+    );
+
+    // Case C: Worker crashes AFTER dispatch recorded, BEFORE Stage 1 credential persistence -> Quarantined to UNKNOWN
+    const accAmbiguous = await createTestAccount(
+      pool,
+      "PERSONAL",
+      "crash-after-dispatch",
+    );
+    await ensureProvisioningJobForAccount(
+      db,
+      accAmbiguous.accountId,
+      randomUUID(),
+    );
+
+    const crashingDispatchWorker = new WalletProvisioningWorker({
+      db,
+      adapter,
+      walletConfig: { encryptionKey: testKeyHex, keyId: "v1" },
+      workerId: "crash-dispatch-worker",
+      hooks: {
+        onAfterDispatch: () => {
+          throw new Error("Simulated process crash in-flight after dispatch");
+        },
+      },
+    });
+
+    await assert.rejects(() =>
+      crashingDispatchWorker.processAccountJob(accAmbiguous.accountId),
+    );
+    assert.equal(
+      mockServer.getRegisterCallCount(),
+      2,
+      "Crash happened right after recordJobDispatch before HTTP call",
+    );
+
+    await pool.query(
+      "UPDATE flow.wallet_provisioning_jobs SET lease_expires_at = CURRENT_TIMESTAMP - interval '5 seconds' WHERE account_id = $1::uuid",
+      [accAmbiguous.accountId],
+    );
+
+    const quarantinedCount = await reconcileCrashedJobs(db);
+    assert.ok(quarantinedCount >= 1);
+
+    const { rows: ambRows } = await pool.query<{
+      status: string;
+      failure_classification: string;
+    }>(
+      "SELECT status, failure_classification FROM flow.wallet_provisioning_jobs WHERE account_id = $1::uuid",
+      [accAmbiguous.accountId],
+    );
+    assert.equal(ambRows[0]!.status, "UNKNOWN");
+    assert.equal(ambRows[0]!.failure_classification, "POST_DISPATCH_AMBIGUOUS");
+
+    // Subsequent worker run MUST skip the quarantined UNKNOWN job and NEVER call /register
+    const afterQuarantine = await recoveryWorker.processAccountJob(
+      accAmbiguous.accountId,
+    );
+    assert.equal(afterQuarantine.outcome, "skipped");
+    assert.equal(mockServer.getRegisterCallCount(), 2);
+  } finally {
+    await mockServer.close();
+  }
+});
+
+test("M2 Phase 3 worker: provider failures, unverified policy rejection, and graceful worker lifecycle diagnostics", async () => {
+  const db = getPrismaClient();
+  const mockServer = await createOutLayerMockServer({
+    multiWalletMode: true,
+    policyState: "none",
+  });
+  const testKeyHex =
+    "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+  const adapter = new OutLayerAdapter(mockServer.url);
+
+  try {
+    // 1. Policy state 'none' returned by provider -> Stage 3 rejects policy, marks job FAILED and wallet SETUP_FAILED
+    const accBadPolicy = await createTestAccount(
+      pool,
+      "PERSONAL",
+      "worker-bad-policy",
+    );
+    await ensureProvisioningJobForAccount(
+      db,
+      accBadPolicy.accountId,
+      randomUUID(),
+    );
+
+    const worker = new WalletProvisioningWorker({
+      db,
+      adapter,
+      walletConfig: { encryptionKey: testKeyHex, keyId: "v1" },
+      workerId: "worker-lifecycle-test",
+      baseBackoffMs: 25,
+      maxBackoffMs: 200,
+    });
+
+    const badPolicyRes = await worker.processAccountJob(accBadPolicy.accountId);
+    assert.equal(badPolicyRes.outcome, "failed");
+    assert.equal(
+      badPolicyRes.failureClassification,
+      "POLICY_VERIFICATION_FAILED",
+    );
+
+    const { rows: failedWalletRows } = await pool.query<{ status: string }>(
+      "SELECT status::text AS status FROM flow.wallets WHERE account_id = $1::uuid",
+      [accBadPolicy.accountId],
+    );
+    assert.equal(failedWalletRows[0]!.status, "SETUP_FAILED");
+
+    // 2. Restore valid policyState='stored' and test background start/stop polling lifecycle
+    mockServer.setOptions({ multiWalletMode: true, policyState: "stored" });
+    const accBg = await createTestAccount(pool, "BUSINESS", "worker-bg-poll");
+    await ensureProvisioningJobForAccount(db, accBg.accountId, randomUUID());
+
+    assert.equal(worker.computeBackoffDelayMs(1), 25);
+    assert.equal(worker.computeBackoffDelayMs(2), 50);
+    assert.equal(worker.computeBackoffDelayMs(3), 100);
+    assert.equal(worker.computeBackoffDelayMs(10), 200);
+
+    worker.start(30);
+    // Wait until background worker activates accBg
+    for (let i = 0; i < 40; i++) {
+      const proj = await getAccountWalletPublicProjection(db, accBg.accountId);
+      if (proj?.status === "ACTIVE") break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    await worker.stop();
+
+    const bgProj = await getAccountWalletPublicProjection(db, accBg.accountId);
+    assert.ok(bgProj !== null);
+    assert.equal(bgProj.status, "ACTIVE");
+    assert.equal(bgProj.fundsReady, false);
+
+    const diag = worker.getDiagnostics();
+    assert.equal(diag.running, false);
+    assert.equal(diag.inFlightCount, 0);
+    assert.ok(diag.activatedCount >= 1);
+    assert.ok(diag.failedCount >= 1);
+    const serializedDiag = JSON.stringify(diag);
+    assert.ok(!serializedDiag.includes("wk_"));
+    assert.ok(!serializedDiag.includes(testKeyHex));
+  } finally {
+    await mockServer.close();
   }
 });

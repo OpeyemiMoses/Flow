@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
+import {
+  hasTrustedAdapterPolicyProvenance,
+  verifyCustodyPolicyEvidence,
+} from "../src/domain/custody.ts";
 import { formatIsolatedProviderFailure } from "../src/server/custody/job-repository.ts";
-import { OutLayerAdapter } from "../src/server/custody/outlayer-adapter.ts";
+import {
+  OutLayerAdapter,
+  scrubHandoffUrl,
+} from "../src/server/custody/outlayer-adapter.ts";
 import {
   createOutLayerMockServer,
   type OutLayerMockServer,
@@ -345,4 +352,43 @@ test("OutLayerAdapter and error isolator block hostile provider responses with b
   assert.equal(parsed.correlationId, "11111111-2222-3333-4444-555555555555");
   assert.equal(parsed.rawUpstreamError, undefined);
   assert.equal(parsed.headers, undefined);
+});
+
+test("OutLayerAdapter unconditionally blocks live non-loopback endpoints when FLOW_EXECUTION=disabled", async () => {
+  const liveAdapter = new OutLayerAdapter("https://api.outlayer.ai");
+  await assert.rejects(() => liveAdapter.register({}), {
+    code: "INVALID_CONFIGURATION",
+  });
+  await assert.rejects(() => liveAdapter.getAddress("wk_test", "base"), {
+    code: "INVALID_CONFIGURATION",
+  });
+  await assert.rejects(() => liveAdapter.getPolicy("wk_test"), {
+    code: "INVALID_CONFIGURATION",
+  });
+});
+
+test("OutLayerAdapter.getPolicy mints unforgeable adapter provenance and scrubHandoffUrl strips bearer keys", async () => {
+  mockServer.setOptions({ policyState: "stored" });
+  try {
+    const adapter = new OutLayerAdapter(mockServer.url);
+    const policy = await adapter.getPolicy(
+      "wk_2a8b1f3c4d5e6789abcdef0123456789",
+      "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20",
+    );
+    assert.equal(hasTrustedAdapterPolicyProvenance(policy), true);
+    const verified = verifyCustodyPolicyEvidence(
+      policy,
+      "9c3c9e10-1c1f-4f5e-9c4a-1d7b9a8f3c20",
+    );
+    assert.equal(verified.policyState, "stored");
+    assert.equal(verified.controllerAccountId, "controller.near");
+
+    const scrubbed = scrubHandoffUrl(
+      "https://app.outlayer.ai/wallet?key=wk_2a8b1f3c4d5e6789abcdef0123456789&mode=view",
+    );
+    assert.equal(scrubbed, "https://app.outlayer.ai/wallet?mode=view");
+    assert.ok(!scrubbed?.includes("wk_"));
+  } finally {
+    mockServer.setOptions({});
+  }
 });

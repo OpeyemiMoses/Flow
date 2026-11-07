@@ -4,6 +4,7 @@ import { runtime, transaction, type FlowDb } from "../foundation/prisma.ts";
 import { audit } from "./audit.ts";
 import { digest } from "./auth/provider.ts";
 import { forwardCookies, requireSession } from "./auth/session.ts";
+import { ensureProvisioningJobForAccount } from "./custody/job-repository.ts";
 import {
   ApiFailure,
   canonicalHost,
@@ -15,6 +16,17 @@ import {
 export const emptyBody = z.strictObject({});
 const nameBody = z.strictObject({ name: z.string().trim().min(1).max(80) });
 const uuid = z.uuid();
+
+export function accountProvisioningKey(id: string): string {
+  const hash = digest(`flow:wallet-provisioning:${id.toLowerCase()}`);
+  return [
+    hash.slice(0, 8),
+    hash.slice(8, 12),
+    `5${hash.slice(13, 16)}`,
+    `8${hash.slice(17, 20)}`,
+    hash.slice(20, 32),
+  ].join("-");
+}
 
 export function accountId(value: unknown): string {
   const parsed = uuid.safeParse(value);
@@ -67,6 +79,13 @@ function summarySelect(userId: string) {
     id: true,
     name: true,
     kind: true,
+    wallet: {
+      select: {
+        status: true,
+        policyState: true,
+        controllerAccountId: true,
+      },
+    },
     business: {
       select: {
         members: {
@@ -78,21 +97,66 @@ function summarySelect(userId: string) {
   } as const;
 }
 
+function mapWalletSummaryStatus(
+  status?:
+    | "SETUP_PENDING"
+    | "PROVISIONING"
+    | "ACTIVE"
+    | "SETUP_FAILED"
+    | "FROZEN"
+    | "RECOVERY_PENDING"
+    | null,
+) {
+  switch (status) {
+    case "PROVISIONING":
+      return "provisioning" as const;
+    case "ACTIVE":
+      return "active" as const;
+    case "SETUP_FAILED":
+      return "setup_failed" as const;
+    case "FROZEN":
+      return "frozen" as const;
+    case "RECOVERY_PENDING":
+      return "recovery_pending" as const;
+    case "SETUP_PENDING":
+    default:
+      return "setup_pending" as const;
+  }
+}
+
 function summary(row: {
   id: string;
   name: string;
   kind: "PERSONAL" | "BUSINESS";
+  wallet?: {
+    status:
+      | "SETUP_PENDING"
+      | "PROVISIONING"
+      | "ACTIVE"
+      | "SETUP_FAILED"
+      | "FROZEN"
+      | "RECOVERY_PENDING";
+    policyState: string;
+    controllerAccountId: string | null;
+  } | null;
   business: { members: { role: "OWNER" | "ADMIN" | "MEMBER" }[] } | null;
 }) {
   const role =
     row.kind === "PERSONAL" ? "OWNER" : row.business?.members[0]?.role;
   if (!role) throw new ApiFailure(404, "NOT_FOUND");
+  const walletStatus = mapWalletSummaryStatus(row.wallet?.status);
+  const provisioningComplete =
+    row.wallet?.status === "ACTIVE" &&
+    row.wallet?.policyState === "stored" &&
+    Boolean(row.wallet?.controllerAccountId);
   return {
     id: row.id,
     name: row.name,
     kind: row.kind,
     role,
-    walletStatus: "setup_pending" as const,
+    walletStatus,
+    provisioningComplete,
+    fundsReady: false as const,
   };
 }
 
@@ -139,8 +203,16 @@ export async function onboard(request: Request): Promise<Response> {
       (await tx.flowUser.create({ data: { authUserId: session.userId } }));
     const personal = await tx.flowAccount.findUnique({
       where: { personalOwnerId: user.id },
+      select: summarySelect(user.id),
     });
-    if (personal) return summary({ ...personal, business: null });
+    if (personal) {
+      await ensureProvisioningJobForAccount(
+        tx,
+        personal.id,
+        accountProvisioningKey(personal.id),
+      );
+      return summary(personal);
+    }
     const auth = await tx.authUser.findUniqueOrThrow({
       where: { id: session.userId },
       select: { name: true },
@@ -152,8 +224,13 @@ export async function onboard(request: Request): Promise<Response> {
         personalOwnerId: user.id,
       },
     });
+    await ensureProvisioningJobForAccount(
+      tx,
+      created.id,
+      accountProvisioningKey(created.id),
+    );
     await audit(tx, "personal-created", session.userId, created.id);
-    return summary({ ...created, business: null });
+    return summary({ ...created, wallet: null, business: null });
   });
   return reply(200, { account });
 }
@@ -198,6 +275,11 @@ export async function createBusiness(request: Request): Promise<Response> {
     if (existing) {
       if (existing.fingerprint !== fingerprint)
         throw new ApiFailure(409, "IDEMPOTENCY_CONFLICT");
+      await ensureProvisioningJobForAccount(
+        tx,
+        existing.accountId,
+        accountProvisioningKey(existing.accountId),
+      );
       return access(tx, actor, existing.accountId);
     }
     const created = await tx.flowAccount.create({
@@ -215,6 +297,11 @@ export async function createBusiness(request: Request): Promise<Response> {
         accountId: created.id,
       },
     });
+    await ensureProvisioningJobForAccount(
+      tx,
+      created.id,
+      accountProvisioningKey(created.id),
+    );
     await audit(tx, "business-created", actor.session.userId, created.id);
     return access(tx, actor, created.id);
   });

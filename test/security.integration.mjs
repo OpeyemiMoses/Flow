@@ -699,6 +699,12 @@ test("transactional onboarding and business idempotency converge on one account 
     [email],
   );
   assert.deepEqual(rows, [{ total: 1 }]);
+  const { rows: jobRows } = await app.db.query(
+    'SELECT account_id AS "accountId", status FROM flow.wallet_provisioning_jobs WHERE account_id IN ($1::uuid, $2::uuid) ORDER BY account_id',
+    [personalId, accounts[0].id],
+  );
+  assert.equal(jobRows.length, 2);
+  assert.ok(jobRows.every((r) => r.status === "PENDING"));
 });
 
 test("invites are single-use, bound to the verified recipient and denied across tenants", async () => {
