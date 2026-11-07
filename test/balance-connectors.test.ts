@@ -22,6 +22,7 @@ import {
   fetchSolanaTokenBalance,
   SOLANA_GENESIS_HASHES,
 } from "../src/server/assets/connectors/solana-connector.ts";
+import { reconcileWalletBalances } from "../src/server/assets/connectors/multi-chain-reconciler.ts";
 
 test("rpc-client: scrubRpcEndpoint redacts credentials, query keys and secret path tokens", () => {
   assert.equal(
@@ -466,6 +467,207 @@ test("solana-connector: native getBalance and SPL multi-account aggregation", as
     assert.equal(absent.observationState, "TOKEN_ACCOUNT_ABSENT");
     assert.equal(absent.syncStatus, "SYNCED");
     assert.equal(absent.blockHeight, 345678903n);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("reconciler: reconcileWalletBalances correlates authentic registered addresses and includes address in observations", async () => {
+  const mockWalletId = "4db1447f-f32d-47ca-be4c-c07bc283c7ac";
+  const mockAddresses = [
+    {
+      id: "addr-near",
+      network: "near",
+      chainId: "near-testnet",
+      address:
+        "eccb81cc1bf04b5ce09d31882ee283e1c87a8d6223dfd49067863bc360121c86",
+    },
+    {
+      id: "addr-base",
+      network: "base",
+      chainId: "84532",
+      address: "0xaa6bA2Ae7F20748B46A3DB221a418137ec54A5a2",
+    },
+    {
+      id: "addr-solana",
+      network: "solana",
+      chainId: "solana-devnet",
+      address: "DsesgAr8EguoiioX2kddzdYGHJHZos9ZRLh1VbDr3j1n",
+    },
+  ];
+
+  const mockNetworkAssets = [
+    {
+      id: "asset-eth",
+      network: "base",
+      chainId: "84532",
+      tokenStandard: "NATIVE",
+      contractAddress: null,
+      decimals: 18,
+      symbol: "ETH",
+    },
+    {
+      id: "asset-near",
+      network: "near",
+      chainId: "near-testnet",
+      tokenStandard: "NATIVE",
+      contractAddress: null,
+      decimals: 24,
+      symbol: "NEAR",
+    },
+    {
+      id: "asset-sol",
+      network: "solana",
+      chainId: "solana-devnet",
+      tokenStandard: "NATIVE",
+      contractAddress: null,
+      decimals: 9,
+      symbol: "SOL",
+    },
+  ];
+
+  const executedUpserts: unknown[] = [];
+  const mockDb = {
+    $queryRaw: async (query: { strings?: string[] }) => {
+      const qStr = query?.strings ? query.strings.join(" ") : String(query);
+      if (qStr.includes("FROM flow.wallets")) {
+        return [{ id: mockWalletId, environment: "testnet" }];
+      }
+      if (qStr.includes("FROM flow.wallet_addresses")) {
+        return mockAddresses;
+      }
+      if (qStr.includes("FROM flow.network_assets")) {
+        return mockNetworkAssets;
+      }
+      if (qStr.includes("INSERT INTO flow.wallet_balances")) {
+        executedUpserts.push(query);
+        return [{ id: `bal-${executedUpserts.length}` }];
+      }
+      return [];
+    },
+  };
+
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const urlStr = String(url);
+      const body = JSON.parse(init?.body as string);
+
+      if (urlStr.includes("sepolia.base.org")) {
+        if (body.method === "eth_chainId") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: "0x14a34" }),
+          );
+        }
+        if (body.method === "eth_getBalance") {
+          assert.equal(
+            body.params[0],
+            "0xaa6bA2Ae7F20748B46A3DB221a418137ec54A5a2",
+          );
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: "0x0" }),
+          );
+        }
+        if (body.method === "eth_blockNumber") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: "0x3544d67",
+            }),
+          );
+        }
+      }
+
+      if (urlStr.includes("testnet.near.org")) {
+        if (
+          body.method === "EXPERIMENTAL_genesis_config" ||
+          body.method === "status"
+        ) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: {
+                chain_id: "testnet",
+                sync_info: { latest_block_height: 276695570 },
+              },
+            }),
+          );
+        }
+        if (body.method === "query") {
+          assert.equal(
+            body.params.account_id,
+            "eccb81cc1bf04b5ce09d31882ee283e1c87a8d6223dfd49067863bc360121c86",
+          );
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              error: {
+                cause: {
+                  name: "UNKNOWN_ACCOUNT",
+                },
+              },
+            }),
+          );
+        }
+      }
+
+      if (urlStr.includes("api.devnet.solana.com")) {
+        if (body.method === "getGenesisHash") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: SOLANA_GENESIS_HASHES.devnet,
+            }),
+          );
+        }
+        if (body.method === "getBalance") {
+          assert.equal(
+            body.params[0],
+            "DsesgAr8EguoiioX2kddzdYGHJHZos9ZRLh1VbDr3j1n",
+          );
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: { context: { slot: 519821351 }, value: 0 },
+            }),
+          );
+        }
+      }
+
+      throw new Error(`Unexpected query to ${urlStr}: ${JSON.stringify(body)}`);
+    }) as typeof fetch;
+
+    const res = await reconcileWalletBalances(mockDb as never, mockWalletId);
+    assert.equal(res.walletId, mockWalletId);
+    assert.equal(res.environment, "testnet");
+    assert.equal(res.observations.length, 3);
+
+    const ethObs = res.observations.find((o) => o.symbol === "ETH")!;
+    assert.equal(ethObs.address, "0xaa6bA2Ae7F20748B46A3DB221a418137ec54A5a2");
+    assert.equal(ethObs.atomicBalance, 0n);
+
+    const nearObs = res.observations.find((o) => o.symbol === "NEAR")!;
+    assert.equal(
+      nearObs.address,
+      "eccb81cc1bf04b5ce09d31882ee283e1c87a8d6223dfd49067863bc360121c86",
+    );
+    assert.equal(nearObs.atomicBalance, 0n);
+    assert.equal(nearObs.observationState, "ACCOUNT_NONEXISTENT");
+
+    const solObs = res.observations.find((o) => o.symbol === "SOL")!;
+    assert.equal(
+      solObs.address,
+      "DsesgAr8EguoiioX2kddzdYGHJHZos9ZRLh1VbDr3j1n",
+    );
+    assert.equal(solObs.atomicBalance, 0n);
+    assert.equal(solObs.observationState, "CONFIRMED_ZERO");
+
+    assert.equal(executedUpserts.length, 3);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -159,6 +159,20 @@ async function createTestAccount(
   }
 }
 
+async function createTestSession(
+  client: pg.PoolClient | pg.Pool,
+  authUserId: string,
+  expiresInSeconds = 3600,
+): Promise<string> {
+  const token = `sess-${randomUUID()}`;
+  await client.query(
+    `INSERT INTO flow.auth_sessions (id, token, user_id, expires_at, created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, now() + ($3 || ' seconds')::interval, now(), now())`,
+    [token, authUserId, expiresInSeconds],
+  );
+  return token;
+}
+
 test("account ownership: enforces single wallet per account and preserves account isolation", async () => {
   const personal = await createTestAccount(pool, "PERSONAL", "own-pers");
   const business = await createTestAccount(pool, "BUSINESS", "own-biz");
@@ -4929,12 +4943,14 @@ test("m3 phase 1: asset registry, schema constraints, role separation and tenant
     finality: "FINALIZED",
   });
 
+  // Active sessions for tenants
+  const sessionA = await createTestSession(pool, accountA.authUserId);
+  const sessionB = await createTestSession(pool, accountB.authUserId);
+
   // User A querying Account A: SUCCEEDS
-  const projA = await getAccountBalances(
-    appDb,
-    accountA.accountId,
-    accountA.userId,
-  );
+  const projA = await getAccountBalances(appDb, accountA.accountId, {
+    sessionToken: sessionA,
+  });
   assert.equal(projA.accountId, accountA.accountId);
   assert.ok(projA.wallet);
   assert.equal(projA.wallet.status, "PROVISIONING");
@@ -4951,7 +4967,9 @@ test("m3 phase 1: asset registry, schema constraints, role separation and tenant
   // User B querying Account A: FAILS with ACCOUNT_NOT_FOUND (tenant barrier)
   await assert.rejects(
     async () => {
-      await getAccountBalances(appDb, accountA.accountId, accountB.userId);
+      await getAccountBalances(appDb, accountA.accountId, {
+        sessionToken: sessionB,
+      });
     },
     (err: unknown) =>
       err instanceof FlowError && err.code === "ACCOUNT_NOT_FOUND",
@@ -4960,7 +4978,20 @@ test("m3 phase 1: asset registry, schema constraints, role separation and tenant
   // User A querying Account B: FAILS with ACCOUNT_NOT_FOUND
   await assert.rejects(
     async () => {
-      await getAccountBalances(appDb, accountB.accountId, accountA.userId);
+      await getAccountBalances(appDb, accountB.accountId, {
+        sessionToken: sessionA,
+      });
+    },
+    (err: unknown) =>
+      err instanceof FlowError && err.code === "ACCOUNT_NOT_FOUND",
+  );
+
+  // Unauthenticated query (empty session token): FAILS with ACCOUNT_NOT_FOUND
+  await assert.rejects(
+    async () => {
+      await getAccountBalances(appDb, accountA.accountId, {
+        sessionToken: "",
+      });
     },
     (err: unknown) =>
       err instanceof FlowError && err.code === "ACCOUNT_NOT_FOUND",
@@ -4975,11 +5006,9 @@ test("m3 phase 1: asset registry, schema constraints, role separation and tenant
     syncStatus: "SYNCED",
   });
 
-  const projAZero = await getAccountBalances(
-    appDb,
-    accountA.accountId,
-    accountA.userId,
-  );
+  const projAZero = await getAccountBalances(appDb, accountA.accountId, {
+    sessionToken: sessionA,
+  });
   assert.equal(projAZero.balances[0]!.atomicBalance, 0n);
   assert.equal(projAZero.balances[0]!.displayBalance, "0");
   assert.equal(projAZero.balances[0]!.isZeroConfirmed, true);
@@ -4992,17 +5021,15 @@ test("m3 phase 1: asset registry, schema constraints, role separation and tenant
     syncStatus: "NOT_SYNCED",
   });
 
-  const projANotSynced = await getAccountBalances(
-    appDb,
-    accountA.accountId,
-    accountA.userId,
-  );
+  const projANotSynced = await getAccountBalances(appDb, accountA.accountId, {
+    sessionToken: sessionA,
+  });
   assert.equal(projANotSynced.balances[0]!.isZeroConfirmed, false);
   assert.equal(projANotSynced.balances[0]!.syncStatus, "NOT_SYNCED");
 });
 
 test("m3 phase 2: database row-level security and adversarial cross-tenant access enforcement", async () => {
-  // 1. Setup two accounts: Account Alpha (User Alpha) and Account Beta (User Beta)
+  // 1. Setup two personal accounts: Account Alpha (User Alpha) and Account Beta (User Beta)
   const accountAlpha = await createTestAccount(
     pool,
     "PERSONAL",
@@ -5010,9 +5037,22 @@ test("m3 phase 2: database row-level security and adversarial cross-tenant acces
   );
   const accountBeta = await createTestAccount(pool, "PERSONAL", "m3-rls-beta");
 
-  // Worker inserts a wallet for Alpha and Beta
+  // Setup one business account: Account Biz, with User Alpha as an ACTIVE member
+  const accountBiz = await createTestAccount(pool, "BUSINESS", "m3-rls-biz");
+  await pool.query(
+    `INSERT INTO flow.account_memberships (id, account_id, user_id, role, status)
+     VALUES (gen_random_uuid(), $1, $2, 'MEMBER', 'ACTIVE')`,
+    [accountBiz.accountId, accountAlpha.userId],
+  );
+
+  // Active verified sessions
+  const sessionAlpha = await createTestSession(pool, accountAlpha.authUserId);
+  const sessionBeta = await createTestSession(pool, accountBeta.authUserId);
+
+  // Worker inserts a wallet for Alpha, Beta, and Biz
   const walletAlphaId = randomUUID();
   const walletBetaId = randomUUID();
+  const walletBizId = randomUUID();
 
   await workerPool.query(
     `INSERT INTO flow.wallets (
@@ -5038,7 +5078,19 @@ test("m3 phase 2: database row-level security and adversarial cross-tenant acces
     [walletBetaId, accountBeta.accountId, `prov-${walletBetaId}`],
   );
 
-  // Register Base Sepolia addresses for both wallets
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, environment, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state
+    ) VALUES (
+      $1::uuid, $2::uuid, 'OUTLAYER', 'testnet',
+      $3, 'mock-biz-near', 'mock-env-biz', 'v1', 'mock-digest-biz',
+      'PROVISIONING'::flow.wallet_status, 'none'
+    )`,
+    [walletBizId, accountBiz.accountId, `prov-${walletBizId}`],
+  );
+
+  // Register Base Sepolia addresses for all three wallets
   await workerPool.query(
     `INSERT INTO flow.wallet_addresses (
       id, wallet_id, network, chain_id, address, public_key
@@ -5057,7 +5109,16 @@ test("m3 phase 2: database row-level security and adversarial cross-tenant acces
     [walletBetaId],
   );
 
-  // Worker records a balance for Alpha (10 ETH) and Beta (20 ETH) on Base Sepolia
+  await workerPool.query(
+    `INSERT INTO flow.wallet_addresses (
+      id, wallet_id, network, chain_id, address, public_key
+    ) VALUES (
+      gen_random_uuid(), $1::uuid, 'base', '84532', '0xcc6bA2Ae7F20748B46A3DB221a418137ec54A5a2', 'pk-biz'
+    )`,
+    [walletBizId],
+  );
+
+  // Worker records balances on Base Sepolia: Alpha=10 ETH, Beta=20 ETH, Biz=5 ETH
   const baseSepoliaEthAssetId = "20000000-0000-0000-0000-000000000004";
   await upsertWalletBalance(db, {
     walletId: walletAlphaId,
@@ -5073,6 +5134,15 @@ test("m3 phase 2: database row-level security and adversarial cross-tenant acces
     networkAssetId: baseSepoliaEthAssetId,
     atomicBalance: 20_000_000_000_000_000_000n,
     blockHeight: 200002n,
+    syncStatus: "SYNCED",
+    finality: "CONFIRMED",
+  });
+
+  await upsertWalletBalance(db, {
+    walletId: walletBizId,
+    networkAssetId: baseSepoliaEthAssetId,
+    atomicBalance: 5_000_000_000_000_000_000n,
+    blockHeight: 200003n,
     syncStatus: "SYNCED",
     finality: "CONFIRMED",
   });
@@ -5095,31 +5165,79 @@ test("m3 phase 2: database row-level security and adversarial cross-tenant acces
     "Unscoped table scan must return 0 rows under RLS",
   );
 
-  // Adversarial Test 2: Altered Account ID
-  // Attacker User Alpha sets flow.current_account_id to Beta's account ID
   const appClient = await pool.connect();
   try {
+    // Adversarial Test 2: GUC Spoofing Attack - Attacker sets caller-controlled flow.current_user_id & flow.current_account_id
+    // WITHOUT a valid session token. MUST return 0 rows (proves user_id GUC alone is not trusted).
     await appClient.query("BEGIN");
     await appClient.query(
       "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_user_id', $2, true)",
-      [accountBeta.accountId, accountAlpha.userId],
+      [accountBeta.accountId, accountBeta.userId],
     );
-    const alteredRes = await appClient.query(
+    const gucSpoofRes = await appClient.query(
       "SELECT * FROM flow.wallet_balances",
     );
     assert.equal(
-      alteredRes.rows.length,
+      gucSpoofRes.rows.length,
       0,
-      "Altered account ID must return 0 rows because User Alpha is not owner of Beta's account",
+      "GUC spoofing (user_id and account_id without session token) must return 0 rows",
     );
     await appClient.query("COMMIT");
 
-    // Adversarial Test 3: Cross-tenant joins
-    // Attacker User Alpha sets valid context for Account Alpha, then joins with flow.wallets on account_id = Beta's account ID
+    // Adversarial Test 3: Fabricated / Unknown session token
     await appClient.query("BEGIN");
     await appClient.query(
-      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_user_id', $2, true)",
-      [accountAlpha.accountId, accountAlpha.userId],
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountBeta.accountId, "fabricated-token-attacker-000000000000"],
+    );
+    const fakeTokenRes = await appClient.query(
+      "SELECT * FROM flow.wallet_balances",
+    );
+    assert.equal(
+      fakeTokenRes.rows.length,
+      0,
+      "Fabricated session token must return 0 rows",
+    );
+    await appClient.query("COMMIT");
+
+    // Adversarial Test 4: Attacker with valid session tries to access another tenant's account
+    // 4a: User Alpha attempts to query Account Beta using Alpha's valid session token
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountBeta.accountId, sessionAlpha],
+    );
+    const crossTenantRes = await appClient.query(
+      "SELECT * FROM flow.wallet_balances",
+    );
+    assert.equal(
+      crossTenantRes.rows.length,
+      0,
+      "User Alpha cannot read Account Beta balances with valid session token",
+    );
+    await appClient.query("COMMIT");
+
+    // 4b: User Beta attempts to query Account Alpha using Beta's valid session token
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountAlpha.accountId, sessionBeta],
+    );
+    const crossTenantResB = await appClient.query(
+      "SELECT * FROM flow.wallet_balances",
+    );
+    assert.equal(
+      crossTenantResB.rows.length,
+      0,
+      "User Beta cannot read Account Alpha balances with valid session token",
+    );
+    await appClient.query("COMMIT");
+
+    // Adversarial Test 5: Cross-tenant joins
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountAlpha.accountId, sessionAlpha],
     );
     const joinRes = await appClient.query(
       `SELECT wb.* FROM flow.wallet_balances wb
@@ -5132,8 +5250,14 @@ test("m3 phase 2: database row-level security and adversarial cross-tenant acces
       0,
       "Cross-tenant join attempt must return 0 rows under RLS",
     );
+    await appClient.query("COMMIT");
 
-    // Adversarial Test 4: Subquery / View attempt
+    // Adversarial Test 6: Subquery / View attempt for another tenant's wallet
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountAlpha.accountId, sessionAlpha],
+    );
     const subqueryRes = await appClient.query(
       `SELECT * FROM (SELECT * FROM flow.wallet_balances) v WHERE v.wallet_id = $1::uuid`,
       [walletBetaId],
@@ -5143,8 +5267,14 @@ test("m3 phase 2: database row-level security and adversarial cross-tenant acces
       0,
       "Subquery / view scan for another tenant's wallet must return 0 rows",
     );
+    await appClient.query("COMMIT");
 
-    // Legitimate Tenant Query: User Alpha reads Account Alpha
+    // Legitimate Test 7: Personal Owner with verified session reads Account Alpha
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountAlpha.accountId, sessionAlpha],
+    );
     const alphaBalances = await appClient.query(
       `SELECT * FROM flow.wallet_balances WHERE wallet_id = $1::uuid`,
       [walletAlphaId],
@@ -5152,13 +5282,178 @@ test("m3 phase 2: database row-level security and adversarial cross-tenant acces
     assert.equal(
       alphaBalances.rows.length,
       1,
-      "Legitimate owner query must return their own balance",
+      "Legitimate personal owner query must return their own balance",
     );
     assert.equal(
       BigInt(alphaBalances.rows[0].atomic_balance),
       10_000_000_000_000_000_000n,
     );
     await appClient.query("COMMIT");
+
+    // Legitimate Test 8: Authorized Business Member reads Account Biz
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountBiz.accountId, sessionAlpha],
+    );
+    const bizBalances = await appClient.query(
+      `SELECT * FROM flow.wallet_balances WHERE wallet_id = $1::uuid`,
+      [walletBizId],
+    );
+    assert.equal(
+      bizBalances.rows.length,
+      1,
+      "Legitimate active business member query must return business balance",
+    );
+    assert.equal(
+      BigInt(bizBalances.rows[0].atomic_balance),
+      5_000_000_000_000_000_000n,
+    );
+    await appClient.query("COMMIT");
+
+    // Adversarial Test 9: Membership Removal / Downgrade
+    // Remove User Alpha from Account Biz (status = 'REMOVED')
+    await pool.query(
+      "UPDATE flow.account_memberships SET status = 'REMOVED' WHERE account_id = $1::uuid AND user_id = $2::uuid",
+      [accountBiz.accountId, accountAlpha.userId],
+    );
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountBiz.accountId, sessionAlpha],
+    );
+    const removedMemberRes = await appClient.query(
+      `SELECT * FROM flow.wallet_balances WHERE wallet_id = $1::uuid`,
+      [walletBizId],
+    );
+    assert.equal(
+      removedMemberRes.rows.length,
+      0,
+      "Removed/downgraded business member must return 0 rows immediately",
+    );
+    await appClient.query("COMMIT");
+
+    // Adversarial Test 10: Expired Session
+    // Expire User Alpha's session token
+    await pool.query(
+      "UPDATE flow.auth_sessions SET expires_at = NOW() - interval '10 seconds' WHERE token = $1",
+      [sessionAlpha],
+    );
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountAlpha.accountId, sessionAlpha],
+    );
+    const expiredRes = await appClient.query(
+      `SELECT * FROM flow.wallet_balances WHERE wallet_id = $1::uuid`,
+      [walletAlphaId],
+    );
+    assert.equal(
+      expiredRes.rows.length,
+      0,
+      "Expired session must return 0 rows",
+    );
+    await appClient.query("COMMIT");
+
+    // Adversarial Test 11: Inactive User Account
+    // Create an account for a deactivated user (active = false)
+    const inactiveAuthUserId = `test-user-inactive-${randomUUID().slice(0, 8)}`;
+    await pool.query(
+      `INSERT INTO flow.auth_users (id, name, email, email_verified, updated_at)
+       VALUES ($1, 'Inactive User', $2, true, now())`,
+      [inactiveAuthUserId, `${inactiveAuthUserId}@example.test`],
+    );
+    const inactiveUserResult = await pool.query<{ id: string }>(
+      `INSERT INTO flow.users (id, auth_user_id, active)
+       VALUES (gen_random_uuid(), $1, false)
+       RETURNING id`,
+      [inactiveAuthUserId],
+    );
+    const inactiveUserId = inactiveUserResult.rows[0]!.id;
+    const inactiveAccountResult = await pool.query<{ id: string }>(
+      `INSERT INTO flow.accounts (id, kind, name, personal_owner_id)
+       VALUES (gen_random_uuid(), 'PERSONAL', 'Inactive Personal Account', $1)
+       RETURNING id`,
+      [inactiveUserId],
+    );
+    const inactiveAccountId = inactiveAccountResult.rows[0]!.id;
+    const inactiveWalletId = randomUUID();
+    await workerPool.query(
+      `INSERT INTO flow.wallets (
+        id, account_id, provider, environment, provider_wallet_id, near_account_id,
+        encrypted_credential, key_id, key_digest, status, policy_state
+      ) VALUES (
+        $1::uuid, $2::uuid, 'OUTLAYER', 'testnet',
+        $3, 'mock-near-inactive', 'mock-env-i', 'v1', 'mock-digest-i',
+        'PROVISIONING'::flow.wallet_status, 'none'
+      )`,
+      [inactiveWalletId, inactiveAccountId, `prov-${inactiveWalletId}`],
+    );
+    await workerPool.query(
+      `INSERT INTO flow.wallet_addresses (id, wallet_id, network, chain_id, address, public_key)
+       VALUES (gen_random_uuid(), $1::uuid, 'base', '84532', 'mock-addr-inactive', 'mock-pk-i')`,
+      [inactiveWalletId],
+    );
+    await workerPool.query(
+      `INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance)
+       VALUES ($1::uuid, $2::uuid, 7000)`,
+      [inactiveWalletId, baseSepoliaEthAssetId],
+    );
+    const sessionInactive = await createTestSession(pool, inactiveAuthUserId);
+
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [inactiveAccountId, sessionInactive],
+    );
+    const inactiveUserRes = await appClient.query(
+      `SELECT * FROM flow.wallet_balances WHERE wallet_id = $1::uuid`,
+      [inactiveWalletId],
+    );
+    assert.equal(
+      inactiveUserRes.rows.length,
+      0,
+      "Inactive user must return 0 rows",
+    );
+    await appClient.query("COMMIT");
+
+    // Test 12: Pooled Connection and Transaction-Local Context Cleanup
+    // Restore sessionAlpha expiration for valid context testing
+    await pool.query(
+      "UPDATE flow.auth_sessions SET expires_at = NOW() + interval '1 hour' WHERE token = $1",
+      [sessionAlpha],
+    );
+
+    // Inside transaction: valid context yields 1 row.
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_session_token', $2, true)",
+      [accountAlpha.accountId, sessionAlpha],
+    );
+    const inTxRes = await appClient.query(
+      `SELECT * FROM flow.wallet_balances WHERE wallet_id = $1::uuid`,
+      [walletAlphaId],
+    );
+    assert.equal(
+      inTxRes.rows.length,
+      1,
+      "In-transaction query with valid context returns 1 row",
+    );
+    await appClient.query("COMMIT");
+
+    // Immediately after commit on same connection: without setting session, must return 0 rows
+    const afterCommitRes = await appClient.query(
+      `SELECT * FROM flow.wallet_balances WHERE wallet_id = $1::uuid`,
+      [walletAlphaId],
+    );
+    assert.equal(
+      afterCommitRes.rows.length,
+      0,
+      "After COMMIT, session context must be cleared; pooled connection query returns 0 rows",
+    );
+  } catch (err) {
+    await appClient.query("ROLLBACK").catch(() => {});
+    throw err;
   } finally {
     appClient.release();
   }
@@ -5290,4 +5585,95 @@ test("m3 phase 2: wallet-to-network consistency trigger prevents cross-environme
   );
   assert.equal(verifySuccess.rows.length, 1);
   assert.equal(BigInt(verifySuccess.rows[0].atomic_balance), 500n);
+});
+
+test("m3 phase 2.1: wallet address correlation and database mapping with authentic M2 OutLayer identity", async () => {
+  const account = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "m3-phase21-address-correlation",
+  );
+
+  const walletId = randomUUID();
+
+  // 1. Insert OutLayer testnet wallet
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, environment, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state
+    ) VALUES (
+      $1::uuid, $2::uuid, 'OUTLAYER', 'testnet',
+      'prov-testnet-wallet-01', 'mock-near-test', 'mock-env-t', 'v1', 'mock-digest-t',
+      'PROVISIONING'::flow.wallet_status, 'none'
+    )`,
+    [walletId, account.accountId],
+  );
+
+  // 2. Insert authentic M2 OutLayer registered addresses
+  const AUTHENTIC_ADDRESSES = {
+    near: "eccb81cc1bf04b5ce09d31882ee283e1c87a8d6223dfd49067863bc360121c86",
+    base: "0xaa6bA2Ae7F20748B46A3DB221a418137ec54A5a2",
+    solana: "DsesgAr8EguoiioX2kddzdYGHJHZos9ZRLh1VbDr3j1n",
+  };
+
+  await workerPool.query(
+    `INSERT INTO flow.wallet_addresses (id, wallet_id, network, chain_id, address, public_key)
+     VALUES
+      (gen_random_uuid(), $1::uuid, 'near', 'near-testnet', $2, 'ed25519:testnet-pk'),
+      (gen_random_uuid(), $1::uuid, 'base', '84532', $3, 'secp256k1:base-pk'),
+      (gen_random_uuid(), $1::uuid, 'solana', 'solana-devnet', $4, 'ed25519:solana-pk')`,
+    [
+      walletId,
+      AUTHENTIC_ADDRESSES.near,
+      AUTHENTIC_ADDRESSES.base,
+      AUTHENTIC_ADDRESSES.solana,
+    ],
+  );
+
+  // 3. Query and verify registered addresses in database
+  const res = await workerPool.query(
+    `SELECT network, chain_id, address FROM flow.wallet_addresses WHERE wallet_id = $1::uuid ORDER BY network`,
+    [walletId],
+  );
+  assert.equal(res.rows.length, 3);
+  assert.equal(
+    res.rows.find((r) => r.network === "near")?.address,
+    AUTHENTIC_ADDRESSES.near,
+  );
+  assert.equal(
+    res.rows.find((r) => r.network === "base")?.address,
+    AUTHENTIC_ADDRESSES.base,
+  );
+  assert.equal(
+    res.rows.find((r) => r.network === "solana")?.address,
+    AUTHENTIC_ADDRESSES.solana,
+  );
+
+  // 4. Verify wallet balances can be recorded for all 3 supported testnet networks with matching addresses
+  const nearTestnetAssetId = "20000000-0000-0000-0000-000000000002";
+  const baseSepoliaEthAssetId = "20000000-0000-0000-0000-000000000004";
+  const solanaDevnetAssetId = "20000000-0000-0000-0000-000000000006";
+
+  await workerPool.query(
+    `INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance, sync_status, finality)
+     VALUES
+      ($1::uuid, $2::uuid, 0, 'SYNCED', 'FINALIZED'),
+      ($1::uuid, $3::uuid, 0, 'SYNCED', 'CONFIRMED'),
+      ($1::uuid, $4::uuid, 0, 'SYNCED', 'FINALIZED')`,
+    [walletId, nearTestnetAssetId, baseSepoliaEthAssetId, solanaDevnetAssetId],
+  );
+
+  const balRes = await workerPool.query(
+    `SELECT b.atomic_balance, b.sync_status, na.network, na.chain_id
+     FROM flow.wallet_balances b
+     JOIN flow.network_assets na ON na.id = b.network_asset_id
+     WHERE b.wallet_id = $1::uuid
+     ORDER BY na.network`,
+    [walletId],
+  );
+  assert.equal(balRes.rows.length, 3);
+  for (const row of balRes.rows) {
+    assert.equal(row.sync_status, "SYNCED");
+    assert.equal(BigInt(row.atomic_balance), 0n);
+  }
 });

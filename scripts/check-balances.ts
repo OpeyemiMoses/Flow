@@ -82,6 +82,7 @@ async function main() {
       console.log(
         `Asset:        ${obs.symbol} (${obs.network} / ${obs.chainId})`,
       );
+      console.log(`Address:      ${obs.address}`);
       if (obs.contractAddress) {
         console.log(`Contract:     ${obs.contractAddress}`);
       }

@@ -74,6 +74,7 @@ export interface ReconcileResult {
       readonly symbol: string;
       readonly network: string;
       readonly chainId: string;
+      readonly address: string;
       readonly contractAddress: string | null;
     }
   >;
@@ -154,6 +155,7 @@ export async function reconcileWalletBalances(
       symbol: string;
       network: string;
       chainId: string;
+      address: string;
       contractAddress: string | null;
     }
   > = [];
@@ -266,6 +268,7 @@ export async function reconcileWalletBalances(
         symbol: asset.symbol,
         network: asset.network,
         chainId: asset.chainId,
+        address: addr.address,
         contractAddress: asset.contractAddress,
       });
     }

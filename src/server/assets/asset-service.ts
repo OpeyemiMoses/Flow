@@ -117,20 +117,58 @@ export async function listSupportedAssets(
   }));
 }
 
+export interface BalanceAuthContext {
+  readonly sessionToken: string;
+}
+
 /**
  * Retrieves the tenant-isolated portfolio and wallet balances for an account.
  * Enforces:
- * - Strict tenant authorization check: callerUserId must be personal owner or active business member.
- * - Non-members receive ACCOUNT_NOT_FOUND (HTTP 404 pattern to prevent ID enumeration).
+ * - Strict tenant authorization check: sessionToken must be active, unexpired, and caller must be personal owner or active business member.
+ * - Non-members or unauthenticated callers receive ACCOUNT_NOT_FOUND (HTTP 404 pattern to prevent ID enumeration).
  * - Exact atomic integer amounts formatted via formatAtomicToDisplay without JavaScript Number conversions.
  * - Distinguishes confirmed zero balance from not yet synced, stale, or unavailable balances.
  */
 export async function getAccountBalances(
   db: FlowDb,
   accountId: string,
-  callerUserId: string,
+  auth: BalanceAuthContext | string,
 ): Promise<AccountPortfolioProjection> {
-  // 1. Verify tenant access
+  const sessionToken = typeof auth === "string" ? auth : auth?.sessionToken;
+  if (!sessionToken || sessionToken.trim().length === 0) {
+    throw new FlowError(
+      "ACCOUNT_NOT_FOUND",
+      "Account not found or access denied.",
+    );
+  }
+
+  // 1. Resolve caller user from active unexpired session
+  const sessions = await db.$queryRaw<
+    Array<{
+      userId: string;
+      authUserId: string;
+      active: boolean;
+    }>
+  >`
+    SELECT u.id as "userId", u.auth_user_id as "authUserId", u.active
+    FROM flow.auth_sessions s
+    JOIN flow.users u ON u.auth_user_id = s.user_id
+    WHERE s.token = ${sessionToken.trim()}
+      AND s.expires_at > CURRENT_TIMESTAMP
+      AND u.active = true
+  `;
+
+  const session = sessions[0];
+  if (!session) {
+    throw new FlowError(
+      "ACCOUNT_NOT_FOUND",
+      "Account not found or access denied.",
+    );
+  }
+
+  const callerUserId = session.userId;
+
+  // 2. Verify tenant access
   const accounts = await db.$queryRaw<
     Array<{
       id: string;
@@ -174,7 +212,7 @@ export async function getAccountBalances(
     }
   }
 
-  // 2. Fetch account wallet (if provisioned)
+  // 3. Fetch account wallet projection (if provisioned)
   const wallets = await db.$queryRaw<
     Array<{
       id: string;
@@ -184,7 +222,7 @@ export async function getAccountBalances(
     }>
   >`
     SELECT id, environment, status::text as status, policy_state as "policyState"
-    FROM flow.wallets
+    FROM flow.wallet_public_projections
     WHERE account_id = ${accountId}::uuid
   `;
 
@@ -251,7 +289,7 @@ export async function getAccountBalances(
   ): Promise<BalanceQueryRow[]> => {
     await tx.$executeRaw`
       SELECT set_config('flow.current_account_id', ${accountId}, true),
-             set_config('flow.current_user_id', ${callerUserId}, true)
+             set_config('flow.current_session_token', ${sessionToken.trim()}, true)
     `;
 
     return tx.$queryRaw<BalanceQueryRow[]>`
