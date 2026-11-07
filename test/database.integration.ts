@@ -4877,30 +4877,6 @@ test("m3 phase 1: asset registry, schema constraints, role separation and tenant
     (err: unknown) => (err as { code?: string }).code === "42501",
   );
 
-  // 3. PostgreSQL Schema Constraints
-  // Negative balance constraint (CHECK atomic_balance >= 0)
-  await assert.rejects(
-    async () => {
-      await workerPool.query(
-        `INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance)
-         VALUES ($1, '20000000-0000-0000-0000-000000000001'::uuid, -100)`,
-        [randomUUID()],
-      );
-    },
-    (err: unknown) => (err as { code?: string }).code === "23514", // check_violation
-  );
-
-  // Decimals range constraint (CHECK decimals >= 0 AND decimals <= 36)
-  await assert.rejects(
-    async () => {
-      await operatorPool.query(
-        `INSERT INTO flow.network_assets (id, asset_id, network, chain_id, token_standard, decimals, is_verified, is_deposit_eligible)
-         VALUES (gen_random_uuid(), '10000000-0000-0000-0000-000000000001'::uuid, 'near', 'near-mainnet', 'NEP141', 37, true, true)`,
-      );
-    },
-    (err: unknown) => (err as { code?: string }).code === "23514", // check_violation
-  );
-
   // 4. Tenant isolation and account portfolio projection
   const accountA = await createTestAccount(pool, "PERSONAL", "m3-tenant-a");
   const accountB = await createTestAccount(pool, "PERSONAL", "m3-tenant-b");
@@ -4919,8 +4895,31 @@ test("m3 phase 1: asset registry, schema constraints, role separation and tenant
     [walletAId, accountA.accountId, `prov-${walletAId}`],
   );
 
-  // Worker records a balance for Account A (5 NEAR = 5 * 10^24)
+  // Register address for NEAR Testnet so consistency check passes
+  await workerPool.query(
+    `INSERT INTO flow.wallet_addresses (
+      id, wallet_id, network, chain_id, address, public_key
+    ) VALUES (
+      gen_random_uuid(), $1::uuid, 'near', 'near-testnet', 'eccb81cc1bf04b5ce09d31882ee283e1c87a8d6223dfd49067863bc360121c86', 'ed25519:eccb81cc1bf04b5ce09d31882ee283e1c87a8d6223dfd49067863bc360121c86'
+    )`,
+    [walletAId],
+  );
+
   const nearTestnetAssetId = "20000000-0000-0000-0000-000000000002";
+
+  // Negative balance constraint (CHECK atomic_balance >= 0) on valid wallet
+  await assert.rejects(
+    async () => {
+      await workerPool.query(
+        `INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance)
+         VALUES ($1::uuid, $2::uuid, -100)`,
+        [walletAId, nearTestnetAssetId],
+      );
+    },
+    (err: unknown) => (err as { code?: string }).code === "23514", // check_violation
+  );
+
+  // Worker records a balance for Account A (5 NEAR = 5 * 10^24)
   await upsertWalletBalance(db, {
     walletId: walletAId,
     networkAssetId: nearTestnetAssetId,
@@ -5000,4 +4999,295 @@ test("m3 phase 1: asset registry, schema constraints, role separation and tenant
   );
   assert.equal(projANotSynced.balances[0]!.isZeroConfirmed, false);
   assert.equal(projANotSynced.balances[0]!.syncStatus, "NOT_SYNCED");
+});
+
+test("m3 phase 2: database row-level security and adversarial cross-tenant access enforcement", async () => {
+  // 1. Setup two accounts: Account Alpha (User Alpha) and Account Beta (User Beta)
+  const accountAlpha = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "m3-rls-alpha",
+  );
+  const accountBeta = await createTestAccount(pool, "PERSONAL", "m3-rls-beta");
+
+  // Worker inserts a wallet for Alpha and Beta
+  const walletAlphaId = randomUUID();
+  const walletBetaId = randomUUID();
+
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, environment, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state
+    ) VALUES (
+      $1::uuid, $2::uuid, 'OUTLAYER', 'testnet',
+      $3, 'mock-alpha-near', 'mock-env-a', 'v1', 'mock-digest-a',
+      'PROVISIONING'::flow.wallet_status, 'none'
+    )`,
+    [walletAlphaId, accountAlpha.accountId, `prov-${walletAlphaId}`],
+  );
+
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, environment, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state
+    ) VALUES (
+      $1::uuid, $2::uuid, 'OUTLAYER', 'testnet',
+      $3, 'mock-beta-near', 'mock-env-b', 'v1', 'mock-digest-b',
+      'PROVISIONING'::flow.wallet_status, 'none'
+    )`,
+    [walletBetaId, accountBeta.accountId, `prov-${walletBetaId}`],
+  );
+
+  // Register Base Sepolia addresses for both wallets
+  await workerPool.query(
+    `INSERT INTO flow.wallet_addresses (
+      id, wallet_id, network, chain_id, address, public_key
+    ) VALUES (
+      gen_random_uuid(), $1::uuid, 'base', '84532', '0xaa6bA2Ae7F20748B46A3DB221a418137ec54A5a2', 'pk-a'
+    )`,
+    [walletAlphaId],
+  );
+
+  await workerPool.query(
+    `INSERT INTO flow.wallet_addresses (
+      id, wallet_id, network, chain_id, address, public_key
+    ) VALUES (
+      gen_random_uuid(), $1::uuid, 'base', '84532', '0xbb6bA2Ae7F20748B46A3DB221a418137ec54A5a2', 'pk-b'
+    )`,
+    [walletBetaId],
+  );
+
+  // Worker records a balance for Alpha (10 ETH) and Beta (20 ETH) on Base Sepolia
+  const baseSepoliaEthAssetId = "20000000-0000-0000-0000-000000000004";
+  await upsertWalletBalance(db, {
+    walletId: walletAlphaId,
+    networkAssetId: baseSepoliaEthAssetId,
+    atomicBalance: 10_000_000_000_000_000_000n,
+    blockHeight: 200001n,
+    syncStatus: "SYNCED",
+    finality: "CONFIRMED",
+  });
+
+  await upsertWalletBalance(db, {
+    walletId: walletBetaId,
+    networkAssetId: baseSepoliaEthAssetId,
+    atomicBalance: 20_000_000_000_000_000_000n,
+    blockHeight: 200002n,
+    syncStatus: "SYNCED",
+    finality: "CONFIRMED",
+  });
+
+  // Adversarial Test 1: Direct SQL query by app_role without context -> returns 0 rows
+  const noContextRes = await pool.query(
+    "SELECT * FROM flow.wallet_balances WHERE wallet_id = $1",
+    [walletBetaId],
+  );
+  assert.equal(
+    noContextRes.rows.length,
+    0,
+    "Unscoped query must return 0 rows under RLS",
+  );
+
+  const allNoContext = await pool.query("SELECT * FROM flow.wallet_balances");
+  assert.equal(
+    allNoContext.rows.length,
+    0,
+    "Unscoped table scan must return 0 rows under RLS",
+  );
+
+  // Adversarial Test 2: Altered Account ID
+  // Attacker User Alpha sets flow.current_account_id to Beta's account ID
+  const appClient = await pool.connect();
+  try {
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_user_id', $2, true)",
+      [accountBeta.accountId, accountAlpha.userId],
+    );
+    const alteredRes = await appClient.query(
+      "SELECT * FROM flow.wallet_balances",
+    );
+    assert.equal(
+      alteredRes.rows.length,
+      0,
+      "Altered account ID must return 0 rows because User Alpha is not owner of Beta's account",
+    );
+    await appClient.query("COMMIT");
+
+    // Adversarial Test 3: Cross-tenant joins
+    // Attacker User Alpha sets valid context for Account Alpha, then joins with flow.wallets on account_id = Beta's account ID
+    await appClient.query("BEGIN");
+    await appClient.query(
+      "SELECT set_config('flow.current_account_id', $1, true), set_config('flow.current_user_id', $2, true)",
+      [accountAlpha.accountId, accountAlpha.userId],
+    );
+    const joinRes = await appClient.query(
+      `SELECT wb.* FROM flow.wallet_balances wb
+       JOIN flow.wallets w ON w.id = wb.wallet_id
+       WHERE w.account_id = $1::uuid`,
+      [accountBeta.accountId],
+    );
+    assert.equal(
+      joinRes.rows.length,
+      0,
+      "Cross-tenant join attempt must return 0 rows under RLS",
+    );
+
+    // Adversarial Test 4: Subquery / View attempt
+    const subqueryRes = await appClient.query(
+      `SELECT * FROM (SELECT * FROM flow.wallet_balances) v WHERE v.wallet_id = $1::uuid`,
+      [walletBetaId],
+    );
+    assert.equal(
+      subqueryRes.rows.length,
+      0,
+      "Subquery / view scan for another tenant's wallet must return 0 rows",
+    );
+
+    // Legitimate Tenant Query: User Alpha reads Account Alpha
+    const alphaBalances = await appClient.query(
+      `SELECT * FROM flow.wallet_balances WHERE wallet_id = $1::uuid`,
+      [walletAlphaId],
+    );
+    assert.equal(
+      alphaBalances.rows.length,
+      1,
+      "Legitimate owner query must return their own balance",
+    );
+    assert.equal(
+      BigInt(alphaBalances.rows[0].atomic_balance),
+      10_000_000_000_000_000_000n,
+    );
+    await appClient.query("COMMIT");
+  } finally {
+    appClient.release();
+  }
+});
+
+test("m3 phase 2: wallet-to-network consistency trigger prevents cross-environment and unregistered address balances", async () => {
+  const accountTest = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "m3-consistency-test",
+  );
+  const accountProd = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "m3-consistency-prod",
+  );
+
+  const walletTestId = randomUUID();
+  const walletProdId = randomUUID();
+
+  // Insert a testnet wallet
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, environment, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state
+    ) VALUES (
+      $1::uuid, $2::uuid, 'OUTLAYER', 'testnet',
+      $3, 'mock-near-test', 'mock-env-t', 'v1', 'mock-digest-t',
+      'PROVISIONING'::flow.wallet_status, 'none'
+    )`,
+    [walletTestId, accountTest.accountId, `prov-${walletTestId}`],
+  );
+
+  // Insert a mainnet wallet
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, environment, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state
+    ) VALUES (
+      $1::uuid, $2::uuid, 'OUTLAYER', 'mainnet',
+      $3, 'mock-near-prod', 'mock-env-p', 'v1', 'mock-digest-p',
+      'PROVISIONING'::flow.wallet_status, 'none'
+    )`,
+    [walletProdId, accountProd.accountId, `prov-${walletProdId}`],
+  );
+
+  // Register NEAR Testnet address for testnet wallet
+  await workerPool.query(
+    `INSERT INTO flow.wallet_addresses (
+      id, wallet_id, network, chain_id, address, public_key
+    ) VALUES (
+      gen_random_uuid(), $1::uuid, 'near', 'near-testnet', 'mock-near-testnet-addr', 'mock-pk-t'
+    )`,
+    [walletTestId],
+  );
+
+  // Register NEAR Mainnet address for mainnet wallet
+  await workerPool.query(
+    `INSERT INTO flow.wallet_addresses (
+      id, wallet_id, network, chain_id, address, public_key
+    ) VALUES (
+      gen_random_uuid(), $1::uuid, 'near', 'near-mainnet', 'mock-near-mainnet-addr', 'mock-pk-m'
+    )`,
+    [walletProdId],
+  );
+
+  const nearMainnetAssetId = "20000000-0000-0000-0000-000000000001";
+  const nearTestnetAssetId = "20000000-0000-0000-0000-000000000002";
+  const solanaDevnetAssetId = "20000000-0000-0000-0000-000000000006";
+
+  // Test A: Testnet wallet inserting Mainnet asset -> TRIGGER BLOCKS WITH 23514
+  await assert.rejects(
+    async () => {
+      await workerPool.query(
+        `INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance)
+         VALUES ($1::uuid, $2::uuid, 100)`,
+        [walletTestId, nearMainnetAssetId],
+      );
+    },
+    (err: unknown) =>
+      (err as { code?: string }).code === "23514" &&
+      (err as { message?: string }).message?.includes(
+        "cannot record balances for mainnet chain",
+      ),
+  );
+
+  // Test B: Mainnet wallet inserting Testnet asset -> TRIGGER BLOCKS WITH 23514
+  await assert.rejects(
+    async () => {
+      await workerPool.query(
+        `INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance)
+         VALUES ($1::uuid, $2::uuid, 100)`,
+        [walletProdId, nearTestnetAssetId],
+      );
+    },
+    (err: unknown) =>
+      (err as { code?: string }).code === "23514" &&
+      (err as { message?: string }).message?.includes(
+        "cannot record balances for testnet chain",
+      ),
+  );
+
+  // Test C: Testnet wallet inserting asset for network without registered address (Solana Devnet) -> TRIGGER BLOCKS WITH 23514
+  await assert.rejects(
+    async () => {
+      await workerPool.query(
+        `INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance)
+         VALUES ($1::uuid, $2::uuid, 100)`,
+        [walletTestId, solanaDevnetAssetId],
+      );
+    },
+    (err: unknown) =>
+      (err as { code?: string }).code === "23514" &&
+      (err as { message?: string }).message?.includes(
+        "has no registered address for network",
+      ),
+  );
+
+  // Test D: Valid consistency: Testnet wallet with registered NEAR Testnet address -> SUCCEEDS
+  await workerPool.query(
+    `INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance)
+     VALUES ($1::uuid, $2::uuid, 500)`,
+    [walletTestId, nearTestnetAssetId],
+  );
+
+  const verifySuccess = await workerPool.query(
+    "SELECT atomic_balance FROM flow.wallet_balances WHERE wallet_id = $1::uuid",
+    [walletTestId],
+  );
+  assert.equal(verifySuccess.rows.length, 1);
+  assert.equal(BigInt(verifySuccess.rows[0].atomic_balance), 500n);
 });

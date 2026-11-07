@@ -141,3 +141,53 @@ export function assertValidFinality(
     );
   }
 }
+
+export type ObservationState =
+  | "CONFIRMED_ZERO"
+  | "ACCOUNT_NONEXISTENT"
+  | "TOKEN_ACCOUNT_ABSENT"
+  | "UNSUPPORTED_TOKEN"
+  | "RPC_ERROR"
+  | "SYNCED";
+
+export interface BalanceObservation {
+  readonly networkAssetId: string;
+  readonly tokenAccountAddress?: string | null;
+  readonly atomicBalance: bigint;
+  readonly blockHeight?: bigint | null;
+  readonly blockTimestamp?: Date | null;
+  readonly observedAt: Date;
+  readonly finality: BalanceFinality;
+  readonly syncStatus: SyncStatus;
+  readonly observationState: ObservationState;
+  readonly chainIdVerified: boolean;
+  readonly endpointUsed: string;
+  readonly lastError?: string | null;
+}
+
+export function isTestnetChain(chainId: string): boolean {
+  return (
+    chainId === "near-testnet" ||
+    chainId === "84532" ||
+    chainId === "solana-devnet"
+  );
+}
+
+export function assertWalletChainConsistency(
+  walletEnv: string,
+  chainId: string,
+): void {
+  const isTestnet = isTestnetChain(chainId);
+  if (walletEnv === "testnet" && !isTestnet) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Environment mismatch: testnet wallet cannot hold balances for mainnet chain ${chainId}.`,
+    );
+  }
+  if (walletEnv === "mainnet" && isTestnet) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Environment mismatch: mainnet wallet cannot hold balances for testnet chain ${chainId}.`,
+    );
+  }
+}

@@ -36,7 +36,12 @@ export type FlowErrorCode =
   | "PRECISION_OVERFLOW"
   | "AMOUNT_OVERFLOW"
   | "INSUFFICIENT_FUNDS"
-  | "ACCOUNT_NOT_FOUND";
+  | "ACCOUNT_NOT_FOUND"
+  | "CHAIN_ID_MISMATCH"
+  | "UNSUPPORTED_TOKEN"
+  | "RPC_RATE_LIMITED"
+  | "RPC_TIMEOUT"
+  | "RPC_NETWORK_ERROR";
 
 export class FlowError extends Error {
   readonly code: FlowErrorCode;

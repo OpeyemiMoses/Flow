@@ -13,6 +13,7 @@ import {
   type BalanceFinality,
   assertValidFinality,
   assertValidSyncStatus,
+  assertWalletChainConsistency,
 } from "../../domain/assets.ts";
 import { FlowError } from "../../foundation/errors.ts";
 import type { FlowDb } from "../../foundation/prisma.ts";
@@ -212,74 +213,92 @@ export async function getAccountBalances(
     };
   }
 
-  // 3. Query wallet balances joined with network assets and assets
-  const balanceRows = await db.$queryRaw<
-    Array<{
-      id: string;
-      walletId: string;
-      networkAssetId: string;
-      tokenAccountAddress: string | null;
-      atomicBalance: string;
-      blockHeight: bigint | null;
-      blockTimestamp: Date | null;
-      observedAt: Date;
-      finality: string;
-      syncStatus: string;
-      lastSyncedAt: Date | null;
-      lastError: string | null;
-      network: string;
-      chainId: string;
-      tokenStandard: string;
-      contractAddress: string | null;
-      decimals: number;
-      symbolOverride: string | null;
-      nameOverride: string | null;
-      isVerified: boolean;
-      isDepositEligible: boolean;
-      status: string;
-      assetId: string;
-      assetSymbol: string;
-      assetName: string;
-      assetKind: string;
-      assetDescription: string | null;
-      assetIconUrl: string | null;
-    }>
-  >`
-    SELECT
-      wb.id,
-      wb.wallet_id AS "walletId",
-      wb.network_asset_id AS "networkAssetId",
-      wb.token_account_address AS "tokenAccountAddress",
-      wb.atomic_balance::text AS "atomicBalance",
-      wb.block_height AS "blockHeight",
-      wb.block_timestamp AS "blockTimestamp",
-      wb.observed_at AS "observedAt",
-      wb.finality,
-      wb.sync_status AS "syncStatus",
-      wb.last_synced_at AS "lastSyncedAt",
-      wb.last_error AS "lastError",
-      na.network,
-      na.chain_id AS "chainId",
-      na.token_standard AS "tokenStandard",
-      na.contract_address AS "contractAddress",
-      na.decimals,
-      na.symbol_override AS "symbolOverride",
-      na.name_override AS "nameOverride",
-      na.is_verified AS "isVerified",
-      na.is_deposit_eligible AS "isDepositEligible",
-      na.status,
-      a.id AS "assetId",
-      a.symbol AS "assetSymbol",
-      a.name AS "assetName",
-      a.kind AS "assetKind",
-      a.description AS "assetDescription",
-      a.icon_url AS "assetIconUrl"
-    FROM flow.wallet_balances wb
-    JOIN flow.network_assets na ON na.id = wb.network_asset_id
-    JOIN flow.assets a ON a.id = na.asset_id
-    WHERE wb.wallet_id = ${wallet.id}::uuid
-    ORDER BY na.network, na.chain_id, a.symbol
-  `;
+  // Set database-level tenant RLS context and query wallet balances inside a transaction
+  // so the RLS context applies reliably on the same connection.
+  type BalanceQueryRow = {
+    id: string;
+    walletId: string;
+    networkAssetId: string;
+    tokenAccountAddress: string | null;
+    atomicBalance: string;
+    blockHeight: bigint | null;
+    blockTimestamp: Date | null;
+    observedAt: Date;
+    finality: string;
+    syncStatus: string;
+    lastSyncedAt: Date | null;
+    lastError: string | null;
+    network: string;
+    chainId: string;
+    tokenStandard: string;
+    contractAddress: string | null;
+    decimals: number;
+    symbolOverride: string | null;
+    nameOverride: string | null;
+    isVerified: boolean;
+    isDepositEligible: boolean;
+    status: string;
+    assetId: string;
+    assetSymbol: string;
+    assetName: string;
+    assetKind: string;
+    assetDescription: string | null;
+    assetIconUrl: string | null;
+  };
+
+  const queryBalancesWithContext = async (
+    tx: FlowDb,
+  ): Promise<BalanceQueryRow[]> => {
+    await tx.$executeRaw`
+      SELECT set_config('flow.current_account_id', ${accountId}, true),
+             set_config('flow.current_user_id', ${callerUserId}, true)
+    `;
+
+    return tx.$queryRaw<BalanceQueryRow[]>`
+      SELECT
+        wb.id,
+        wb.wallet_id AS "walletId",
+        wb.network_asset_id AS "networkAssetId",
+        wb.token_account_address AS "tokenAccountAddress",
+        wb.atomic_balance::text AS "atomicBalance",
+        wb.block_height AS "blockHeight",
+        wb.block_timestamp AS "blockTimestamp",
+        wb.observed_at AS "observedAt",
+        wb.finality,
+        wb.sync_status AS "syncStatus",
+        wb.last_synced_at AS "lastSyncedAt",
+        wb.last_error AS "lastError",
+        na.network,
+        na.chain_id AS "chainId",
+        na.token_standard AS "tokenStandard",
+        na.contract_address AS "contractAddress",
+        na.decimals,
+        na.symbol_override AS "symbolOverride",
+        na.name_override AS "nameOverride",
+        na.is_verified AS "isVerified",
+        na.is_deposit_eligible AS "isDepositEligible",
+        na.status,
+        a.id AS "assetId",
+        a.symbol AS "assetSymbol",
+        a.name AS "assetName",
+        a.kind AS "assetKind",
+        a.description AS "assetDescription",
+        a.icon_url AS "assetIconUrl"
+      FROM flow.wallet_balances wb
+      JOIN flow.network_assets na ON na.id = wb.network_asset_id
+      JOIN flow.assets a ON a.id = na.asset_id
+      WHERE wb.wallet_id = ${wallet.id}::uuid
+      ORDER BY na.network, na.chain_id, a.symbol
+    `;
+  };
+
+  const dbWithTx = db as {
+    $transaction?: <T>(fn: (tx: FlowDb) => Promise<T>) => Promise<T>;
+  };
+  const balanceRows: BalanceQueryRow[] =
+    typeof dbWithTx.$transaction === "function"
+      ? await dbWithTx.$transaction(queryBalancesWithContext)
+      : await queryBalancesWithContext(db);
 
   const balances: WalletBalanceRecord[] = balanceRows.map((r) => {
     const atomic = BigInt(r.atomicBalance);
@@ -357,6 +376,47 @@ export async function upsertWalletBalance(
     );
   }
 
+  // 1. Verify wallet environment vs asset chain consistency
+  const wallets = await db.$queryRaw<Array<{ environment: string }>>`
+    SELECT environment FROM flow.wallets WHERE id = ${input.walletId}::uuid
+  `;
+  const wallet = wallets[0];
+  if (!wallet) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Wallet not found: ${input.walletId}`,
+    );
+  }
+
+  const assets = await db.$queryRaw<
+    Array<{ network: string; chainId: string }>
+  >`
+    SELECT network, chain_id as "chainId" FROM flow.network_assets WHERE id = ${input.networkAssetId}::uuid
+  `;
+  const asset = assets[0];
+  if (!asset) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Network asset not found: ${input.networkAssetId}`,
+    );
+  }
+
+  assertWalletChainConsistency(wallet.environment, asset.chainId);
+
+  // 2. Verify registered address exists for this network and chain
+  const addresses = await db.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM flow.wallet_addresses
+    WHERE wallet_id = ${input.walletId}::uuid
+      AND network = ${asset.network}
+      AND chain_id = ${asset.chainId}
+  `;
+  if (!addresses[0]) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Wallet ${input.walletId} has no registered address for network ${asset.network} chain ${asset.chainId}.`,
+    );
+  }
+
   const tokenAccount = input.tokenAccountAddress ?? null;
   const atomicStr = input.atomicBalance.toString();
   const blockHeightStr =
@@ -364,50 +424,96 @@ export async function upsertWalletBalance(
       ? input.blockHeight.toString()
       : null;
 
-  const result = await db.$queryRaw<Array<{ id: string }>>`
-    INSERT INTO flow.wallet_balances (
-      wallet_id,
-      network_asset_id,
-      token_account_address,
-      atomic_balance,
-      block_height,
-      block_timestamp,
-      observed_at,
-      finality,
-      sync_status,
-      last_synced_at,
-      last_error,
-      created_at,
-      updated_at
-    )
-    VALUES (
-      ${input.walletId}::uuid,
-      ${input.networkAssetId}::uuid,
-      ${tokenAccount},
-      ${atomicStr}::numeric,
-      ${blockHeightStr}::bigint,
-      ${input.blockTimestamp ?? null},
-      CURRENT_TIMESTAMP,
-      ${finality},
-      ${input.syncStatus},
-      CURRENT_TIMESTAMP,
-      ${input.lastError ?? null},
-      CURRENT_TIMESTAMP,
-      CURRENT_TIMESTAMP
-    )
-    ON CONFLICT (wallet_id, network_asset_id) WHERE token_account_address IS NULL
-    DO UPDATE SET
-      atomic_balance = EXCLUDED.atomic_balance,
-      block_height = EXCLUDED.block_height,
-      block_timestamp = EXCLUDED.block_timestamp,
-      observed_at = EXCLUDED.observed_at,
-      finality = EXCLUDED.finality,
-      sync_status = EXCLUDED.sync_status,
-      last_synced_at = EXCLUDED.last_synced_at,
-      last_error = EXCLUDED.last_error,
-      updated_at = CURRENT_TIMESTAMP
-    RETURNING id
-  `;
+  const result =
+    tokenAccount === null
+      ? await db.$queryRaw<Array<{ id: string }>>`
+          INSERT INTO flow.wallet_balances (
+            wallet_id,
+            network_asset_id,
+            token_account_address,
+            atomic_balance,
+            block_height,
+            block_timestamp,
+            observed_at,
+            finality,
+            sync_status,
+            last_synced_at,
+            last_error,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            ${input.walletId}::uuid,
+            ${input.networkAssetId}::uuid,
+            NULL,
+            ${atomicStr}::numeric,
+            ${blockHeightStr}::bigint,
+            ${input.blockTimestamp ?? null},
+            CURRENT_TIMESTAMP,
+            ${finality},
+            ${input.syncStatus},
+            CURRENT_TIMESTAMP,
+            ${input.lastError ?? null},
+            CURRENT_TIMESTAMP,
+            CURRENT_TIMESTAMP
+          )
+          ON CONFLICT (wallet_id, network_asset_id) WHERE token_account_address IS NULL
+          DO UPDATE SET
+            atomic_balance = EXCLUDED.atomic_balance,
+            block_height = EXCLUDED.block_height,
+            block_timestamp = EXCLUDED.block_timestamp,
+            observed_at = EXCLUDED.observed_at,
+            finality = EXCLUDED.finality,
+            sync_status = EXCLUDED.sync_status,
+            last_synced_at = EXCLUDED.last_synced_at,
+            last_error = EXCLUDED.last_error,
+            updated_at = CURRENT_TIMESTAMP
+          RETURNING id
+        `
+      : await db.$queryRaw<Array<{ id: string }>>`
+          INSERT INTO flow.wallet_balances (
+            wallet_id,
+            network_asset_id,
+            token_account_address,
+            atomic_balance,
+            block_height,
+            block_timestamp,
+            observed_at,
+            finality,
+            sync_status,
+            last_synced_at,
+            last_error,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            ${input.walletId}::uuid,
+            ${input.networkAssetId}::uuid,
+            ${tokenAccount},
+            ${atomicStr}::numeric,
+            ${blockHeightStr}::bigint,
+            ${input.blockTimestamp ?? null},
+            CURRENT_TIMESTAMP,
+            ${finality},
+            ${input.syncStatus},
+            CURRENT_TIMESTAMP,
+            ${input.lastError ?? null},
+            CURRENT_TIMESTAMP,
+            CURRENT_TIMESTAMP
+          )
+          ON CONFLICT (wallet_id, network_asset_id, token_account_address) WHERE token_account_address IS NOT NULL
+          DO UPDATE SET
+            atomic_balance = EXCLUDED.atomic_balance,
+            block_height = EXCLUDED.block_height,
+            block_timestamp = EXCLUDED.block_timestamp,
+            observed_at = EXCLUDED.observed_at,
+            finality = EXCLUDED.finality,
+            sync_status = EXCLUDED.sync_status,
+            last_synced_at = EXCLUDED.last_synced_at,
+            last_error = EXCLUDED.last_error,
+            updated_at = CURRENT_TIMESTAMP
+          RETURNING id
+        `;
 
   const row = result[0];
   if (!row) {
