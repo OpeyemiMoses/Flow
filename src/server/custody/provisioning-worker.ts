@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   inspectCustodyPolicyEvidence,
   OUTLAYER_CAPABILITIES,
+  toEip55ChecksumAddress,
 } from "../../domain/custody.ts";
 import {
   decryptSecret,
@@ -618,6 +619,12 @@ export class WalletProvisioningWorker {
           providerWalletId,
         );
 
+        const isTestnet = this.providerEnvironment === "testnet";
+        const nearChainId = isTestnet ? "near-testnet" : "near-mainnet";
+        const baseChainId = isTestnet ? "84532" : "8453";
+        const solanaChainId = isTestnet ? "solana-devnet" : "solana-mainnet";
+        const checksummedBaseAddress = toEip55ChecksumAddress(baseAddr.address);
+
         await attachWalletAddressesAndCapabilities(
           this.db,
           leased.id,
@@ -627,19 +634,19 @@ export class WalletProvisioningWorker {
             addresses: [
               {
                 network: "near",
-                chainId: "near-mainnet",
+                chainId: nearChainId,
                 address: nearAddr.address,
                 publicKey: nearAddr.public_key,
               },
               {
                 network: "base",
-                chainId: "8453",
-                address: baseAddr.address,
+                chainId: baseChainId,
+                address: checksummedBaseAddress,
                 publicKey: baseAddr.public_key,
               },
               {
                 network: "solana",
-                chainId: "solana-mainnet",
+                chainId: solanaChainId,
                 address: solanaAddr.address,
                 publicKey: solanaAddr.public_key,
               },
