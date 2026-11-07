@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   evaluateWalletFundReadiness,
   isValidNearAddress,
@@ -2212,16 +2212,30 @@ export interface AuthenticatedOperatorContext {
   readonly verificationMethod: "SESSION" | "TRUSTED_EXECUTION_CONTEXT";
 }
 
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, "utf8");
+  const bufB = Buffer.from(b, "utf8");
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+export interface DeriveOperatorContextInput {
+  readonly operatorAuthId: string;
+  readonly sessionToken?: string;
+  readonly trustedExecutionProof?: {
+    readonly executionKey: string;
+  };
+}
+
 /**
  * Derives and verifies an authenticated operator context from a trusted execution context.
  * Rejects unauthenticated caller-supplied identifiers or accounts lacking active authority.
+ * An active session token or verified trusted execution key proof is strictly required;
+ * impersonation via operatorAuthId alone is strictly prohibited.
  */
 export async function deriveOperatorContext(
   db: FlowDb,
-  input: {
-    readonly operatorAuthId: string;
-    readonly sessionToken?: string;
-  },
+  input: DeriveOperatorContextInput,
   requiredRole?: OperatorRole,
 ): Promise<AuthenticatedOperatorContext> {
   const authId = input.operatorAuthId.trim();
@@ -2235,28 +2249,7 @@ export async function deriveOperatorContext(
   // 1. Verify registered user in flow.auth_users
   await assertOperatorIdentityRegistered(db, authId);
 
-  // 2. If a sessionToken is supplied, verify active session in flow.auth_sessions bound to this user
-  let sessionId: string | undefined;
-  if (input.sessionToken) {
-    const sessions = await db.$queryRaw<
-      Array<{ id: string; userId: string; expiresAt: Date }>
-    >`
-      SELECT id, user_id AS "userId", expires_at AS "expiresAt"
-      FROM flow.auth_sessions
-      WHERE token = ${input.sessionToken.trim()}
-        AND user_id = ${authId}
-        AND expires_at > CURRENT_TIMESTAMP
-    `;
-    if (!sessions[0]) {
-      throw new FlowError(
-        "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
-        "Operator session token is invalid, expired, or not bound to the operator user.",
-      );
-    }
-    sessionId = sessions[0].id;
-  }
-
-  // 3. Verify active custody operator status and role in flow.custody_operators
+  // 2. Verify active custody operator status and role in flow.custody_operators
   const ops = await db.$queryRaw<
     Array<{ id: string; role: string; status: string }>
   >`
@@ -2279,13 +2272,58 @@ export async function deriveOperatorContext(
     );
   }
 
-  return {
-    operatorAuthId: authId,
-    role,
-    verifiedAt: new Date(),
-    sessionId,
-    verificationMethod: sessionId ? "SESSION" : "TRUSTED_EXECUTION_CONTEXT",
-  };
+  // 3. Cryptographic proof / authentication verification
+  // A. Operator session verification via flow.auth_sessions
+  if (input.sessionToken && input.sessionToken.trim().length > 0) {
+    const sessions = await db.$queryRaw<
+      Array<{ id: string; userId: string; expiresAt: Date }>
+    >`
+      SELECT id, user_id AS "userId", expires_at AS "expiresAt"
+      FROM flow.auth_sessions
+      WHERE token = ${input.sessionToken.trim()}
+        AND user_id = ${authId}
+        AND expires_at > CURRENT_TIMESTAMP
+    `;
+    if (!sessions[0]) {
+      throw new FlowError(
+        "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
+        "Operator session token is invalid, expired, or not bound to the operator user.",
+      );
+    }
+    return {
+      operatorAuthId: authId,
+      role,
+      verifiedAt: new Date(),
+      sessionId: sessions[0].id,
+      verificationMethod: "SESSION",
+    };
+  }
+
+  // B. Trusted Execution Context verification (Requirements 4 & 5)
+  // Requires an explicit, high-entropy execution key proof matching FLOW_OPERATOR_TRUSTED_EXECUTION_KEY
+  const configuredExecutionKey =
+    process.env.FLOW_OPERATOR_TRUSTED_EXECUTION_KEY;
+  const providedExecutionKey = input.trustedExecutionProof?.executionKey;
+
+  if (
+    providedExecutionKey &&
+    configuredExecutionKey &&
+    configuredExecutionKey.length >= 64 &&
+    timingSafeStringEqual(providedExecutionKey, configuredExecutionKey)
+  ) {
+    return {
+      operatorAuthId: authId,
+      role,
+      verifiedAt: new Date(),
+      verificationMethod: "TRUSTED_EXECUTION_CONTEXT",
+    };
+  }
+
+  // C. Fallback without proof is strictly rejected
+  throw new FlowError(
+    "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
+    "Operator authentication required: a valid operator session token or verified trusted execution key must be provided. Impersonation via operatorAuthId alone is strictly prohibited.",
+  );
 }
 
 /**
@@ -2353,6 +2391,9 @@ export interface EnrollCustodyOperatorInput {
   readonly role?: "CUSTODY_OPERATOR" | "SECURITY_OFFICER" | "CUSTODY_ADMIN";
   readonly enrolledBy: string;
   readonly enrolledBySessionToken?: string;
+  readonly enrolledByTrustedExecutionProof?: {
+    readonly executionKey: string;
+  };
   readonly enrolledByContext?: AuthenticatedOperatorContext;
 }
 
@@ -2403,6 +2444,7 @@ export async function enrollCustodyOperator(
         {
           operatorAuthId: enrolledBy,
           sessionToken: input.enrolledBySessionToken,
+          trustedExecutionProof: input.enrolledByTrustedExecutionProof,
         },
         "SECURITY_OFFICER",
       ));
@@ -2448,7 +2490,13 @@ export interface CreateCustodyRecoveryApprovalInput {
   readonly approvalToken?: string;
   readonly validityMinutes?: number;
   readonly initiatorSessionToken?: string;
+  readonly initiatorTrustedExecutionProof?: {
+    readonly executionKey: string;
+  };
   readonly approverSessionToken?: string;
+  readonly approverTrustedExecutionProof?: {
+    readonly executionKey: string;
+  };
   readonly initiatorContext?: AuthenticatedOperatorContext;
   readonly approverContext?: AuthenticatedOperatorContext;
 }
@@ -2505,12 +2553,14 @@ export async function createCustodyRecoveryApproval(
     (await deriveOperatorContext(db, {
       operatorAuthId: initiator,
       sessionToken: input.initiatorSessionToken,
+      trustedExecutionProof: input.initiatorTrustedExecutionProof,
     }));
   const approverCtx =
     input.approverContext ??
     (await deriveOperatorContext(db, {
       operatorAuthId: approver,
       sessionToken: input.approverSessionToken,
+      trustedExecutionProof: input.approverTrustedExecutionProof,
     }));
 
   const jobs = await db.$queryRaw<
@@ -2591,6 +2641,9 @@ export interface CreateCompatibilityAuthorizationInput {
   readonly allowedMethods?: readonly string[];
   readonly validityMinutes?: number;
   readonly operatorSessionToken?: string;
+  readonly operatorTrustedExecutionProof?: {
+    readonly executionKey: string;
+  };
   readonly operatorContext?: AuthenticatedOperatorContext;
 }
 
@@ -2619,6 +2672,7 @@ export async function createCompatibilityAuthorization(
     (await deriveOperatorContext(db, {
       operatorAuthId: input.operatorAuthId,
       sessionToken: input.operatorSessionToken,
+      trustedExecutionProof: input.operatorTrustedExecutionProof,
     }));
 
   const validityMinutes = input.validityMinutes ?? 60;

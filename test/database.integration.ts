@@ -21,6 +21,7 @@ import {
   createDatabasePool,
 } from "../src/foundation/database.ts";
 import { readConfig } from "../src/foundation/environment.ts";
+import { FlowError } from "../src/foundation/errors.ts";
 import {
   disconnectPrismaClients,
   getPrismaClient,
@@ -54,7 +55,10 @@ import {
 import { OutLayerAdapter } from "../src/server/custody/outlayer-adapter.ts";
 import { WalletProvisioningWorker } from "../src/server/custody/provisioning-worker.ts";
 import { createOutLayerMockServer } from "./support/outlayer-fixture.ts";
-import { runTestnetRehearsal } from "../scripts/rehearse-testnet-registration.ts";
+import {
+  createRehearsalAuthorization,
+  runTestnetRehearsal,
+} from "../scripts/rehearse-testnet-registration.ts";
 
 assert.equal(
   process.env.FLOW_ENV,
@@ -2860,11 +2864,17 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
     enrolledBy: opRealA.authUserId,
   });
 
+  const secSession = await createOperatorSession(
+    operatorDb,
+    secOfficer.authUserId,
+  );
+
   // Enroll opRealA into flow.custody_operators
   await enrollCustodyOperator(operatorDb, {
     authUserId: opRealA.authUserId,
     role: "CUSTODY_OPERATOR",
     enrolledBy: secOfficer.authUserId,
+    enrolledBySessionToken: secSession.sessionToken,
   });
   await assertOperatorAuthority(operatorDb, opRealA.authUserId);
   await assert.rejects(
@@ -2956,6 +2966,7 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
     authUserId: opRealB.authUserId,
     role: "CUSTODY_OPERATOR",
     enrolledBy: secOfficer.authUserId,
+    enrolledBySessionToken: secSession.sessionToken,
   });
 
   // Resolution without independent flow.custody_recovery_approvals record must be rejected
@@ -2975,11 +2986,21 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
   );
 
   // Create valid independent recovery approval record
+  const opRealASession = await createOperatorSession(
+    operatorDb,
+    opRealA.authUserId,
+  );
+  const opRealBSession = await createOperatorSession(
+    operatorDb,
+    opRealB.authUserId,
+  );
   await createCustodyRecoveryApproval(operatorDb, {
     jobId: job.id,
     accountId: acc.accountId,
     initiatorOperatorAuthId: opRealA.authUserId,
+    initiatorSessionToken: opRealASession.sessionToken,
     approverAuthId: opRealB.authUserId,
+    approverSessionToken: opRealBSession.sessionToken,
     expectedDispatchAttemptId: dispatchAttemptId,
     resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
   });
@@ -3016,11 +3037,20 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
     role: "SECURITY_OFFICER",
     enrolledBy: opAuthUser.authUserId,
   });
+  const secUserSession = await createOperatorSession(
+    operatorDb,
+    secUser.authUserId,
+  );
   await enrollCustodyOperator(operatorDb, {
     authUserId: opAuthUser.authUserId,
     role: "CUSTODY_OPERATOR",
     enrolledBy: secUser.authUserId,
+    enrolledBySessionToken: secUserSession.sessionToken,
   });
+  const opAuthUserSession = await createOperatorSession(
+    operatorDb,
+    opAuthUser.authUserId,
+  );
 
   // 1. Check constraints on max_registrations and registrations_attempted
   await assert.rejects(
@@ -3038,6 +3068,7 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
     accountId: acc.accountId,
     environment: "testnet",
     operatorAuthId: opAuthUser.authUserId,
+    operatorSessionToken: opAuthUserSession.sessionToken,
   });
   assert.ok(auth.id);
   assert.ok(auth.expiresAt > new Date());
@@ -3048,6 +3079,7 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
       accountId: acc.accountId,
       environment: "testnet",
       operatorAuthId: opAuthUser.authUserId,
+      operatorSessionToken: opAuthUserSession.sessionToken,
     }),
     { code: "CUSTODY_REGISTRATION_BUDGET_EXCEEDED" },
   );
@@ -3103,6 +3135,7 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
     accountId: acc2.accountId,
     environment: "testnet",
     operatorAuthId: opAuthUser.authUserId,
+    operatorSessionToken: opAuthUserSession.sessionToken,
   });
   const dispatch3 = randomUUID();
   await claimCompatibilityRegistration(
@@ -3308,11 +3341,14 @@ test("M2 Phase 5.2 Adversarial Test: Operator self-enrollment, self-approval, ap
     role: "SECURITY_OFFICER",
     enrolledBy: op2.authUserId,
   });
+  const op1Session = await createOperatorSession(operatorDb, op1.authUserId);
   await enrollCustodyOperator(operatorDb, {
     authUserId: op2.authUserId,
     role: "CUSTODY_OPERATOR",
     enrolledBy: op1.authUserId,
+    enrolledBySessionToken: op1Session.sessionToken,
   });
+  const op2Session = await createOperatorSession(operatorDb, op2.authUserId);
 
   // Setup quarantined job
   const job = await ensureProvisioningJobForAccount(
@@ -3343,7 +3379,9 @@ test("M2 Phase 5.2 Adversarial Test: Operator self-enrollment, self-approval, ap
       jobId: job.id,
       accountId: targetAcc.accountId,
       initiatorOperatorAuthId: op1.authUserId,
+      initiatorSessionToken: op1Session.sessionToken,
       approverAuthId: op1.authUserId, // self-approval!
+      approverSessionToken: op1Session.sessionToken,
       expectedDispatchAttemptId: dispatchAttemptId,
       resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
     }),
@@ -3369,7 +3407,9 @@ test("M2 Phase 5.2 Adversarial Test: Operator self-enrollment, self-approval, ap
       jobId: job.id,
       accountId: targetAcc.accountId,
       initiatorOperatorAuthId: op1.authUserId,
+      initiatorSessionToken: op1Session.sessionToken,
       approverAuthId: op2.authUserId,
+      approverSessionToken: op2Session.sessionToken,
       expectedDispatchAttemptId: wrongDispatchId, // wrong dispatch ID!
       resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
     }),
@@ -3381,7 +3421,9 @@ test("M2 Phase 5.2 Adversarial Test: Operator self-enrollment, self-approval, ap
     jobId: job.id,
     accountId: targetAcc.accountId,
     initiatorOperatorAuthId: op1.authUserId,
+    initiatorSessionToken: op1Session.sessionToken,
     approverAuthId: op2.authUserId,
+    approverSessionToken: op2Session.sessionToken,
     expectedDispatchAttemptId: dispatchAttemptId,
     resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
   });
@@ -3453,11 +3495,20 @@ test("M2 Phase 5.2 Adversarial Test: Database singleton_scope UNIQUE constraint 
     role: "SECURITY_OFFICER",
     enrolledBy: opUser.authUserId,
   });
+  const secUserSession = await createOperatorSession(
+    operatorDb,
+    secUser.authUserId,
+  );
   await enrollCustodyOperator(operatorDb, {
     authUserId: opUser.authUserId,
     role: "CUSTODY_OPERATOR",
     enrolledBy: secUser.authUserId,
+    enrolledBySessionToken: secUserSession.sessionToken,
   });
+  const opUserSession = await createOperatorSession(
+    operatorDb,
+    opUser.authUserId,
+  );
 
   await operatorPool.query(
     "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.provider_compatibility_authorizations",
@@ -3468,6 +3519,7 @@ test("M2 Phase 5.2 Adversarial Test: Database singleton_scope UNIQUE constraint 
     accountId: accA.accountId,
     environment: "testnet",
     operatorAuthId: opUser.authUserId,
+    operatorSessionToken: opUserSession.sessionToken,
   });
   assert.ok(authA.id);
 
@@ -3657,16 +3709,26 @@ test("M2 Phase 5.3 Permanent durability: DELETE revoked and trigger prevents res
     role: "SECURITY_OFFICER",
     enrolledBy: opUser.authUserId,
   });
+  const secUserSession = await createOperatorSession(
+    operatorDb,
+    secUser.authUserId,
+  );
   await enrollCustodyOperator(operatorDb, {
     authUserId: opUser.authUserId,
     role: "CUSTODY_OPERATOR",
     enrolledBy: secUser.authUserId,
+    enrolledBySessionToken: secUserSession.sessionToken,
   });
+  const opUserSession = await createOperatorSession(
+    operatorDb,
+    opUser.authUserId,
+  );
 
   const auth = await createCompatibilityAuthorization(operatorDb, {
     accountId: account.accountId,
     environment: "testnet",
     operatorAuthId: opUser.authUserId,
+    operatorSessionToken: opUserSession.sessionToken,
   });
   assert.ok(auth.id);
 
@@ -3825,7 +3887,21 @@ test("M2 Phase 5.3 Operator identity derivation: requires active custody operato
       environment: "testnet",
       operatorAuthId: normalUser.authUserId,
     }),
-    { code: "CUSTODY_OPERATOR_AUTHORIZATION_ERROR" },
+    (err: unknown) =>
+      err instanceof FlowError &&
+      (err.code === "CUSTODY_OPERATOR_AUTHORIZATION_ERROR" ||
+        err.code === "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED"),
+  );
+
+  // Attempting to derive operator context without ANY session token or execution key fails (Requirement 4 & 5)
+  await assert.rejects(
+    deriveOperatorContext(operatorDb, {
+      operatorAuthId: normalUser.authUserId,
+    }),
+    (err: unknown) =>
+      err instanceof FlowError &&
+      (err.code === "CUSTODY_OPERATOR_AUTHORIZATION_ERROR" ||
+        err.code === "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED"),
   );
 
   // Attempting to derive operator context with an invalid session token fails
@@ -3834,7 +3910,10 @@ test("M2 Phase 5.3 Operator identity derivation: requires active custody operato
       operatorAuthId: normalUser.authUserId,
       sessionToken: "invalid_session_token_12345",
     }),
-    { code: "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED" },
+    (err: unknown) =>
+      err instanceof FlowError &&
+      (err.code === "CUSTODY_OPERATOR_AUTHORIZATION_ERROR" ||
+        err.code === "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED"),
   );
 
   // Enroll operator and verify session derivation
@@ -3863,7 +3942,7 @@ test("M2 Phase 5.3 Operator identity derivation: requires active custody operato
   assert.equal(derived.sessionId, session.sessionId);
 });
 
-test("M2 Phase 5.3 Deterministic one-time rehearsal command (runTestnetRehearsal): dry-run and simulated provider rehearsal", async () => {
+test("M2 Phase 5.4 Deterministic one-time rehearsal command (runTestnetRehearsal): dry-run, explicit authorization, and simulated provider rehearsal", async () => {
   await operatorPool.query(
     "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
   );
@@ -3879,6 +3958,8 @@ test("M2 Phase 5.3 Deterministic one-time rehearsal command (runTestnetRehearsal
     role: "SECURITY_OFFICER",
     enrolledBy: targetAcc.authUserId,
   });
+
+  const opSession = await createOperatorSession(operatorDb, opUser.authUserId);
 
   const fixture = await createOutLayerMockServer({
     policyState: "none",
@@ -3898,28 +3979,66 @@ test("M2 Phase 5.3 Deterministic one-time rehearsal command (runTestnetRehearsal
       FLOW_WALLET_KEY_ID: "v1",
       FLOW_OUTLAYER_API_URL: fixture.url,
       FLOW_CUSTODY_OPERATOR_AUTH_ID: opUser.authUserId,
+      FLOW_CUSTODY_OPERATOR_SESSION_TOKEN: opSession.sessionToken,
     };
 
-    // 1. Dry run
-    const dryRunResult = await runTestnetRehearsal({
+    // 1. Dry run BEFORE authorization is created: inspects safely, reports missing authorization, ZERO writes
+    const preAuthDryRun = await runTestnetRehearsal({
       dryRun: true,
       accountId: targetAcc.accountId,
       operatorAuthId: opUser.authUserId,
+      operatorSessionToken: opSession.sessionToken,
+      offlineTestMode: true,
       env: testEnv,
     });
-    assert.equal(dryRunResult.success, true);
-    assert.equal(dryRunResult.dryRun, true);
-    assert.equal(dryRunResult.preflight.executionDisabled, true);
-    assert.equal(dryRunResult.preflight.operatorAuthId, opUser.authUserId);
+    assert.equal(preAuthDryRun.success, true);
+    assert.equal(preAuthDryRun.dryRun, true);
+    assert.equal(preAuthDryRun.preflight.prerequisitesSatisfied, false);
+    assert.ok(
+      preAuthDryRun.preflight.missingPrerequisites.includes(
+        "COMPATIBILITY_AUTHORIZATION_MISSING",
+      ),
+    );
 
-    // Verify dry run made NO changes to wallets table
+    // Verify ZERO writes were made during dry-run
     const noWallets = await workerPool.query(
       "SELECT id FROM flow.wallets WHERE account_id = $1::uuid",
       [targetAcc.accountId],
     );
     assert.equal(noWallets.rows.length, 0);
 
-    // 2. Full Rehearsal execution
+    const noAuths = await operatorPool.query(
+      "SELECT id FROM flow.provider_compatibility_authorizations WHERE singleton_scope = 'GLOBAL_TESTNET_REHEARSAL'",
+    );
+    assert.equal(noAuths.rows.length, 0);
+
+    // 2. Explicitly create authorization separately (Requirement 3)
+    const createdAuth = await createRehearsalAuthorization({
+      accountId: targetAcc.accountId,
+      operatorAuthId: opUser.authUserId,
+      operatorSessionToken: opSession.sessionToken,
+      env: testEnv,
+    });
+    assert.ok(createdAuth.id);
+    assert.equal(createdAuth.accountId, targetAcc.accountId);
+
+    // 3. Dry run AFTER authorization is created: all prerequisites satisfied, ZERO writes
+    const postAuthDryRun = await runTestnetRehearsal({
+      dryRun: true,
+      accountId: targetAcc.accountId,
+      operatorAuthId: opUser.authUserId,
+      operatorSessionToken: opSession.sessionToken,
+      offlineTestMode: true,
+      env: testEnv,
+    });
+    assert.equal(postAuthDryRun.success, true);
+    assert.equal(postAuthDryRun.dryRun, true);
+    assert.equal(postAuthDryRun.preflight.prerequisitesSatisfied, true);
+    assert.equal(postAuthDryRun.preflight.authorizationId, createdAuth.id);
+    assert.equal(postAuthDryRun.preflight.authorizationStatus, "AUTHORIZED");
+    assert.equal(postAuthDryRun.preflight.authorizationValid, true);
+
+    // 4. Full Rehearsal execution
     const customAdapter = new OutLayerAdapter(fixture.url, 5_000, {
       compatibilityConfig: {
         mode: "authorized",
@@ -3932,7 +4051,9 @@ test("M2 Phase 5.3 Deterministic one-time rehearsal command (runTestnetRehearsal
       dryRun: false,
       accountId: targetAcc.accountId,
       operatorAuthId: opUser.authUserId,
+      operatorSessionToken: opSession.sessionToken,
       customAdapter,
+      offlineTestMode: true,
       env: testEnv,
     });
 
@@ -3943,7 +4064,7 @@ test("M2 Phase 5.3 Deterministic one-time rehearsal command (runTestnetRehearsal
     assert.equal(executionResult.eligibleForDeposits, false);
     assert.equal(executionResult.budgetExceededPrevented, true);
 
-    // 3. Credential encrypted immediately
+    // 5. Credential encrypted immediately
     const walletRecord = await workerPool.query<{
       encrypted_credential: string;
       key_id: string;
@@ -3959,7 +4080,7 @@ test("M2 Phase 5.3 Deterministic one-time rehearsal command (runTestnetRehearsal
     assert.equal(parsedEnvelope.keyId, "v1");
     assert.equal(walletRecord.rows[0]!.key_id, "v1");
 
-    // 4. Authorization is consumed
+    // 6. Authorization is consumed
     const authRecord = await operatorPool.query<{
       status: string;
       registrations_completed: number;
@@ -3969,14 +4090,24 @@ test("M2 Phase 5.3 Deterministic one-time rehearsal command (runTestnetRehearsal
     assert.equal(authRecord.rows[0]!.status, "CONSUMED");
     assert.equal(authRecord.rows[0]!.registrations_completed, 1);
 
-    // 5. Subsequent rehearsal execution fails with CUSTODY_REGISTRATION_BUDGET_EXCEEDED
+    // 7. Subsequent rehearsal execution fails with CUSTODY_REGISTRATION_BUDGET_EXCEEDED
+    const targetAcc2 = await createTestAccount(
+      pool,
+      "PERSONAL",
+      "rehearsal-target-acc-2",
+    );
     await assert.rejects(
       runTestnetRehearsal({
         dryRun: false,
-        accountId: targetAcc.accountId,
+        accountId: targetAcc2.accountId,
         operatorAuthId: opUser.authUserId,
+        operatorSessionToken: opSession.sessionToken,
         customAdapter,
-        env: testEnv,
+        offlineTestMode: true,
+        env: {
+          ...testEnv,
+          FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: targetAcc2.accountId,
+        },
       }),
       { code: "CUSTODY_REGISTRATION_BUDGET_EXCEEDED" },
     );
@@ -3986,4 +4117,438 @@ test("M2 Phase 5.3 Deterministic one-time rehearsal command (runTestnetRehearsal
       "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.provider_compatibility_authorizations;",
     );
   }
+});
+
+test("M2 Phase 5.4 Adversarial Test: --dry-run is database-read-only and performs ZERO writes across all tables", async () => {
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const targetAcc = await createTestAccount(pool, "PERSONAL", "readonly-acc");
+  const opUser = await createTestAccount(pool, "PERSONAL", "readonly-op");
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: opUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: targetAcc.authUserId,
+  });
+
+  const opSession = await createOperatorSession(operatorDb, opUser.authUserId);
+
+  const testEnv: Record<string, string | undefined> = {
+    ...process.env,
+    FLOW_ENV: "test",
+    FLOW_EXECUTION: "disabled",
+    FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+    FLOW_PROVIDER_COMPATIBILITY_TOKEN: "valid_test_token_12345678",
+    FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: targetAcc.accountId,
+    FLOW_WALLET_PROVIDER: "outlayer",
+    FLOW_WALLET_ENCRYPTION_KEY:
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    FLOW_WALLET_KEY_ID: "v1",
+    FLOW_OUTLAYER_API_URL: "https://testnet-api.outlayer.ai",
+    FLOW_CUSTODY_OPERATOR_AUTH_ID: opUser.authUserId,
+    FLOW_CUSTODY_OPERATOR_SESSION_TOKEN: opSession.sessionToken,
+  };
+
+  // Pre-snapshot counts
+  const countWalletsBefore = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.wallets",
+  );
+  const countJobsBefore = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.wallet_provisioning_jobs",
+  );
+  const countAuthsBefore = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.provider_compatibility_authorizations",
+  );
+  const countSessionsBefore = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.auth_sessions",
+  );
+  const countOpsBefore = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.custody_operators",
+  );
+
+  // Run dry run
+  const dryRunResult = await runTestnetRehearsal({
+    dryRun: true,
+    accountId: targetAcc.accountId,
+    operatorAuthId: opUser.authUserId,
+    operatorSessionToken: opSession.sessionToken,
+    env: testEnv,
+  });
+
+  assert.equal(dryRunResult.success, true);
+  assert.equal(dryRunResult.dryRun, true);
+
+  // Post-snapshot counts
+  const countWalletsAfter = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.wallets",
+  );
+  const countJobsAfter = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.wallet_provisioning_jobs",
+  );
+  const countAuthsAfter = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.provider_compatibility_authorizations",
+  );
+  const countSessionsAfter = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.auth_sessions",
+  );
+  const countOpsAfter = await pool.query(
+    "SELECT COUNT(*)::int as count FROM flow.custody_operators",
+  );
+
+  assert.equal(
+    countWalletsAfter.rows[0]!.count,
+    countWalletsBefore.rows[0]!.count,
+  );
+  assert.equal(countJobsAfter.rows[0]!.count, countJobsBefore.rows[0]!.count);
+  assert.equal(countAuthsAfter.rows[0]!.count, countAuthsBefore.rows[0]!.count);
+  assert.equal(
+    countSessionsAfter.rows[0]!.count,
+    countSessionsBefore.rows[0]!.count,
+  );
+  assert.equal(countOpsAfter.rows[0]!.count, countOpsBefore.rows[0]!.count);
+});
+
+test("M2 Phase 5.4 Adversarial Test: Missing compatibility authorization cannot be auto-created during rehearsal", async () => {
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const targetAcc = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "no-autocreate-acc",
+  );
+  const opUser = await createTestAccount(pool, "PERSONAL", "no-autocreate-op");
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: opUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: targetAcc.authUserId,
+  });
+
+  const opSession = await createOperatorSession(operatorDb, opUser.authUserId);
+
+  const fixture = await createOutLayerMockServer({ policyState: "none" });
+
+  try {
+    const testEnv: Record<string, string | undefined> = {
+      ...process.env,
+      FLOW_ENV: "test",
+      FLOW_EXECUTION: "disabled",
+      FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+      FLOW_PROVIDER_COMPATIBILITY_TOKEN: "valid_test_token_12345678",
+      FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: targetAcc.accountId,
+      FLOW_WALLET_PROVIDER: "outlayer",
+      FLOW_WALLET_ENCRYPTION_KEY:
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      FLOW_WALLET_KEY_ID: "v1",
+      FLOW_OUTLAYER_API_URL: fixture.url,
+      FLOW_CUSTODY_OPERATOR_AUTH_ID: opUser.authUserId,
+      FLOW_CUSTODY_OPERATOR_SESSION_TOKEN: opSession.sessionToken,
+    };
+
+    // Attempting live rehearsal without prior authorization MUST FAIL with CUSTODY_OPERATOR_AUTHORIZATION_ERROR
+    await assert.rejects(
+      runTestnetRehearsal({
+        dryRun: false,
+        accountId: targetAcc.accountId,
+        operatorAuthId: opUser.authUserId,
+        operatorSessionToken: opSession.sessionToken,
+        offlineTestMode: true,
+        env: testEnv,
+      }),
+      { code: "CUSTODY_OPERATOR_AUTHORIZATION_ERROR" },
+    );
+
+    // Verify NO authorization record was auto-created in database
+    const authCount = await operatorPool.query(
+      "SELECT COUNT(*)::int as count FROM flow.provider_compatibility_authorizations WHERE singleton_scope = 'GLOBAL_TESTNET_REHEARSAL'",
+    );
+    assert.equal(authCount.rows[0]!.count, 0);
+
+    // Verify NO job was created
+    const jobCount = await pool.query(
+      "SELECT COUNT(*)::int as count FROM flow.wallet_provisioning_jobs WHERE account_id = $1::uuid",
+      [targetAcc.accountId],
+    );
+    assert.equal(jobCount.rows[0]!.count, 0);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("M2 Phase 5.4 Adversarial Test: Forged operator IDs without session proof or key are strictly rejected", async () => {
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const targetAcc = await createTestAccount(pool, "PERSONAL", "forged-op-acc");
+  const legitOp = await createTestAccount(pool, "PERSONAL", "legit-op-user");
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: legitOp.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: targetAcc.authUserId,
+  });
+
+  // 1. Direct deriveOperatorContext with only operatorAuthId (no sessionToken, no key) fails
+  await assert.rejects(
+    deriveOperatorContext(operatorDb, {
+      operatorAuthId: legitOp.authUserId,
+    }),
+    { code: "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED" },
+  );
+
+  // 2. createRehearsalAuthorization without session token or key fails
+  await assert.rejects(
+    createRehearsalAuthorization({
+      accountId: targetAcc.accountId,
+      operatorAuthId: legitOp.authUserId,
+      env: {
+        ...process.env,
+        FLOW_ENV: "test",
+        FLOW_EXECUTION: "disabled",
+        FLOW_CUSTODY_OPERATOR_SESSION_TOKEN: undefined,
+        FLOW_CUSTODY_OPERATOR_SESSION_FILE: undefined,
+        FLOW_OPERATOR_TRUSTED_EXECUTION_KEY: undefined,
+      },
+    }),
+    { code: "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED" },
+  );
+
+  // 3. runTestnetRehearsal with only operatorAuthId fails
+  await assert.rejects(
+    runTestnetRehearsal({
+      dryRun: false,
+      accountId: targetAcc.accountId,
+      operatorAuthId: legitOp.authUserId,
+      env: {
+        ...process.env,
+        FLOW_ENV: "test",
+        FLOW_EXECUTION: "disabled",
+        FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+        FLOW_PROVIDER_COMPATIBILITY_TOKEN: "valid_test_token_12345678",
+        FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: targetAcc.accountId,
+        FLOW_WALLET_PROVIDER: "outlayer",
+        FLOW_WALLET_ENCRYPTION_KEY:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        FLOW_OUTLAYER_API_URL: "https://testnet-api.outlayer.ai",
+        FLOW_CUSTODY_OPERATOR_SESSION_TOKEN: undefined,
+        FLOW_CUSTODY_OPERATOR_SESSION_FILE: undefined,
+        FLOW_OPERATOR_TRUSTED_EXECUTION_KEY: undefined,
+      },
+    }),
+    { code: "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED" },
+  );
+});
+
+test("M2 Phase 5.4 Adversarial Test: Stale, expired, or other-user operator sessions are strictly rejected", async () => {
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const opUser = await createTestAccount(pool, "PERSONAL", "session-victim-op");
+  const otherUser = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "session-attacker",
+  );
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: opUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: otherUser.authUserId,
+  });
+
+  // Expired session for opUser (negative validity creates a session in the past)
+  const expiredSession = await createOperatorSession(
+    operatorDb,
+    opUser.authUserId,
+    -60,
+  );
+
+  await assert.rejects(
+    deriveOperatorContext(operatorDb, {
+      operatorAuthId: opUser.authUserId,
+      sessionToken: expiredSession.sessionToken,
+    }),
+    { code: "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED" },
+  );
+
+  // Valid session for otherUser cannot authenticate as opUser
+  const otherSession = await createOperatorSession(
+    operatorDb,
+    otherUser.authUserId,
+  );
+  await assert.rejects(
+    deriveOperatorContext(operatorDb, {
+      operatorAuthId: opUser.authUserId,
+      sessionToken: otherSession.sessionToken,
+    }),
+    { code: "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED" },
+  );
+});
+
+test("M2 Phase 5.4 Adversarial Test: Malformed or non-canonical testnet coordinator URLs are strictly rejected", async () => {
+  const targetAcc = await createTestAccount(pool, "PERSONAL", "url-test-acc");
+  const opUser = await createTestAccount(pool, "PERSONAL", "url-test-op");
+
+  const malformedUrls = [
+    "https://attacker.com/testnet-api.outlayer.ai",
+    "https://testnet-api.outlayer.ai.attacker.com",
+    "https://api.outlayer.ai",
+    "http://testnet-api.outlayer.ai",
+    "http://127.0.0.1:8080",
+  ];
+
+  for (const badUrl of malformedUrls) {
+    const badEnv = {
+      ...process.env,
+      FLOW_ENV: "local",
+      FLOW_EXECUTION: "disabled",
+      FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+      FLOW_WALLET_PROVIDER: "outlayer",
+      FLOW_WALLET_ENCRYPTION_KEY:
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      FLOW_OUTLAYER_API_URL: badUrl,
+      FLOW_CUSTODY_OPERATOR_AUTH_ID: opUser.authUserId,
+    };
+
+    await assert.rejects(
+      runTestnetRehearsal({
+        dryRun: true,
+        accountId: targetAcc.accountId,
+        operatorAuthId: opUser.authUserId,
+        env: badEnv,
+      }),
+      (err: unknown) =>
+        err instanceof FlowError && err.code === "INVALID_CONFIGURATION",
+      `Expected ${badUrl} to be rejected with INVALID_CONFIGURATION`,
+    );
+  }
+});
+
+test("M2 Phase 5.4 Adversarial Test: Target accounts with existing wallets (any status) or prior provisioning jobs are strictly rejected", async () => {
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const targetAccWithWallet = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "existing-wallet-acc",
+  );
+  const targetAccWithJob = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "existing-job-acc",
+  );
+  const opUser = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "existing-wallet-op",
+  );
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: opUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: targetAccWithWallet.authUserId,
+  });
+
+  const opSession = await createOperatorSession(operatorDb, opUser.authUserId);
+
+  // 1. Insert wallet with status 'PROVISIONING' (not ACTIVE) for targetAccWithWallet
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      account_id, provider, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state, environment
+    ) VALUES (
+      $1::uuid, 'OUTLAYER', 'pw_existing_123', 'existing.near',
+      'v1:sensitive', 'v1', 'key_digest_123', 'PROVISIONING', 'none', 'testnet'
+    )`,
+    [targetAccWithWallet.accountId],
+  );
+
+  const testEnvWithWallet = {
+    ...process.env,
+    FLOW_ENV: "test",
+    FLOW_EXECUTION: "disabled",
+    FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+    FLOW_PROVIDER_COMPATIBILITY_TOKEN: "valid_test_token_12345678",
+    FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: targetAccWithWallet.accountId,
+    FLOW_WALLET_PROVIDER: "outlayer",
+    FLOW_WALLET_ENCRYPTION_KEY:
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    FLOW_OUTLAYER_API_URL: "https://testnet-api.outlayer.ai",
+    FLOW_CUSTODY_OPERATOR_AUTH_ID: opUser.authUserId,
+    FLOW_CUSTODY_OPERATOR_SESSION_TOKEN: opSession.sessionToken,
+  };
+
+  // createRehearsalAuthorization must REJECT targetAccWithWallet
+  await assert.rejects(
+    createRehearsalAuthorization({
+      accountId: targetAccWithWallet.accountId,
+      operatorAuthId: opUser.authUserId,
+      operatorSessionToken: opSession.sessionToken,
+      env: testEnvWithWallet,
+    }),
+    { code: "INVALID_CONFIGURATION" },
+  );
+
+  // runTestnetRehearsal (dryRun: false) must REJECT targetAccWithWallet
+  await assert.rejects(
+    runTestnetRehearsal({
+      dryRun: false,
+      accountId: targetAccWithWallet.accountId,
+      operatorAuthId: opUser.authUserId,
+      operatorSessionToken: opSession.sessionToken,
+      env: testEnvWithWallet,
+    }),
+    { code: "INVALID_CONFIGURATION" },
+  );
+
+  // 2. Insert provisioning job with status 'UNKNOWN' for targetAccWithJob
+  await workerPool.query(
+    `INSERT INTO flow.wallet_provisioning_jobs (
+      account_id, idempotency_key, status, failure_classification, fencing_token
+    ) VALUES (
+      $1::uuid, $2::uuid, 'UNKNOWN', 'POST_DISPATCH_AMBIGUOUS', 1
+    )`,
+    [targetAccWithJob.accountId, randomUUID()],
+  );
+
+  const testEnvWithJob = {
+    ...process.env,
+    FLOW_ENV: "test",
+    FLOW_EXECUTION: "disabled",
+    FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+    FLOW_PROVIDER_COMPATIBILITY_TOKEN: "valid_test_token_12345678",
+    FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: targetAccWithJob.accountId,
+    FLOW_WALLET_PROVIDER: "outlayer",
+    FLOW_WALLET_ENCRYPTION_KEY:
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    FLOW_OUTLAYER_API_URL: "https://testnet-api.outlayer.ai",
+    FLOW_CUSTODY_OPERATOR_AUTH_ID: opUser.authUserId,
+    FLOW_CUSTODY_OPERATOR_SESSION_TOKEN: opSession.sessionToken,
+  };
+
+  // createRehearsalAuthorization must REJECT targetAccWithJob
+  await assert.rejects(
+    createRehearsalAuthorization({
+      accountId: targetAccWithJob.accountId,
+      operatorAuthId: opUser.authUserId,
+      operatorSessionToken: opSession.sessionToken,
+      env: testEnvWithJob,
+    }),
+    { code: "INVALID_CONFIGURATION" },
+  );
+
+  // runTestnetRehearsal (dryRun: false) must REJECT targetAccWithJob
+  await assert.rejects(
+    runTestnetRehearsal({
+      dryRun: false,
+      accountId: targetAccWithJob.accountId,
+      operatorAuthId: opUser.authUserId,
+      operatorSessionToken: opSession.sessionToken,
+      env: testEnvWithJob,
+    }),
+    { code: "INVALID_CONFIGURATION" },
+  );
 });

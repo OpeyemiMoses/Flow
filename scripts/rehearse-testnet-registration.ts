@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { readConfig } from "../src/foundation/environment.ts";
 import { FlowError } from "../src/foundation/errors.ts";
@@ -17,6 +18,7 @@ import {
   deriveOperatorContext,
   ensureProvisioningJobForAccount,
   getAccountWalletPublicProjection,
+  type AuthenticatedOperatorContext,
 } from "../src/server/custody/job-repository.ts";
 import { OutLayerAdapter } from "../src/server/custody/outlayer-adapter.ts";
 import { WalletProvisioningWorker } from "../src/server/custody/provisioning-worker.ts";
@@ -28,9 +30,14 @@ export interface RehearsalPreflightReport {
   readonly targetUrl: string;
   readonly operatorAuthId: string;
   readonly operatorRole: string;
+  readonly operatorAuthenticated: boolean;
   readonly targetAccountId: string;
+  readonly targetAccountClean: boolean;
   readonly authorizationId?: string;
   readonly authorizationStatus?: string;
+  readonly authorizationValid?: boolean;
+  readonly prerequisitesSatisfied: boolean;
+  readonly missingPrerequisites: readonly string[];
 }
 
 export interface RehearsalExecutionResult {
@@ -46,18 +53,271 @@ export interface RehearsalExecutionResult {
   readonly budgetExceededPrevented?: boolean;
 }
 
-export async function runTestnetRehearsal(options?: {
+export interface RunTestnetRehearsalOptions {
   readonly dryRun?: boolean;
+  readonly accountId?: string;
   readonly operatorAuthId?: string;
   readonly operatorSessionToken?: string;
-  readonly accountId?: string;
+  readonly operatorSessionTokenFile?: string;
+  readonly trustedExecutionKey?: string;
   readonly customAdapter?: OutLayerAdapter;
+  readonly offlineTestMode?: boolean;
   readonly env?: Record<string, string | undefined>;
-}): Promise<RehearsalExecutionResult> {
+}
+
+export function resolveOperatorProof(
+  env: Record<string, string | undefined>,
+  options?: {
+    readonly operatorSessionToken?: string;
+    readonly operatorSessionTokenFile?: string;
+    readonly trustedExecutionKey?: string;
+  },
+): {
+  sessionToken?: string;
+  trustedExecutionKey?: string;
+} {
+  // 1. Explicit option passed programmatically or via CLI
+  if (
+    options?.operatorSessionToken &&
+    options.operatorSessionToken.trim().length > 0
+  ) {
+    return { sessionToken: options.operatorSessionToken.trim() };
+  }
+
+  // 2. Read from secure session token file (recommended to avoid process argument exposure)
+  const tokenFilePath =
+    options?.operatorSessionTokenFile ?? env.FLOW_CUSTODY_OPERATOR_SESSION_FILE;
+  if (tokenFilePath && tokenFilePath.trim().length > 0) {
+    if (!existsSync(tokenFilePath.trim())) {
+      throw new FlowError(
+        "INVALID_CONFIGURATION",
+        `Operator session token file does not exist: ${tokenFilePath.trim()}`,
+      );
+    }
+    try {
+      const content = readFileSync(tokenFilePath.trim(), "utf8").trim();
+      if (content.length > 0) {
+        return { sessionToken: content };
+      }
+    } catch {
+      throw new FlowError(
+        "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
+        `Failed to read operator session token from file: ${tokenFilePath.trim()}`,
+      );
+    }
+  }
+
+  // 3. Read from environment variable
+  if (
+    env.FLOW_CUSTODY_OPERATOR_SESSION_TOKEN &&
+    env.FLOW_CUSTODY_OPERATOR_SESSION_TOKEN.trim().length > 0
+  ) {
+    return { sessionToken: env.FLOW_CUSTODY_OPERATOR_SESSION_TOKEN.trim() };
+  }
+
+  // 4. Trusted execution key from options or environment
+  const executionKey =
+    options?.trustedExecutionKey ?? env.FLOW_OPERATOR_TRUSTED_EXECUTION_KEY;
+  if (executionKey && executionKey.trim().length > 0) {
+    return { trustedExecutionKey: executionKey.trim() };
+  }
+
+  return {};
+}
+
+export interface CreateRehearsalAuthorizationOptions {
+  readonly accountId?: string;
+  readonly operatorAuthId?: string;
+  readonly operatorSessionToken?: string;
+  readonly operatorSessionTokenFile?: string;
+  readonly trustedExecutionKey?: string;
+  readonly validityMinutes?: number;
+  readonly env?: Record<string, string | undefined>;
+}
+
+/**
+ * Creates the single-use compatibility authorization record explicitly.
+ * This is an operator-initiated write action separated cleanly from rehearsal execution.
+ */
+export async function createRehearsalAuthorization(
+  options?: CreateRehearsalAuthorizationOptions,
+): Promise<{
+  readonly id: string;
+  readonly expiresAt: Date;
+  readonly accountId: string;
+  readonly operatorAuthId: string;
+}> {
+  const env = options?.env ?? process.env;
+
+  // 1. Environment & execution guard
+  const { environment, execution } = readConfig(env, "operator");
+  if (environment !== "local" && environment !== "test") {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Creating testnet authorization is only permitted in local or test environments (current: ${environment}).`,
+    );
+  }
+  if (execution !== "disabled") {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Creating testnet authorization strictly requires FLOW_EXECUTION=disabled (current: ${execution}).`,
+    );
+  }
+
+  const operatorDb = getPrismaClient("operator");
+
+  // 2. Resolve target account ID
+  const accountId =
+    options?.accountId ?? env.FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID;
+  if (!accountId) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      "Account ID is required to create compatibility authorization via --account-id or FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID.",
+    );
+  }
+
+  // 3. Validate target account: must be PERSONAL, no wallets, no jobs
+  const accounts = await operatorDb.$queryRaw<
+    Array<{ id: string; kind: string }>
+  >`
+    SELECT id, kind::text as kind FROM flow.accounts WHERE id = ${accountId}::uuid
+  `;
+  if (!accounts[0]) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Target account ${accountId} does not exist in flow.accounts.`,
+    );
+  }
+  if (accounts[0].kind !== "PERSONAL") {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Target account must be PERSONAL, got ${accounts[0].kind}.`,
+    );
+  }
+
+  const existingWallets = await operatorDb.$queryRaw<
+    Array<{ id: string; status: string }>
+  >`
+    SELECT id, status::text as status FROM flow.wallets WHERE account_id = ${accountId}::uuid
+  `;
+  if (existingWallets.length > 0) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Account ${accountId} already possesses a wallet record in flow.wallets (status: ${existingWallets[0]!.status}). Rehearsal must target an unprovisioned test account.`,
+    );
+  }
+
+  const existingJobs = await operatorDb.$queryRaw<
+    Array<{ id: string; status: string }>
+  >`
+    SELECT id, status::text as status FROM flow.wallet_provisioning_jobs WHERE account_id = ${accountId}::uuid
+  `;
+  if (existingJobs.length > 0) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Account ${accountId} already possesses a wallet provisioning job in flow.wallet_provisioning_jobs (status: ${existingJobs[0]!.status}). Rehearsal must target an unprovisioned test account.`,
+    );
+  }
+
+  // 4. Resolve operator authentication
+  const operatorAuthId =
+    options?.operatorAuthId ?? env.FLOW_CUSTODY_OPERATOR_AUTH_ID;
+  if (!operatorAuthId) {
+    throw new FlowError(
+      "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
+      "Operator authentication required via --operator-id or FLOW_CUSTODY_OPERATOR_AUTH_ID.",
+    );
+  }
+
+  const proof = resolveOperatorProof(env, options);
+  if (!proof.sessionToken && !proof.trustedExecutionKey) {
+    throw new FlowError(
+      "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
+      "Operator authentication proof required: provide valid session token via FLOW_CUSTODY_OPERATOR_SESSION_TOKEN, --session-token-file, or FLOW_CUSTODY_OPERATOR_SESSION_FILE.",
+    );
+  }
+
+  const operatorContext = await deriveOperatorContext(operatorDb, {
+    operatorAuthId,
+    sessionToken: proof.sessionToken,
+    trustedExecutionProof: proof.trustedExecutionKey
+      ? { executionKey: proof.trustedExecutionKey }
+      : undefined,
+  });
+
+  // 5. Check existing singleton authorization
+  const existingAuthorizations = await operatorDb.$queryRaw<
+    Array<{
+      id: string;
+      status: string;
+      accountId: string;
+      expiresAt: Date;
+    }>
+  >`
+    SELECT id, status, account_id AS "accountId", expires_at AS "expiresAt"
+    FROM flow.provider_compatibility_authorizations
+    WHERE singleton_scope = 'GLOBAL_TESTNET_REHEARSAL'
+  `;
+
+  if (existingAuthorizations[0]) {
+    const existing = existingAuthorizations[0];
+    if (existing.status !== "AUTHORIZED") {
+      throw new FlowError(
+        "CUSTODY_REGISTRATION_BUDGET_EXCEEDED",
+        `Provider compatibility authorization is already ${existing.status}. Quota reset or re-creation is strictly prohibited.`,
+      );
+    }
+    if (existing.accountId !== accountId) {
+      throw new FlowError(
+        "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+        `An active compatibility authorization already exists for another account (${existing.accountId}).`,
+      );
+    }
+    return {
+      id: existing.id,
+      expiresAt: existing.expiresAt,
+      accountId: existing.accountId,
+      operatorAuthId: operatorContext.operatorAuthId,
+    };
+  }
+
+  // 6. Create the single-use compatibility authorization record
+  const created = await createCompatibilityAuthorization(operatorDb, {
+    accountId,
+    environment: "testnet",
+    operatorAuthId: operatorContext.operatorAuthId,
+    operatorContext,
+    validityMinutes: options?.validityMinutes ?? 60,
+  });
+
+  log("info", "testnet_rehearsal_authorization_created", {
+    authorizationId: created.id,
+    accountId,
+    operatorAuthId: operatorContext.operatorAuthId,
+    environment: "testnet",
+  });
+
+  return {
+    id: created.id,
+    expiresAt: created.expiresAt,
+    accountId,
+    operatorAuthId: operatorContext.operatorAuthId,
+  };
+}
+
+/**
+ * Runs the deterministic OutLayer testnet registration rehearsal.
+ * In --dry-run mode, inspects prerequisites with ZERO writes and ZERO external mutation calls.
+ * In live mode, requires existing authorization and clean unprovisioned account.
+ */
+export async function runTestnetRehearsal(
+  options?: RunTestnetRehearsalOptions,
+): Promise<RehearsalExecutionResult> {
   const env = options?.env ?? process.env;
   const dryRun = options?.dryRun ?? false;
+  const missingPrerequisites: string[] = [];
 
-  // 1. Validate environment & strict execution guard
+  // 1. Environment & strict execution guard
   const { environment, execution } = readConfig(env, "operator");
   if (environment !== "local" && environment !== "test") {
     throw new FlowError(
@@ -72,19 +332,31 @@ export async function runTestnetRehearsal(options?: {
     );
   }
 
-  // 2. Validate wallet configuration and testnet endpoint
+  // 2. Validate wallet configuration and testnet endpoint (Requirement 7)
   const walletConfig = readWalletConfig(env);
   const targetUrl = walletConfig.apiUrl;
-  const isTestnetUrl =
-    targetUrl === OUTLAYER_TESTNET_API_URL ||
-    targetUrl.includes("testnet-api.outlayer.ai") ||
-    targetUrl.includes("127.0.0.1") ||
-    targetUrl.includes("localhost");
+  const isOfflineTestMode =
+    Boolean(options?.offlineTestMode) ||
+    Boolean(options?.customAdapter) ||
+    env.FLOW_OFFLINE_TEST_MODE === "1" ||
+    (env.FLOW_ENV === "test" && Boolean(options?.customAdapter));
 
-  if (!isTestnetUrl) {
+  const isExactCanonicalTestnet = targetUrl === OUTLAYER_TESTNET_API_URL;
+  const isLoopback =
+    targetUrl.startsWith("http://127.0.0.1:") ||
+    targetUrl.startsWith("http://localhost:") ||
+    targetUrl === "http://127.0.0.1" ||
+    targetUrl === "http://localhost";
+
+  let testnetUrlVerified = false;
+  if (isExactCanonicalTestnet) {
+    testnetUrlVerified = true;
+  } else if (isOfflineTestMode && isLoopback) {
+    testnetUrlVerified = true;
+  } else {
     throw new FlowError(
       "INVALID_CONFIGURATION",
-      `Testnet rehearsal strictly requires coordinator URL https://testnet-api.outlayer.ai (got ${targetUrl}). Mainnet coordinator is strictly prohibited.`,
+      `Testnet rehearsal strictly requires coordinator URL https://testnet-api.outlayer.ai (got ${targetUrl}). Substring matching, arbitrary hosts, and unapproved loopback are strictly prohibited.`,
     );
   }
 
@@ -98,128 +370,318 @@ export async function runTestnetRehearsal(options?: {
   const operatorDb = getPrismaClient("operator");
   const workerDb = getPrismaClient("worker");
 
-  // 3. Authenticate and derive operator context
+  // 3. Authenticate and derive operator context (Requirements 4, 5, 6)
   const operatorAuthId =
     options?.operatorAuthId ??
     env.FLOW_CUSTODY_OPERATOR_AUTH_ID ??
     walletConfig.compatibility.authorizedToken;
 
   if (!operatorAuthId) {
-    throw new FlowError(
-      "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
-      "Rehearsal requires an authenticated operator ID via --operator-id or FLOW_CUSTODY_OPERATOR_AUTH_ID.",
-    );
+    if (dryRun) {
+      missingPrerequisites.push("OPERATOR_IDENTITY_REQUIRED");
+    } else {
+      throw new FlowError(
+        "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
+        "Rehearsal requires an authenticated operator ID via --operator-id or FLOW_CUSTODY_OPERATOR_AUTH_ID.",
+      );
+    }
   }
 
-  const operatorContext = await deriveOperatorContext(operatorDb, {
-    operatorAuthId,
-    sessionToken: options?.operatorSessionToken,
-  });
+  const proof = resolveOperatorProof(env, options);
+  let operatorContext: AuthenticatedOperatorContext | undefined;
+  let operatorAuthenticated = false;
+  let operatorRole = "UNAUTHENTICATED";
 
-  // 4. Validate isolated target account
+  if (operatorAuthId) {
+    if (!proof.sessionToken && !proof.trustedExecutionKey) {
+      if (dryRun) {
+        missingPrerequisites.push("OPERATOR_AUTHENTICATION_PROOF_REQUIRED");
+      } else {
+        throw new FlowError(
+          "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
+          "Operator authentication proof required: provide valid session token via FLOW_CUSTODY_OPERATOR_SESSION_TOKEN, --session-token-file, or FLOW_CUSTODY_OPERATOR_SESSION_FILE.",
+        );
+      }
+    } else {
+      try {
+        operatorContext = await deriveOperatorContext(operatorDb, {
+          operatorAuthId,
+          sessionToken: proof.sessionToken,
+          trustedExecutionProof: proof.trustedExecutionKey
+            ? { executionKey: proof.trustedExecutionKey }
+            : undefined,
+        });
+        operatorAuthenticated = true;
+        operatorRole = operatorContext.role;
+      } catch (err) {
+        if (dryRun) {
+          missingPrerequisites.push(
+            err instanceof FlowError
+              ? err.code
+              : "OPERATOR_AUTHENTICATION_FAILED",
+          );
+        } else {
+          throw err;
+        }
+      }
+    }
+  }
+
+  // 4. Validate isolated target account (Requirement 9)
   const accountId =
     options?.accountId ??
     walletConfig.compatibility.isolatedAccountId ??
     env.FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID;
 
+  let targetAccountClean = false;
+
   if (!accountId) {
-    throw new FlowError(
-      "INVALID_CONFIGURATION",
-      "Rehearsal requires an isolated account ID via --account-id or FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID.",
-    );
+    if (dryRun) {
+      missingPrerequisites.push("TARGET_ACCOUNT_ID_REQUIRED");
+    } else {
+      throw new FlowError(
+        "INVALID_CONFIGURATION",
+        "Rehearsal requires an isolated account ID via --account-id or FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID.",
+      );
+    }
+  } else {
+    const accounts = await operatorDb.$queryRaw<
+      Array<{ id: string; kind: string }>
+    >`
+      SELECT id, kind::text as kind FROM flow.accounts WHERE id = ${accountId}::uuid
+    `;
+    if (!accounts[0]) {
+      if (dryRun) {
+        missingPrerequisites.push("TARGET_ACCOUNT_NOT_FOUND");
+      } else {
+        throw new FlowError(
+          "INVALID_CONFIGURATION",
+          `Rehearsal target account ${accountId} does not exist in flow.accounts.`,
+        );
+      }
+    } else if (accounts[0].kind !== "PERSONAL") {
+      if (dryRun) {
+        missingPrerequisites.push("TARGET_ACCOUNT_NOT_PERSONAL");
+      } else {
+        throw new FlowError(
+          "INVALID_CONFIGURATION",
+          `Rehearsal target account must be PERSONAL, got ${accounts[0].kind}.`,
+        );
+      }
+    } else {
+      // Requirement 9: Reject ANY existing wallet (not only ACTIVE)
+      const existingWallets = await operatorDb.$queryRaw<
+        Array<{ id: string; status: string }>
+      >`
+        SELECT id, status::text as status FROM flow.wallets WHERE account_id = ${accountId}::uuid
+      `;
+      if (existingWallets.length > 0) {
+        if (dryRun) {
+          missingPrerequisites.push("ACCOUNT_HAS_EXISTING_WALLET");
+        } else {
+          throw new FlowError(
+            "INVALID_CONFIGURATION",
+            `Account ${accountId} already possesses a wallet record in flow.wallets (status: ${existingWallets[0]!.status}). Rehearsal must target a clean, unprovisioned test account.`,
+          );
+        }
+      }
+
+      // Requirement 9: Reject ANY existing/prior provisioning job
+      const existingJobs = await operatorDb.$queryRaw<
+        Array<{ id: string; status: string }>
+      >`
+        SELECT id, status::text as status FROM flow.wallet_provisioning_jobs WHERE account_id = ${accountId}::uuid
+      `;
+      if (existingJobs.length > 0) {
+        if (dryRun) {
+          missingPrerequisites.push("ACCOUNT_HAS_EXISTING_PROVISIONING_JOB");
+        } else {
+          throw new FlowError(
+            "INVALID_CONFIGURATION",
+            `Account ${accountId} already possesses a wallet provisioning job in flow.wallet_provisioning_jobs (status: ${existingJobs[0]!.status}). Rehearsal must target a clean, unprovisioned test account.`,
+          );
+        }
+      }
+
+      if (existingWallets.length === 0 && existingJobs.length === 0) {
+        targetAccountClean = true;
+      }
+    }
   }
 
-  const accounts = await operatorDb.$queryRaw<
-    Array<{ id: string; kind: string }>
-  >`
-    SELECT id, kind::text as kind FROM flow.accounts WHERE id = ${accountId}::uuid
-  `;
-  if (!accounts[0]) {
-    throw new FlowError(
-      "INVALID_CONFIGURATION",
-      `Rehearsal target account ${accountId} does not exist in flow.accounts.`,
-    );
-  }
-  if (accounts[0].kind !== "PERSONAL") {
-    throw new FlowError(
-      "INVALID_CONFIGURATION",
-      `Rehearsal target account must be PERSONAL, got ${accounts[0].kind}.`,
-    );
-  }
-
-  // Verify account does NOT already have an active wallet
-  const existingWallets = await operatorDb.$queryRaw<
-    Array<{ id: string; status: string }>
-  >`
-    SELECT id, status::text as status FROM flow.wallets WHERE account_id = ${accountId}::uuid
-  `;
-  if (
-    existingWallets.length > 0 &&
-    existingWallets.some((w) => w.status === "ACTIVE")
-  ) {
-    throw new FlowError(
-      "INVALID_CONFIGURATION",
-      `Account ${accountId} already possesses an ACTIVE wallet. Rehearsal must target an unprovisioned test account.`,
-    );
-  }
-
-  // 5. Check or create durable compatibility authorization record
+  // 5. Inspect existing durable compatibility authorization (Requirements 1, 2, 3, 8, 10)
+  // NO AUTO-CREATION: authorization MUST be created separately by operator beforehand.
   const authorizations = await operatorDb.$queryRaw<
     Array<{
       id: string;
       status: string;
+      accountId: string;
+      environment: string;
+      allowedMethods: string[];
+      authorizedByOperatorId: string;
       maxRegistrations: number;
       registrationsAttempted: number;
       registrationsCompleted: number;
+      expiresAt: Date;
     }>
   >`
-    SELECT id, status, max_registrations AS "maxRegistrations",
+    SELECT id, status, account_id AS "accountId", environment,
+           allowed_methods AS "allowedMethods",
+           authorized_by_operator_id AS "authorizedByOperatorId",
+           max_registrations AS "maxRegistrations",
            registrations_attempted AS "registrationsAttempted",
-           registrations_completed AS "registrationsCompleted"
+           registrations_completed AS "registrationsCompleted",
+           expires_at AS "expiresAt"
     FROM flow.provider_compatibility_authorizations
     WHERE singleton_scope = 'GLOBAL_TESTNET_REHEARSAL'
   `;
 
-  let authorizationId = authorizations[0]?.id;
-  let authorizationStatus = authorizations[0]?.status;
+  const auth = authorizations[0];
+  const authorizationId: string | undefined = auth?.id;
+  const authorizationStatus: string | undefined = auth?.status;
+  let authorizationValid = false;
 
-  if (!authorizations[0]) {
-    // Automatically create the singleton testnet authorization if authorized by operator
-    const created = await createCompatibilityAuthorization(operatorDb, {
-      accountId,
-      environment: "testnet",
-      operatorAuthId: operatorContext.operatorAuthId,
-      operatorContext,
-      validityMinutes: 60,
-    });
-    authorizationId = created.id;
-    authorizationStatus = "AUTHORIZED";
-  } else if (authorizations[0].status !== "AUTHORIZED") {
-    throw new FlowError(
-      "CUSTODY_REGISTRATION_BUDGET_EXCEEDED",
-      `Provider compatibility authorization is ${authorizations[0].status} (attempted: ${authorizations[0].registrationsAttempted}, completed: ${authorizations[0].registrationsCompleted}). Re-use or reset is strictly prohibited.`,
-    );
-  }
+  if (!auth) {
+    if (dryRun) {
+      missingPrerequisites.push("COMPATIBILITY_AUTHORIZATION_MISSING");
+    } else {
+      throw new FlowError(
+        "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+        "Provider compatibility authorization not found. An authorized operator must create it separately before running live rehearsal.",
+      );
+    }
+  } else {
+    // Check all properties (Requirement 8 & 10)
+    let authValid = true;
 
-  if (!authorizationId) {
-    throw new FlowError(
-      "INVALID_CONFIGURATION",
-      "Failed to obtain or create provider compatibility authorization.",
+    // Available budget check (must be checked first - if budget is consumed, no further rehearsal is authorized)
+    if (auth.status !== "AUTHORIZED") {
+      authValid = false;
+      if (dryRun) {
+        missingPrerequisites.push(`AUTHORIZATION_STATUS_${auth.status}`);
+      } else {
+        throw new FlowError(
+          "CUSTODY_REGISTRATION_BUDGET_EXCEEDED",
+          `Provider compatibility authorization status is '${auth.status}' (completed: ${auth.registrationsCompleted}, attempted: ${auth.registrationsAttempted}). Re-use or reset is strictly prohibited.`,
+        );
+      }
+    }
+
+    if (
+      auth.maxRegistrations !== 1 ||
+      auth.registrationsAttempted > 0 ||
+      auth.registrationsCompleted > 0
+    ) {
+      authValid = false;
+      if (dryRun) {
+        missingPrerequisites.push("AUTHORIZATION_BUDGET_EXHAUSTED");
+      } else {
+        throw new FlowError(
+          "CUSTODY_REGISTRATION_BUDGET_EXCEEDED",
+          `Provider compatibility authorization budget exhausted (max: ${auth.maxRegistrations}, attempted: ${auth.registrationsAttempted}, completed: ${auth.registrationsCompleted}).`,
+        );
+      }
+    }
+
+    // Account match check
+    if (accountId && auth.accountId !== accountId) {
+      authValid = false;
+      if (dryRun) {
+        missingPrerequisites.push("AUTHORIZATION_ACCOUNT_MISMATCH");
+      } else {
+        throw new FlowError(
+          "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+          `Compatibility authorization target account (${auth.accountId}) does not match rehearsal account (${accountId}).`,
+        );
+      }
+    }
+
+    // Environment check
+    if (auth.environment !== "testnet") {
+      authValid = false;
+      if (dryRun) {
+        missingPrerequisites.push("AUTHORIZATION_ENVIRONMENT_MISMATCH");
+      } else {
+        throw new FlowError(
+          "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+          `Compatibility authorization environment is '${auth.environment}', expected 'testnet'.`,
+        );
+      }
+    }
+
+    // Expiry check
+    if (new Date(auth.expiresAt).getTime() <= Date.now()) {
+      authValid = false;
+      if (dryRun) {
+        missingPrerequisites.push("AUTHORIZATION_EXPIRED");
+      } else {
+        throw new FlowError(
+          "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+          `Compatibility authorization expired at ${auth.expiresAt.toISOString()}.`,
+        );
+      }
+    }
+
+    // Permitted methods check
+    const requiredMethods = [
+      "POST /register",
+      "GET /wallet/v1/address",
+      "GET /wallet/v1/policy",
+    ];
+    const missingMethods = requiredMethods.filter(
+      (m) => !auth.allowedMethods.includes(m),
     );
+    if (missingMethods.length > 0) {
+      authValid = false;
+      if (dryRun) {
+        missingPrerequisites.push("AUTHORIZATION_PERMITTED_METHODS_INCOMPLETE");
+      } else {
+        throw new FlowError(
+          "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+          `Compatibility authorization missing required methods: ${missingMethods.join(", ")}.`,
+        );
+      }
+    }
+
+    // Operator identity check
+    const authorizingOperator = await operatorDb.$queryRaw<
+      Array<{ id: string }>
+    >`
+      SELECT id FROM flow.auth_users WHERE id = ${auth.authorizedByOperatorId}
+    `;
+    if (!authorizingOperator[0]) {
+      authValid = false;
+      if (dryRun) {
+        missingPrerequisites.push("AUTHORIZATION_OPERATOR_UNKNOWN");
+      } else {
+        throw new FlowError(
+          "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+          `Authorizing operator ${auth.authorizedByOperatorId} does not exist in flow.auth_users.`,
+        );
+      }
+    }
+
+    authorizationValid = authValid;
   }
 
   const preflight: RehearsalPreflightReport = {
     environment,
     executionDisabled: execution === "disabled",
-    testnetUrlVerified: isTestnetUrl,
+    testnetUrlVerified,
     targetUrl,
-    operatorAuthId: operatorContext.operatorAuthId,
-    operatorRole: operatorContext.role,
-    targetAccountId: accountId,
+    operatorAuthId: operatorAuthId ?? "UNKNOWN",
+    operatorRole,
+    operatorAuthenticated,
+    targetAccountId: accountId ?? "UNKNOWN",
+    targetAccountClean,
     authorizationId,
     authorizationStatus,
+    authorizationValid,
+    prerequisitesSatisfied: missingPrerequisites.length === 0,
+    missingPrerequisites,
   };
 
+  // 6. Dry run early return: ZERO WRITES WHATSOEVER (Requirements 1 & 2)
   if (dryRun) {
     log("info", "testnet_rehearsal_dry_run_completed", { ...preflight });
     return {
@@ -229,8 +691,23 @@ export async function runTestnetRehearsal(options?: {
     };
   }
 
-  // 6. Execute rehearsal registration via WalletProvisioningWorker
-  await ensureProvisioningJobForAccount(workerDb, accountId, randomUUID());
+  // 7. Live execution pre-condition check
+  if (missingPrerequisites.length > 0) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      `Testnet rehearsal prerequisites not satisfied: ${missingPrerequisites.join(", ")}.`,
+    );
+  }
+
+  if (!authorizationId) {
+    throw new FlowError(
+      "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+      "Missing authorization ID for rehearsal dispatch.",
+    );
+  }
+
+  // 8. Execute rehearsal registration via WalletProvisioningWorker
+  await ensureProvisioningJobForAccount(workerDb, accountId!, randomUUID());
 
   const adapter =
     options?.customAdapter ??
@@ -254,7 +731,7 @@ export async function runTestnetRehearsal(options?: {
     providerEnvironment: "testnet",
   });
 
-  const result = await worker.processAccountJob(accountId);
+  const result = await worker.processAccountJob(accountId!);
 
   if (result.outcome !== "registered" && result.outcome !== "activated") {
     throw new FlowError(
@@ -263,11 +740,10 @@ export async function runTestnetRehearsal(options?: {
     );
   }
 
-  // 7. Verify post-rehearsal invariants
-  // A. Public projection verification
+  // 9. Verify post-rehearsal invariants
   const projection = await getAccountWalletPublicProjection(
     operatorDb,
-    accountId,
+    accountId!,
   );
   if (!projection) {
     throw new FlowError(
@@ -276,7 +752,6 @@ export async function runTestnetRehearsal(options?: {
     );
   }
 
-  // B. Budget exceeded enforcement check: Attempting a second registration MUST fail
   let budgetExceededPrevented = false;
   try {
     await claimCompatibilityRegistration(
@@ -320,8 +795,11 @@ async function main() {
   const { values } = parseArgs({
     options: {
       "dry-run": { type: "boolean", default: false },
+      "create-authorization": { type: "boolean", default: false },
       "account-id": { type: "string" },
       "operator-id": { type: "string" },
+      "session-token": { type: "string" },
+      "session-token-file": { type: "string" },
       help: { type: "boolean", default: false },
     },
     allowPositionals: true,
@@ -334,10 +812,13 @@ Usage: node scripts/rehearse-testnet-registration.ts [options]
 Deterministic one-time OutLayer testnet wallet registration rehearsal.
 
 Options:
-  --dry-run        Validate preflight conditions and database state without making outbound calls.
-  --account-id     Target isolated personal account UUID.
-  --operator-id    Authenticated custody operator auth identifier.
-  --help           Show this help message.
+  --dry-run                 Inspect prerequisites and database readiness with ZERO writes or outbound mutation calls.
+  --create-authorization    Create the single-use compatibility authorization record (explicit operator action).
+  --account-id              Target clean isolated personal account UUID.
+  --operator-id             Authenticated custody operator auth identifier.
+  --session-token-file      Path to file containing operator session token (recommended for security).
+  --session-token           Operator session token (discouraged in shared shells; prefer file or env).
+  --help                    Show this help message.
 `);
     return;
   }
@@ -347,33 +828,70 @@ Options:
   console.log("==========================================================\n");
 
   try {
+    if (values["create-authorization"]) {
+      console.log("Action: CREATE COMPATIBILITY AUTHORIZATION");
+      const auth = await createRehearsalAuthorization({
+        accountId: values["account-id"],
+        operatorAuthId: values["operator-id"],
+        operatorSessionToken: values["session-token"],
+        operatorSessionTokenFile: values["session-token-file"],
+      });
+      console.log(
+        `\n✓ Single-use compatibility authorization created successfully:`,
+      );
+      console.log(` - Authorization ID: ${auth.id}`);
+      console.log(` - Target Account: ${auth.accountId}`);
+      console.log(` - Authorized By: ${auth.operatorAuthId}`);
+      console.log(` - Valid Until: ${auth.expiresAt.toISOString()}\n`);
+      return;
+    }
+
     const result = await runTestnetRehearsal({
       dryRun: values["dry-run"],
       accountId: values["account-id"],
       operatorAuthId: values["operator-id"],
+      operatorSessionToken: values["session-token"],
+      operatorSessionTokenFile: values["session-token-file"],
     });
 
     console.log(
-      `Mode: ${result.dryRun ? "DRY-RUN (Preflight Validation Only)" : "LIVE TESTNET REHEARSAL"}`,
+      `Mode: ${result.dryRun ? "DRY-RUN (Preflight Validation Only - Read Only)" : "LIVE TESTNET REHEARSAL"}`,
     );
     console.log(`Preflight Checks:`);
     console.log(` - Environment: ${result.preflight.environment}`);
     console.log(
       ` - FLOW_EXECUTION: disabled (${result.preflight.executionDisabled ? "VERIFIED" : "FAILED"})`,
     );
-    console.log(` - Coordinator URL: ${result.preflight.targetUrl}`);
     console.log(
-      ` - Operator Identity: ${result.preflight.operatorAuthId} (${result.preflight.operatorRole})`,
+      ` - Coordinator URL: ${result.preflight.targetUrl} (${result.preflight.testnetUrlVerified ? "EXACT_CANONICAL" : "INVALID"})`,
     );
-    console.log(` - Target Account: ${result.preflight.targetAccountId}`);
     console.log(
-      ` - Authorization Singleton: ${result.preflight.authorizationId} (${result.preflight.authorizationStatus})\n`,
+      ` - Operator Identity: ${result.preflight.operatorAuthId} (${result.preflight.operatorRole}, Authenticated: ${result.preflight.operatorAuthenticated})`,
+    );
+    console.log(
+      ` - Target Account: ${result.preflight.targetAccountId} (Clean/Unprovisioned: ${result.preflight.targetAccountClean})`,
+    );
+    console.log(
+      ` - Authorization Singleton: ${result.preflight.authorizationId ?? "NONE"} (Status: ${result.preflight.authorizationStatus ?? "MISSING"}, Valid: ${result.preflight.authorizationValid ?? false})\n`,
     );
 
     if (result.dryRun) {
-      console.log(
-        "✓ Dry-run completed successfully: All testnet rehearsal preflight safety invariants are satisfied.",
-      );
+      if (result.preflight.prerequisitesSatisfied) {
+        console.log(
+          "✓ Dry-run completed successfully: All testnet rehearsal preflight safety invariants are satisfied. ZERO database writes performed.",
+        );
+      } else {
+        console.log(
+          `⚠ Dry-run completed with missing prerequisites (${result.preflight.missingPrerequisites.length}):`,
+        );
+        for (const missing of result.preflight.missingPrerequisites) {
+          console.log(`  - ${missing}`);
+        }
+        console.log(
+          "\nZERO database writes performed. Complete the missing prerequisites before running live rehearsal.",
+        );
+        process.exitCode = 2;
+      }
     } else {
       console.log(`Rehearsal Execution Results:`);
       console.log(` - Wallet ID: ${result.walletId}`);
@@ -392,7 +910,7 @@ Options:
     }
   } catch (error) {
     console.error(
-      `\nx Rehearsal preflight failed: ${error instanceof FlowError ? error.code : "ERROR"} - ${(error as Error).message}\n`,
+      `\nx Rehearsal failed: ${error instanceof FlowError ? error.code : "ERROR"} - ${(error as Error).message}\n`,
     );
     process.exitCode = 1;
   } finally {
