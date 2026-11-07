@@ -36,7 +36,9 @@ import {
   completeCompatibilityRegistration,
   createCompatibilityAuthorization,
   createCustodyRecoveryApproval,
+  createOperatorSession,
   createProvisioningJob,
+  deriveOperatorContext,
   enrollCustodyOperator,
   ensureProvisioningJobForAccount,
   escalateJobToManualReview,
@@ -52,6 +54,7 @@ import {
 import { OutLayerAdapter } from "../src/server/custody/outlayer-adapter.ts";
 import { WalletProvisioningWorker } from "../src/server/custody/provisioning-worker.ts";
 import { createOutLayerMockServer } from "./support/outlayer-fixture.ts";
+import { runTestnetRehearsal } from "../scripts/rehearse-testnet-registration.ts";
 
 assert.equal(
   process.env.FLOW_ENV,
@@ -622,7 +625,7 @@ test("credential isolation: encrypted envelope at rest, plaintext never stored, 
   });
 
   // Verify raw database row has envelope and NO plaintext credential
-  const { rows } = await pool.query<{
+  const { rows } = await workerPool.query<{
     encrypted_credential: string;
     key_id: string;
     key_digest: string;
@@ -731,7 +734,7 @@ test("two-stage provisioning: immediate credential persistence, worker crash rec
   );
 
   // Verify wallet is persisted in SETUP_PENDING and job is in REGISTERED
-  const { rows: wRows } = await pool.query<{
+  const { rows: wRows } = await workerPool.query<{
     status: string;
     policy_state: string;
     encrypted_credential: string;
@@ -782,7 +785,7 @@ test("two-stage provisioning: immediate credential persistence, worker crash rec
   );
 
   // Worker 2 reads existing persisted encrypted credential from DB and decrypts it
-  const { rows: credRows } = await pool.query<{
+  const { rows: credRows } = await workerPool.query<{
     encrypted_credential: string;
   }>("SELECT encrypted_credential FROM flow.wallets WHERE id = $1::uuid", [
     walletId,
@@ -2832,7 +2835,7 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
 
 test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and verifyOperatorInDatabase reject unauthenticated operator IDs", async () => {
   await operatorPool.query(
-    "DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
   );
   // Create real registered auth users for operators
   const secOfficer = await createTestAccount(pool, "PERSONAL", "sec-officer");
@@ -2998,7 +3001,7 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
 
 test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, racing claims, ambiguity consumption, and expiration", async () => {
   await operatorPool.query(
-    "DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
   );
   const acc = await createTestAccount(pool, "PERSONAL", "compat-budget-test");
   const opAuthUser = await createTestAccount(
@@ -3093,7 +3096,7 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
 
   // 5. Successful registration lifecycle: clean up previous singleton before creating next test
   await operatorPool.query(
-    "DELETE FROM flow.provider_compatibility_authorizations",
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.provider_compatibility_authorizations",
   );
   const acc2 = await createTestAccount(pool, "PERSONAL", "compat-success-test");
   const auth2 = await createCompatibilityAuthorization(operatorDb, {
@@ -3124,7 +3127,7 @@ test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, ra
 
   // 6. Expired authorization cannot be claimed: clean up previous singleton first
   await operatorPool.query(
-    "DELETE FROM flow.provider_compatibility_authorizations",
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.provider_compatibility_authorizations",
   );
   const acc3 = await createTestAccount(pool, "PERSONAL", "compat-expired-test");
   const expiredInsert = await operatorPool.query<{ id: string }>(
@@ -3284,7 +3287,7 @@ test("M2 Phase 5.2 Adversarial Test: Database privilege separation blocks permis
 
 test("M2 Phase 5.2 Adversarial Test: Operator self-enrollment, self-approval, approval replay, and correlation mismatch rejection", async () => {
   await operatorPool.query(
-    "DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
   );
   const op1 = await createTestAccount(pool, "PERSONAL", "adv-op1");
   const op2 = await createTestAccount(pool, "PERSONAL", "adv-op2");
@@ -3434,7 +3437,7 @@ test("M2 Phase 5.2 Adversarial Test: Operator self-enrollment, self-approval, ap
 
 test("M2 Phase 5.2 Adversarial Test: Database singleton_scope UNIQUE constraint prevents multiple authorization grants", async () => {
   await operatorPool.query(
-    "DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
   );
   const accA = await createTestAccount(pool, "PERSONAL", "adv-singleton-a");
   const accB = await createTestAccount(pool, "PERSONAL", "adv-singleton-b");
@@ -3457,7 +3460,7 @@ test("M2 Phase 5.2 Adversarial Test: Database singleton_scope UNIQUE constraint 
   });
 
   await operatorPool.query(
-    "DELETE FROM flow.provider_compatibility_authorizations",
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.provider_compatibility_authorizations",
   );
 
   // Create first authorization record
@@ -3492,7 +3495,7 @@ test("M2 Phase 5.2 Adversarial Test: Database singleton_scope UNIQUE constraint 
 
   // Clean up
   await operatorPool.query(
-    "DELETE FROM flow.provider_compatibility_authorizations",
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.provider_compatibility_authorizations",
   );
 });
 
@@ -3561,4 +3564,426 @@ test("M2 Phase 5.2 Testnet wallet projection segregation: never eligible for dep
   assert.equal(mainnetProj.environment, "mainnet");
   assert.equal(mainnetProj.isTestnet, false);
   assert.equal(mainnetProj.depositWarning, null);
+});
+
+test("M2 Phase 5.3 PostgreSQL column-level privilege isolation: app_role cannot select custody secret columns even via direct SQL", async () => {
+  const account = await createTestAccount(pool, "PERSONAL", "col-priv-iso");
+  const walletId = randomUUID();
+
+  // Insert wallet with custody secret columns via workerPool
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state,
+      controller_account_id, environment
+    ) VALUES (
+      $1, $2, 'OUTLAYER', 'pw-sec-test-1', 'sec-test.near',
+      'v1:sensitive_encrypted_credential', 'v1', 'key_digest_123', 'PROVISIONING', 'none',
+      'controller.near', 'testnet'
+    )`,
+    [walletId, account.accountId],
+  );
+
+  // 1. Direct SQL by app role (pool) for encrypted_credential must fail with 42501 (permission denied)
+  await assert.rejects(
+    pool.query("SELECT encrypted_credential FROM flow.wallets WHERE id = $1", [
+      walletId,
+    ]),
+    { code: "42501" },
+  );
+
+  // 2. Direct SQL by app role (pool) for key_id and key_digest must fail with 42501
+  await assert.rejects(
+    pool.query("SELECT key_id, key_digest FROM flow.wallets WHERE id = $1", [
+      walletId,
+    ]),
+    { code: "42501" },
+  );
+
+  // 3. Direct SQL by app role (pool) for SELECT * must fail with 42501
+  await assert.rejects(
+    pool.query("SELECT * FROM flow.wallets WHERE id = $1", [walletId]),
+    { code: "42501" },
+  );
+
+  // 4. Direct SQL by app role (pool) for permitted columns must SUCCEED
+  const permittedResult = await pool.query<{
+    id: string;
+    near_account_id: string;
+    status: string;
+    environment: string;
+  }>(
+    `SELECT id, account_id, provider, environment, provider_wallet_id,
+            near_account_id, status, policy_state, controller_account_id,
+            handoff_url, created_at, updated_at
+     FROM flow.wallets WHERE id = $1`,
+    [walletId],
+  );
+  assert.equal(permittedResult.rows.length, 1);
+  assert.equal(permittedResult.rows[0]!.id, walletId);
+  assert.equal(permittedResult.rows[0]!.near_account_id, "sec-test.near");
+
+  // 5. Querying the safe public view flow.wallet_public_projections as app role must SUCCEED
+  const viewResult = await pool.query<{ id: string; near_account_id: string }>(
+    "SELECT * FROM flow.wallet_public_projections WHERE id = $1",
+    [walletId],
+  );
+  assert.equal(viewResult.rows.length, 1);
+  assert.equal(viewResult.rows[0]!.near_account_id, "sec-test.near");
+
+  // 6. getAccountWalletPublicProjection via appDb works seamlessly without errors
+  const projection = await getAccountWalletPublicProjection(
+    appDb,
+    account.accountId,
+  );
+  assert.ok(projection !== null);
+  assert.equal(projection.id, walletId);
+  assert.equal(projection.nearAccountId, "sec-test.near");
+  assert.equal(projection.environment, "testnet");
+  assert.equal(projection.isTestnet, true);
+  assert.equal(projection.fundsReady, false);
+});
+
+test("M2 Phase 5.3 Permanent durability: DELETE revoked and trigger prevents resetting or tampering with compatibility authorization", async () => {
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const account = await createTestAccount(pool, "PERSONAL", "auth-durability");
+  const secUser = await createTestAccount(pool, "PERSONAL", "sec-durability");
+  const opUser = await createTestAccount(pool, "PERSONAL", "op-durability");
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: secUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: opUser.authUserId,
+  });
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: opUser.authUserId,
+    role: "CUSTODY_OPERATOR",
+    enrolledBy: secUser.authUserId,
+  });
+
+  const auth = await createCompatibilityAuthorization(operatorDb, {
+    accountId: account.accountId,
+    environment: "testnet",
+    operatorAuthId: opUser.authUserId,
+  });
+  assert.ok(auth.id);
+
+  // 1. Worker role CANNOT DELETE from flow.provider_compatibility_authorizations (42501)
+  await assert.rejects(
+    workerPool.query(
+      "DELETE FROM flow.provider_compatibility_authorizations WHERE id = $1",
+      [auth.id],
+    ),
+    { code: "42501" },
+  );
+
+  // 2. App role CANNOT DELETE from flow.provider_compatibility_authorizations (42501)
+  await assert.rejects(
+    pool.query(
+      "DELETE FROM flow.provider_compatibility_authorizations WHERE id = $1",
+      [auth.id],
+    ),
+    { code: "42501" },
+  );
+
+  // Claim and consume the authorization
+  const dispatchAttemptId = randomUUID();
+  await claimCompatibilityRegistration(
+    db,
+    auth.id,
+    "test-worker",
+    dispatchAttemptId,
+  );
+  await completeCompatibilityRegistration(db, auth.id, dispatchAttemptId);
+
+  // 3. Operator CANNOT delete a consumed authorization (42501 - immutability trigger)
+  await assert.rejects(
+    operatorPool.query(
+      "DELETE FROM flow.provider_compatibility_authorizations WHERE id = $1",
+      [auth.id],
+    ),
+    { code: "42501" },
+  );
+
+  // 4. Operator CANNOT reset status back to AUTHORIZED (23514 - trigger check)
+  await assert.rejects(
+    operatorPool.query(
+      "UPDATE flow.provider_compatibility_authorizations SET status = 'AUTHORIZED' WHERE id = $1",
+      [auth.id],
+    ),
+    { code: "23514" },
+  );
+
+  // 5. Operator CANNOT decrement registrations_attempted (23514 - trigger check)
+  await assert.rejects(
+    operatorPool.query(
+      "UPDATE flow.provider_compatibility_authorizations SET registrations_attempted = 0 WHERE id = $1",
+      [auth.id],
+    ),
+    { code: "23514" },
+  );
+
+  // 6. Operator CANNOT tamper with account_id or singleton_scope on consumed authorization (23514)
+  await assert.rejects(
+    operatorPool.query(
+      "UPDATE flow.provider_compatibility_authorizations SET account_id = gen_random_uuid() WHERE id = $1",
+      [auth.id],
+    ),
+    { code: "23514" },
+  );
+
+  // Clean up using test cleanup setting
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+});
+
+test("M2 Phase 5.3 Testnet rehearsal lifecycle: anonymous registration with policy='none' completes with outcome: registered and PROVISIONING status", async () => {
+  const account = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "rehearsal-lifecycle",
+  );
+  const fixture = await createOutLayerMockServer({
+    policyState: "none", // Anonymous registration on testnet has policy='none'
+  });
+
+  try {
+    await ensureProvisioningJobForAccount(db, account.accountId, randomUUID());
+
+    const adapter = new OutLayerAdapter(fixture.url, 5_000);
+    const worker = new WalletProvisioningWorker({
+      db,
+      adapter,
+      walletConfig: {
+        encryptionKey:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        keyId: "v1",
+      },
+      providerEnvironment: "testnet",
+    });
+
+    const result = await worker.processAccountJob(account.accountId);
+    assert.equal(result.outcome, "registered");
+    assert.ok(result.walletId);
+
+    // Verify wallet status is PROVISIONING, NOT ACTIVE
+    const walletRows = await workerPool.query<{
+      status: string;
+      policy_state: string;
+      environment: string;
+    }>(
+      "SELECT status, policy_state, environment FROM flow.wallets WHERE id = $1::uuid",
+      [result.walletId],
+    );
+    assert.equal(walletRows.rows[0]!.status, "PROVISIONING");
+    assert.equal(walletRows.rows[0]!.policy_state, "none");
+    assert.equal(walletRows.rows[0]!.environment, "testnet");
+
+    // Verify job status is PROVISIONED
+    const jobRows = await workerPool.query<{ status: string }>(
+      "SELECT status FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
+      [result.jobId],
+    );
+    assert.equal(jobRows.rows[0]!.status, "PROVISIONED");
+
+    // Verify public projection
+    const projection = await getAccountWalletPublicProjection(
+      appDb,
+      account.accountId,
+    );
+    assert.ok(projection !== null);
+    assert.equal(projection.status, "PROVISIONING");
+    assert.equal(projection.environment, "testnet");
+    assert.equal(projection.isTestnet, true);
+    assert.equal(projection.fundsReady, false);
+    assert.equal(projection.canReceiveFunds, false);
+    assert.equal(projection.canSignTransfers, false);
+    assert.equal(projection.eligibleForDeposits, false);
+    assert.ok(projection.depositWarning !== null);
+  } finally {
+    await fixture.close();
+    await operatorPool.query(
+      "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.provider_compatibility_authorizations;",
+    );
+  }
+});
+
+test("M2 Phase 5.3 Operator identity derivation: requires active custody operator authority and validates session", async () => {
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const normalUser = await createTestAccount(pool, "PERSONAL", "unauthed-user");
+  const targetAcc = await createTestAccount(pool, "PERSONAL", "target-acc");
+
+  // Attempting to create compatibility authorization using a regular user ID lacking operator authority fails
+  await assert.rejects(
+    createCompatibilityAuthorization(operatorDb, {
+      accountId: targetAcc.accountId,
+      environment: "testnet",
+      operatorAuthId: normalUser.authUserId,
+    }),
+    { code: "CUSTODY_OPERATOR_AUTHORIZATION_ERROR" },
+  );
+
+  // Attempting to derive operator context with an invalid session token fails
+  await assert.rejects(
+    deriveOperatorContext(operatorDb, {
+      operatorAuthId: normalUser.authUserId,
+      sessionToken: "invalid_session_token_12345",
+    }),
+    { code: "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED" },
+  );
+
+  // Enroll operator and verify session derivation
+  const secUser = await createTestAccount(pool, "PERSONAL", "sec-sess-user");
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: secUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: normalUser.authUserId,
+  });
+
+  const session = await createOperatorSession(
+    operatorDb,
+    secUser.authUserId,
+    30,
+  );
+  assert.ok(session.sessionId);
+  assert.ok(session.sessionToken);
+
+  const derived = await deriveOperatorContext(operatorDb, {
+    operatorAuthId: secUser.authUserId,
+    sessionToken: session.sessionToken,
+  });
+  assert.equal(derived.operatorAuthId, secUser.authUserId);
+  assert.equal(derived.role, "SECURITY_OFFICER");
+  assert.equal(derived.verificationMethod, "SESSION");
+  assert.equal(derived.sessionId, session.sessionId);
+});
+
+test("M2 Phase 5.3 Deterministic one-time rehearsal command (runTestnetRehearsal): dry-run and simulated provider rehearsal", async () => {
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+  const targetAcc = await createTestAccount(
+    pool,
+    "PERSONAL",
+    "rehearsal-cmd-acc",
+  );
+  const opUser = await createTestAccount(pool, "PERSONAL", "rehearsal-cmd-op");
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: opUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: targetAcc.authUserId,
+  });
+
+  const fixture = await createOutLayerMockServer({
+    policyState: "none",
+  });
+
+  try {
+    const testEnv: Record<string, string | undefined> = {
+      ...process.env,
+      FLOW_ENV: "test",
+      FLOW_EXECUTION: "disabled",
+      FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+      FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: targetAcc.accountId,
+      FLOW_PROVIDER_COMPATIBILITY_TOKEN: "valid_test_token_12345678",
+      FLOW_WALLET_PROVIDER: "outlayer",
+      FLOW_WALLET_ENCRYPTION_KEY:
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      FLOW_WALLET_KEY_ID: "v1",
+      FLOW_OUTLAYER_API_URL: fixture.url,
+      FLOW_CUSTODY_OPERATOR_AUTH_ID: opUser.authUserId,
+    };
+
+    // 1. Dry run
+    const dryRunResult = await runTestnetRehearsal({
+      dryRun: true,
+      accountId: targetAcc.accountId,
+      operatorAuthId: opUser.authUserId,
+      env: testEnv,
+    });
+    assert.equal(dryRunResult.success, true);
+    assert.equal(dryRunResult.dryRun, true);
+    assert.equal(dryRunResult.preflight.executionDisabled, true);
+    assert.equal(dryRunResult.preflight.operatorAuthId, opUser.authUserId);
+
+    // Verify dry run made NO changes to wallets table
+    const noWallets = await workerPool.query(
+      "SELECT id FROM flow.wallets WHERE account_id = $1::uuid",
+      [targetAcc.accountId],
+    );
+    assert.equal(noWallets.rows.length, 0);
+
+    // 2. Full Rehearsal execution
+    const customAdapter = new OutLayerAdapter(fixture.url, 5_000, {
+      compatibilityConfig: {
+        mode: "authorized",
+        providerEnvironment: "testnet",
+        maxRegistrations: 1,
+      },
+    });
+
+    const executionResult = await runTestnetRehearsal({
+      dryRun: false,
+      accountId: targetAcc.accountId,
+      operatorAuthId: opUser.authUserId,
+      customAdapter,
+      env: testEnv,
+    });
+
+    assert.equal(executionResult.success, true);
+    assert.equal(executionResult.dryRun, false);
+    assert.equal(executionResult.outcome, "registered");
+    assert.equal(executionResult.fundsReady, false);
+    assert.equal(executionResult.eligibleForDeposits, false);
+    assert.equal(executionResult.budgetExceededPrevented, true);
+
+    // 3. Credential encrypted immediately
+    const walletRecord = await workerPool.query<{
+      encrypted_credential: string;
+      key_id: string;
+    }>(
+      "SELECT encrypted_credential, key_id FROM flow.wallets WHERE id = $1::uuid",
+      [executionResult.walletId],
+    );
+    assert.equal(walletRecord.rows.length, 1);
+    const parsedEnvelope = deserializeEnvelope(
+      walletRecord.rows[0]!.encrypted_credential,
+    );
+    assert.equal(parsedEnvelope.version, 1);
+    assert.equal(parsedEnvelope.keyId, "v1");
+    assert.equal(walletRecord.rows[0]!.key_id, "v1");
+
+    // 4. Authorization is consumed
+    const authRecord = await operatorPool.query<{
+      status: string;
+      registrations_completed: number;
+    }>(
+      "SELECT status, registrations_completed FROM flow.provider_compatibility_authorizations WHERE singleton_scope = 'GLOBAL_TESTNET_REHEARSAL'",
+    );
+    assert.equal(authRecord.rows[0]!.status, "CONSUMED");
+    assert.equal(authRecord.rows[0]!.registrations_completed, 1);
+
+    // 5. Subsequent rehearsal execution fails with CUSTODY_REGISTRATION_BUDGET_EXCEEDED
+    await assert.rejects(
+      runTestnetRehearsal({
+        dryRun: false,
+        accountId: targetAcc.accountId,
+        operatorAuthId: opUser.authUserId,
+        customAdapter,
+        env: testEnv,
+      }),
+      { code: "CUSTODY_REGISTRATION_BUDGET_EXCEEDED" },
+    );
+  } finally {
+    await fixture.close();
+    await operatorPool.query(
+      "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.provider_compatibility_authorizations;",
+    );
+  }
 });

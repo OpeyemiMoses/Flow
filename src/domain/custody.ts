@@ -859,6 +859,92 @@ const FUND_MOVING_OUTLAYER_CAPABILITIES = [
   "confidential",
 ] as const;
 
+export interface InspectedCustodyPolicy {
+  readonly walletId: string;
+  readonly policyState: OutLayerPolicyState;
+  readonly controllerAccountId: string | null;
+  readonly frozen: boolean;
+  readonly isStored: boolean;
+  readonly rules: Record<string, unknown> | null;
+}
+
+/**
+ * Inspects custody policy evidence from the trusted adapter without requiring policy='stored'.
+ * Used for lifecycle reconciliation during rehearsals and anonymous registrations where
+ * policy remains 'none'.
+ */
+export function inspectCustodyPolicyEvidence(
+  evidence: unknown,
+  expectedProviderWalletId: string,
+): InspectedCustodyPolicy {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    throw new FlowError(
+      "POLICY_VERIFICATION_FAILED",
+      "Custody policy inspection requires structured provider policy evidence, not a raw string or primitive.",
+    );
+  }
+
+  if (!hasTrustedAdapterPolicyProvenance(evidence)) {
+    throw new FlowError(
+      "POLICY_VERIFICATION_FAILED",
+      "Custody policy evidence was not obtained through the trusted OutLayer provider adapter.",
+    );
+  }
+
+  const record = evidence as unknown as Record<string, unknown>;
+  const walletId = record.wallet_id;
+  if (typeof walletId !== "string" || walletId.trim().length === 0) {
+    throw new FlowError(
+      "POLICY_VERIFICATION_FAILED",
+      "Custody policy evidence is missing provider wallet_id.",
+    );
+  }
+
+  if (walletId !== expectedProviderWalletId) {
+    throw new FlowError(
+      "CUSTODY_PROVIDER_CORRELATION_ERROR",
+      `Custody policy evidence wallet_id (${walletId}) does not match expected wallet (${expectedProviderWalletId}).`,
+    );
+  }
+
+  const policyState: OutLayerPolicyState =
+    typeof record.policy === "string" && isValidPolicyState(record.policy)
+      ? record.policy
+      : "none";
+
+  const controllerAccountId =
+    typeof record.controller === "string" &&
+    isValidNearAddress(record.controller)
+      ? record.controller.trim().toLowerCase()
+      : null;
+
+  const frozen = record.frozen === true;
+  const isStored =
+    policyState === "stored" &&
+    !frozen &&
+    controllerAccountId !== null &&
+    record.rules !== null &&
+    typeof record.rules === "object" &&
+    !Array.isArray(record.rules) &&
+    Object.keys(record.rules as object).length > 0;
+
+  const rules =
+    record.rules &&
+    typeof record.rules === "object" &&
+    !Array.isArray(record.rules)
+      ? (record.rules as Record<string, unknown>)
+      : null;
+
+  return {
+    walletId,
+    policyState,
+    controllerAccountId,
+    frozen,
+    isStored,
+    rules,
+  };
+}
+
 /**
  * Validates provider-backed custody policy evidence (`GET /wallet/v1/policy`) before a wallet
  * can transition to `ACTIVE` or receive `policy_state = 'stored'`.

@@ -73,7 +73,14 @@ export function readWalletConfig(
   source: WalletEnvironmentInput,
   authSecrets?: { authSecret?: string; otpKey?: string },
 ) {
-  const parsed = walletConfigSchema.safeParse(source);
+  const normalizedSource: WalletEnvironmentInput = {
+    ...source,
+    FLOW_OUTLAYER_API_URL:
+      source.FLOW_OUTLAYER_API_URL ??
+      source.OUTLAYER_BASE_URL ??
+      source.OUTLAYER_API_URL,
+  };
+  const parsed = walletConfigSchema.safeParse(normalizedSource);
   if (!parsed.success) {
     const names = parsed.error.issues.map((issue) => issue.path.join("."));
     throw new FlowError(

@@ -1087,6 +1087,106 @@ export async function activateWalletIfReady(
 }
 
 /**
+ * Stage 3 (Rehearsal / Anonymous without policy):
+ * Records wallet as registered with addresses and capabilities attached, but without
+ * an on-chain policy (e.g. policy_state='none' during testnet rehearsal).
+ *
+ * Enforces:
+ * - Does NOT mark wallet status as ACTIVE (remains in PROVISIONING).
+ * - Leaves can_receive=false and can_sign_transfer=false strictly intact.
+ * - Releases job lease and transitions job status to PROVISIONED.
+ * - Leaves wallet not funds-ready.
+ */
+export async function recordRegisteredWalletWithoutPolicy(
+  db: FlowDb,
+  jobId: string,
+  fencingToken: bigint,
+  walletId: string,
+  policyState = "none",
+): Promise<void> {
+  await db.$transaction(async (tx) => {
+    const jobs = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+        fencingToken: bigint;
+      }>
+    >`
+      SELECT id, account_id AS "accountId", status, fencing_token AS "fencingToken"
+      FROM flow.wallet_provisioning_jobs
+      WHERE id = ${jobId}::uuid
+      FOR UPDATE
+    `;
+
+    const wallets = await tx.$queryRaw<
+      Array<{
+        id: string;
+        accountId: string;
+        status: string;
+      }>
+    >`
+      SELECT id, account_id AS "accountId", status::text AS status
+      FROM flow.wallets
+      WHERE id = ${walletId}::uuid
+      FOR UPDATE
+    `;
+
+    const job = jobs[0];
+    const wallet = wallets[0];
+
+    if (!job || !wallet || job.accountId !== wallet.accountId) {
+      throw new FlowError(
+        "WALLET_ACCOUNT_MISMATCH",
+        `Cannot record wallet registration without policy: job ${jobId} does not match wallet ${walletId}.`,
+      );
+    }
+
+    if (job.fencingToken !== fencingToken) {
+      throw new FlowError(
+        "STALE_FENCING_TOKEN",
+        `Job ${jobId} fencing token ${fencingToken} was invalidated.`,
+      );
+    }
+
+    const safePolicyState = isValidPolicyState(policyState)
+      ? policyState
+      : "none";
+
+    await tx.$executeRaw`
+      UPDATE flow.wallets
+      SET
+        status = 'PROVISIONING'::flow.wallet_status,
+        policy_state = ${safePolicyState},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${walletId}::uuid
+    `;
+
+    await tx.$executeRaw`
+      UPDATE flow.wallet_capabilities
+      SET
+        can_receive = false,
+        can_sign_transfer = false,
+        verified_at = CURRENT_TIMESTAMP
+      WHERE wallet_id = ${walletId}::uuid
+    `;
+
+    await tx.$executeRaw`
+      UPDATE flow.wallet_provisioning_jobs
+      SET
+        status = 'PROVISIONED',
+        lease_holder = NULL,
+        lease_expires_at = NULL,
+        last_error = NULL,
+        failure_classification = NULL,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${jobId}::uuid
+        AND fencing_token = ${fencingToken}
+    `;
+  });
+}
+
+/**
  * Commits complete wallet registration, encrypted credentials, derived addresses,
  * capabilities, and verified custody policy evidence in a single atomic transaction.
  * Enforces the exact same account-binding, fencing-token, address/capability, and
@@ -1317,7 +1417,7 @@ export async function getAccountWalletPublicProjection(
       near_account_id AS "nearAccountId", status::text AS status, policy_state AS "policyState",
       controller_account_id AS "controllerAccountId",
       handoff_url AS "handoffUrl", environment, created_at AS "createdAt", updated_at AS "updatedAt"
-    FROM flow.wallets
+    FROM flow.wallet_public_projections
     WHERE account_id = ${accountId}::uuid
   `;
 
@@ -2101,6 +2201,119 @@ export async function assertOperatorIdentityRegistered(
   }
 }
 
+export type OperatorRole =
+  "CUSTODY_OPERATOR" | "SECURITY_OFFICER" | "CUSTODY_ADMIN";
+
+export interface AuthenticatedOperatorContext {
+  readonly operatorAuthId: string;
+  readonly role: OperatorRole;
+  readonly verifiedAt: Date;
+  readonly sessionId?: string;
+  readonly verificationMethod: "SESSION" | "TRUSTED_EXECUTION_CONTEXT";
+}
+
+/**
+ * Derives and verifies an authenticated operator context from a trusted execution context.
+ * Rejects unauthenticated caller-supplied identifiers or accounts lacking active authority.
+ */
+export async function deriveOperatorContext(
+  db: FlowDb,
+  input: {
+    readonly operatorAuthId: string;
+    readonly sessionToken?: string;
+  },
+  requiredRole?: OperatorRole,
+): Promise<AuthenticatedOperatorContext> {
+  const authId = input.operatorAuthId.trim();
+  if (!OPERATOR_AUTH_ID_REGEX.test(authId)) {
+    throw new FlowError(
+      "INVALID_OPERATOR_IDENTITY",
+      "Operator authentication identifier is missing or invalid.",
+    );
+  }
+
+  // 1. Verify registered user in flow.auth_users
+  await assertOperatorIdentityRegistered(db, authId);
+
+  // 2. If a sessionToken is supplied, verify active session in flow.auth_sessions bound to this user
+  let sessionId: string | undefined;
+  if (input.sessionToken) {
+    const sessions = await db.$queryRaw<
+      Array<{ id: string; userId: string; expiresAt: Date }>
+    >`
+      SELECT id, user_id AS "userId", expires_at AS "expiresAt"
+      FROM flow.auth_sessions
+      WHERE token = ${input.sessionToken.trim()}
+        AND user_id = ${authId}
+        AND expires_at > CURRENT_TIMESTAMP
+    `;
+    if (!sessions[0]) {
+      throw new FlowError(
+        "CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED",
+        "Operator session token is invalid, expired, or not bound to the operator user.",
+      );
+    }
+    sessionId = sessions[0].id;
+  }
+
+  // 3. Verify active custody operator status and role in flow.custody_operators
+  const ops = await db.$queryRaw<
+    Array<{ id: string; role: string; status: string }>
+  >`
+    SELECT id, role, status FROM flow.custody_operators
+    WHERE auth_user_id = ${authId}
+  `;
+
+  if (!ops[0] || ops[0].status !== "ACTIVE") {
+    throw new FlowError(
+      "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+      `Operator ${authId} does not possess active custody operator authority in flow.custody_operators.`,
+    );
+  }
+
+  const role = ops[0].role as OperatorRole;
+  if (requiredRole && role !== requiredRole && role !== "CUSTODY_ADMIN") {
+    throw new FlowError(
+      "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+      `Operator ${authId} with role ${role} lacks required role ${requiredRole}.`,
+    );
+  }
+
+  return {
+    operatorAuthId: authId,
+    role,
+    verifiedAt: new Date(),
+    sessionId,
+    verificationMethod: sessionId ? "SESSION" : "TRUSTED_EXECUTION_CONTEXT",
+  };
+}
+
+/**
+ * Creates a verified operator session record in flow.auth_sessions for trusted testing and operator CLI tooling.
+ */
+export async function createOperatorSession(
+  db: FlowDb,
+  operatorAuthId: string,
+  validityMinutes = 60,
+): Promise<{ readonly sessionId: string; readonly sessionToken: string }> {
+  await assertOperatorIdentityRegistered(db, operatorAuthId);
+  const sessionToken =
+    randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
+  const sessionId = randomUUID();
+  await db.$executeRaw`
+    INSERT INTO flow.auth_sessions (id, user_id, token, expires_at, created_at, updated_at)
+    VALUES (
+      ${sessionId}::uuid,
+      ${operatorAuthId.trim()},
+      ${sessionToken},
+      CURRENT_TIMESTAMP + (${validityMinutes} || ' minutes')::interval,
+      CURRENT_TIMESTAMP,
+      CURRENT_TIMESTAMP
+    )
+  `;
+  return { sessionId, sessionToken };
+}
+
 /**
  * Asserts that an operator possesses active custody operator authority in `flow.custody_operators`.
  */
@@ -2135,6 +2348,14 @@ export async function assertOperatorAuthority(
   }
 }
 
+export interface EnrollCustodyOperatorInput {
+  readonly authUserId: string;
+  readonly role?: "CUSTODY_OPERATOR" | "SECURITY_OFFICER" | "CUSTODY_ADMIN";
+  readonly enrolledBy: string;
+  readonly enrolledBySessionToken?: string;
+  readonly enrolledByContext?: AuthenticatedOperatorContext;
+}
+
 /**
  * Enrolls or updates a user as an authorized custody operator in `flow.custody_operators`.
  * Requires enrollment by an existing active SECURITY_OFFICER (or bootstrap by another registered user).
@@ -2142,11 +2363,7 @@ export async function assertOperatorAuthority(
  */
 export async function enrollCustodyOperator(
   db: FlowDb,
-  input: {
-    readonly authUserId: string;
-    readonly role?: "CUSTODY_OPERATOR" | "SECURITY_OFFICER" | "CUSTODY_ADMIN";
-    readonly enrolledBy: string;
-  },
+  input: EnrollCustodyOperatorInput,
 ): Promise<{
   readonly id: string;
   readonly authUserId: string;
@@ -2179,7 +2396,25 @@ export async function enrollCustodyOperator(
     SELECT id, role, status FROM flow.custody_operators WHERE status = 'ACTIVE'
   `;
   if (existingOperators.length > 0) {
-    await assertOperatorAuthority(db, enrolledBy, "SECURITY_OFFICER");
+    const enrollerCtx =
+      input.enrolledByContext ??
+      (await deriveOperatorContext(
+        db,
+        {
+          operatorAuthId: enrolledBy,
+          sessionToken: input.enrolledBySessionToken,
+        },
+        "SECURITY_OFFICER",
+      ));
+    if (
+      enrollerCtx.role !== "SECURITY_OFFICER" &&
+      enrollerCtx.role !== "CUSTODY_ADMIN"
+    ) {
+      throw new FlowError(
+        "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+        `Operator ${enrolledBy} lacks SECURITY_OFFICER role.`,
+      );
+    }
   }
 
   const role = input.role ?? "CUSTODY_OPERATOR";
@@ -2212,6 +2447,10 @@ export interface CreateCustodyRecoveryApprovalInput {
     "ATTACH_RECOVERED_WALLET" | "RESET_CONFIRMED_PRE_CREATION_FAILURE";
   readonly approvalToken?: string;
   readonly validityMinutes?: number;
+  readonly initiatorSessionToken?: string;
+  readonly approverSessionToken?: string;
+  readonly initiatorContext?: AuthenticatedOperatorContext;
+  readonly approverContext?: AuthenticatedOperatorContext;
 }
 
 /**
@@ -2261,8 +2500,18 @@ export async function createCustodyRecoveryApproval(
     );
   }
 
-  await assertOperatorAuthority(db, initiator);
-  await assertOperatorAuthority(db, approver);
+  const initiatorCtx =
+    input.initiatorContext ??
+    (await deriveOperatorContext(db, {
+      operatorAuthId: initiator,
+      sessionToken: input.initiatorSessionToken,
+    }));
+  const approverCtx =
+    input.approverContext ??
+    (await deriveOperatorContext(db, {
+      operatorAuthId: approver,
+      sessionToken: input.approverSessionToken,
+    }));
 
   const jobs = await db.$queryRaw<
     Array<{
@@ -2311,8 +2560,8 @@ export async function createCustodyRecoveryApproval(
     ) VALUES (
       ${input.jobId.trim()}::uuid,
       ${input.accountId.trim()}::uuid,
-      ${approver},
-      ${initiator},
+      ${approverCtx.operatorAuthId},
+      ${initiatorCtx.operatorAuthId},
       ${input.expectedDispatchAttemptId.trim()}::uuid,
       ${input.resolution},
       ${tokenHash},
@@ -2326,8 +2575,8 @@ export async function createCustodyRecoveryApproval(
     approvalId: rows[0]!.id,
     jobId: input.jobId.trim(),
     accountId: input.accountId.trim(),
-    initiator,
-    approver,
+    initiator: initiatorCtx.operatorAuthId,
+    approver: approverCtx.operatorAuthId,
     dispatchAttemptId: input.expectedDispatchAttemptId.trim(),
     resolution: input.resolution,
   });
@@ -2341,6 +2590,8 @@ export interface CreateCompatibilityAuthorizationInput {
   readonly operatorAuthId: string;
   readonly allowedMethods?: readonly string[];
   readonly validityMinutes?: number;
+  readonly operatorSessionToken?: string;
+  readonly operatorContext?: AuthenticatedOperatorContext;
 }
 
 /**
@@ -2363,7 +2614,12 @@ export async function createCompatibilityAuthorization(
       "Valid operatorAuthId is required to create compatibility authorization.",
     );
   }
-  await assertOperatorAuthority(db, input.operatorAuthId);
+  const operatorContext =
+    input.operatorContext ??
+    (await deriveOperatorContext(db, {
+      operatorAuthId: input.operatorAuthId,
+      sessionToken: input.operatorSessionToken,
+    }));
 
   const validityMinutes = input.validityMinutes ?? 60;
   const methods = input.allowedMethods ?? [
@@ -2387,7 +2643,7 @@ export async function createCompatibilityAuthorization(
         1,
         0,
         0,
-        ${input.operatorAuthId.trim()},
+        ${operatorContext.operatorAuthId},
         'GLOBAL_TESTNET_REHEARSAL',
         CURRENT_TIMESTAMP + (${validityMinutes} * interval '1 minute')
       )
@@ -2397,7 +2653,7 @@ export async function createCompatibilityAuthorization(
     log("info", "compatibility_authorization_created", {
       authorizationId: rows[0]!.id,
       accountId: input.accountId.trim(),
-      operatorAuthId: input.operatorAuthId.trim(),
+      operatorAuthId: operatorContext.operatorAuthId,
       environment: input.environment,
     });
 

@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { OUTLAYER_CAPABILITIES } from "../../domain/custody.ts";
+import {
+  inspectCustodyPolicyEvidence,
+  OUTLAYER_CAPABILITIES,
+} from "../../domain/custody.ts";
 import {
   decryptSecret,
   deriveKeyDigest,
@@ -22,6 +25,7 @@ import {
   recordJobAmbiguous,
   recordJobDispatch,
   recordJobTerminalFailure,
+  recordRegisteredWalletWithoutPolicy,
   reconcileCrashedJobs,
   startPolicyVerification,
   type AllowlistedProviderEndpoint,
@@ -70,7 +74,7 @@ export interface WalletProvisioningWorkerOptions {
 }
 
 export type ProvisioningJobOutcome =
-  "skipped" | "activated" | "quarantined" | "failed";
+  "skipped" | "registered" | "activated" | "quarantined" | "failed";
 
 export interface ProcessAccountJobResult {
   readonly accountId: string;
@@ -87,6 +91,7 @@ export interface WorkerOperationalDiagnostics {
   readonly inFlightCount: number;
   readonly maxConcurrency: number;
   readonly processedCount: number;
+  readonly registeredCount: number;
   readonly activatedCount: number;
   readonly quarantinedCount: number;
   readonly failedCount: number;
@@ -212,6 +217,7 @@ export class WalletProvisioningWorker {
   private readonly inFlightTasks = new Set<Promise<unknown>>();
 
   private processedCount = 0;
+  private registeredCount = 0;
   private activatedCount = 0;
   private quarantinedCount = 0;
   private failedCount = 0;
@@ -249,6 +255,7 @@ export class WalletProvisioningWorker {
       inFlightCount: this.inFlightTasks.size,
       maxConcurrency: this.maxConcurrency,
       processedCount: this.processedCount,
+      registeredCount: this.registeredCount,
       activatedCount: this.activatedCount,
       quarantinedCount: this.quarantinedCount,
       failedCount: this.failedCount,
@@ -725,22 +732,54 @@ export class WalletProvisioningWorker {
         providerWalletId,
       );
 
-      await activateWalletIfReady(
-        this.db,
-        leased.id,
-        leased.fencingToken,
-        walletId,
+      const inspection = inspectCustodyPolicyEvidence(
         policyEvidence,
+        providerWalletId,
       );
 
-      this.activatedCount++;
-      return {
-        accountId,
-        jobId: leased.id,
-        walletId,
-        outcome: "activated",
-        ...(recoveredFromStage ? { recoveredFromStage } : {}),
-      };
+      if (inspection.isStored) {
+        await activateWalletIfReady(
+          this.db,
+          leased.id,
+          leased.fencingToken,
+          walletId,
+          policyEvidence,
+        );
+
+        this.activatedCount++;
+        return {
+          accountId,
+          jobId: leased.id,
+          walletId,
+          outcome: "activated",
+          ...(recoveredFromStage ? { recoveredFromStage } : {}),
+        };
+      } else if (
+        this.providerEnvironment === "testnet" ||
+        this.compatibilityAuthorizationId
+      ) {
+        await recordRegisteredWalletWithoutPolicy(
+          this.db,
+          leased.id,
+          leased.fencingToken,
+          walletId,
+          inspection.policyState,
+        );
+
+        this.registeredCount++;
+        return {
+          accountId,
+          jobId: leased.id,
+          walletId,
+          outcome: "registered",
+          ...(recoveredFromStage ? { recoveredFromStage } : {}),
+        };
+      } else {
+        throw new FlowError(
+          "POLICY_VERIFICATION_FAILED",
+          "Production wallet provisioning requires verified stored custody policy evidence.",
+        );
+      }
     } catch (error) {
       if (
         error instanceof FlowError &&
