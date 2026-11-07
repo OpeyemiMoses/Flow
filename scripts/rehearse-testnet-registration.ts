@@ -136,6 +136,32 @@ export interface CreateRehearsalAuthorizationOptions {
 }
 
 /**
+ * Checks whether an existing wallet provisioning job is in its pristine initial
+ * state as created during normal onboarding (never leased, dispatched, or attempted).
+ */
+export function isJobPristineInitial(job: {
+  status: string;
+  fencingToken: string | bigint | number;
+  leaseExpiresAt: Date | null;
+  dispatchedAt: Date | null;
+  attempts: number;
+  failureClassification: string | null;
+}): boolean {
+  const tokenIsZero =
+    job.fencingToken === "0" ||
+    job.fencingToken === 0n ||
+    job.fencingToken === 0;
+  return (
+    job.status === "PENDING" &&
+    tokenIsZero &&
+    job.dispatchedAt === null &&
+    job.attempts === 0 &&
+    job.failureClassification === null &&
+    (job.leaseExpiresAt === null || job.leaseExpiresAt < new Date())
+  );
+}
+
+/**
  * Creates the single-use compatibility authorization record explicitly.
  * This is an operator-initiated write action separated cleanly from rehearsal execution.
  */
@@ -208,14 +234,34 @@ export async function createRehearsalAuthorization(
   }
 
   const existingJobs = await operatorDb.$queryRaw<
-    Array<{ id: string; status: string }>
+    Array<{
+      id: string;
+      status: string;
+      fencingToken: string;
+      leaseExpiresAt: Date | null;
+      dispatchedAt: Date | null;
+      attempts: number;
+      failureClassification: string | null;
+    }>
   >`
-    SELECT id, status::text as status FROM flow.wallet_provisioning_jobs WHERE account_id = ${accountId}::uuid
+    SELECT id, status::text as status, fencing_token::text AS "fencingToken",
+           lease_expires_at AS "leaseExpiresAt", dispatched_at AS "dispatchedAt",
+           attempts, failure_classification AS "failureClassification"
+    FROM flow.wallet_provisioning_jobs
+    WHERE account_id = ${accountId}::uuid
   `;
-  if (existingJobs.length > 0) {
+  if (existingJobs.length === 1) {
+    const job = existingJobs[0]!;
+    if (!isJobPristineInitial(job)) {
+      throw new FlowError(
+        "INVALID_CONFIGURATION",
+        `Account ${accountId} possesses a provisioning job in non-initial state (status: ${job.status}, fencingToken: ${job.fencingToken}, attempts: ${job.attempts}). Rehearsal requires a clean, unstarted test account.`,
+      );
+    }
+  } else if (existingJobs.length > 1) {
     throw new FlowError(
       "INVALID_CONFIGURATION",
-      `Account ${accountId} already possesses a wallet provisioning job in flow.wallet_provisioning_jobs (status: ${existingJobs[0]!.status}). Rehearsal must target an unprovisioned test account.`,
+      `Account ${accountId} possesses multiple provisioning jobs. Rehearsal requires a clean, unstarted test account.`,
     );
   }
 
@@ -486,24 +532,54 @@ export async function runTestnetRehearsal(
         }
       }
 
-      // Requirement 9: Reject ANY existing/prior provisioning job
+      // Check existing provisioning jobs: must be either absent or pristine initial PENDING
       const existingJobs = await operatorDb.$queryRaw<
-        Array<{ id: string; status: string }>
+        Array<{
+          id: string;
+          status: string;
+          fencingToken: string;
+          leaseExpiresAt: Date | null;
+          dispatchedAt: Date | null;
+          attempts: number;
+          failureClassification: string | null;
+        }>
       >`
-        SELECT id, status::text as status FROM flow.wallet_provisioning_jobs WHERE account_id = ${accountId}::uuid
+        SELECT id, status::text as status, fencing_token::text AS "fencingToken",
+               lease_expires_at AS "leaseExpiresAt", dispatched_at AS "dispatchedAt",
+               attempts, failure_classification AS "failureClassification"
+        FROM flow.wallet_provisioning_jobs
+        WHERE account_id = ${accountId}::uuid
       `;
-      if (existingJobs.length > 0) {
+
+      let jobClean = false;
+      if (existingJobs.length === 0) {
+        jobClean = true;
+      } else if (existingJobs.length === 1) {
+        const job = existingJobs[0]!;
+        if (isJobPristineInitial(job)) {
+          jobClean = true;
+        } else {
+          if (dryRun) {
+            missingPrerequisites.push("ACCOUNT_HAS_IN_FLIGHT_OR_TERMINAL_JOB");
+          } else {
+            throw new FlowError(
+              "INVALID_CONFIGURATION",
+              `Account ${accountId} possesses a provisioning job in non-initial state (status: ${job.status}, fencingToken: ${job.fencingToken}, attempts: ${job.attempts}). Rehearsal requires a clean, unstarted test account.`,
+            );
+          }
+        }
+      } else {
         if (dryRun) {
-          missingPrerequisites.push("ACCOUNT_HAS_EXISTING_PROVISIONING_JOB");
+          missingPrerequisites.push("ACCOUNT_HAS_IN_FLIGHT_OR_TERMINAL_JOB");
         } else {
           throw new FlowError(
             "INVALID_CONFIGURATION",
-            `Account ${accountId} already possesses a wallet provisioning job in flow.wallet_provisioning_jobs (status: ${existingJobs[0]!.status}). Rehearsal must target a clean, unprovisioned test account.`,
+            `Account ${accountId} possesses multiple provisioning jobs. Rehearsal requires a clean, unstarted test account.`,
           );
         }
       }
 
-      if (existingWallets.length === 0 && existingJobs.length === 0) {
+      if (existingWallets.length === 0 && jobClean) {
         targetAccountClean = true;
       }
     }
@@ -791,6 +867,42 @@ export async function runTestnetRehearsal(
   };
 }
 
+export const SAFE_ERROR_DIAGNOSTICS: Record<string, string> = {
+  INVALID_CONFIGURATION:
+    "Configuration or target account preconditions were not met. Check environment, account readiness, and inputs.",
+  CUSTODY_OPERATOR_AUTHENTICATION_REQUIRED:
+    "A valid custody operator identity and session token are required.",
+  CUSTODY_OPERATOR_AUTHORIZATION_ERROR:
+    "Operator session is expired, untrusted, or lacks authorized custody privileges.",
+  CUSTODY_REGISTRATION_BUDGET_EXCEEDED:
+    "Single-use compatibility registration budget has already been exhausted.",
+  PROVIDER_COMPATIBILITY_UNAUTHORIZED:
+    "Action not authorized by active singleton provider compatibility authorization.",
+  PROVIDER_UNAVAILABLE:
+    "Upstream provider network request failed or service was unreachable.",
+  INCOMPLETE_WALLET_PROVISIONING:
+    "Wallet provisioning did not reach the expected outcome.",
+  DATABASE_UNAVAILABLE: "Database operation failed or database is unreachable.",
+};
+
+export function formatSanitizedCliError(error: unknown): {
+  code: string;
+  diagnostic: string;
+} {
+  if (error instanceof FlowError) {
+    const code = error.code;
+    const diagnostic =
+      SAFE_ERROR_DIAGNOSTICS[code] ??
+      "A custody or validation error occurred. Check secure audit logs.";
+    return { code, diagnostic };
+  }
+  return {
+    code: "UNEXPECTED_ERROR",
+    diagnostic:
+      "An unexpected operational error occurred. Check secure audit logs for sanitized diagnostic details.",
+  };
+}
+
 async function main() {
   const { values } = parseArgs({
     options: {
@@ -909,9 +1021,8 @@ Options:
       console.log("✓ Live testnet rehearsal completed successfully.");
     }
   } catch (error) {
-    console.error(
-      `\nx Rehearsal failed: ${error instanceof FlowError ? error.code : "ERROR"} - ${(error as Error).message}\n`,
-    );
+    const { code, diagnostic } = formatSanitizedCliError(error);
+    console.error(`\nx Rehearsal failed: [${code}] ${diagnostic}\n`);
     process.exitCode = 1;
   } finally {
     try {

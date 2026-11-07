@@ -57,8 +57,11 @@ import { WalletProvisioningWorker } from "../src/server/custody/provisioning-wor
 import { createOutLayerMockServer } from "./support/outlayer-fixture.ts";
 import {
   createRehearsalAuthorization,
+  formatSanitizedCliError,
+  isJobPristineInitial,
   runTestnetRehearsal,
 } from "../scripts/rehearse-testnet-registration.ts";
+import { prepareIsolatedTestnetAccount } from "../scripts/prepare-testnet-account.ts";
 
 assert.equal(
   process.env.FLOW_ENV,
@@ -4551,4 +4554,159 @@ test("M2 Phase 5.4 Adversarial Test: Target accounts with existing wallets (any 
     }),
     { code: "INVALID_CONFIGURATION" },
   );
+});
+
+test("M2 Phase 5.5 Operational Preflight: Pristine onboarding job vs in-flight job distinction, account preparation, and CLI error sanitization", async () => {
+  await operatorPool.query(
+    "SET LOCAL flow.allow_test_cleanup = 'on'; DELETE FROM flow.custody_recovery_approvals; DELETE FROM flow.custody_operators; DELETE FROM flow.provider_compatibility_authorizations;",
+  );
+
+  const creatorUser = await createTestAccount(pool, "PERSONAL", "p55-creator");
+  const opUser = await createTestAccount(pool, "PERSONAL", "p55-op");
+
+  await enrollCustodyOperator(operatorDb, {
+    authUserId: opUser.authUserId,
+    role: "SECURITY_OFFICER",
+    enrolledBy: creatorUser.authUserId,
+  });
+
+  const opSession = await createOperatorSession(operatorDb, opUser.authUserId);
+
+  // 1. prepareIsolatedTestnetAccount creates an isolated account with pristine initial PENDING job
+  const prepared = await prepareIsolatedTestnetAccount({
+    operatorAuthId: opUser.authUserId,
+    operatorSessionToken: opSession.sessionToken,
+    email: `isolated-rehearsal-${randomUUID().slice(0, 8)}@example.test`,
+  });
+
+  assert.ok(prepared.accountId);
+  assert.equal(prepared.kind, "PERSONAL");
+  assert.equal(prepared.jobStatus, "PENDING");
+  assert.equal(prepared.walletCount, 0);
+  assert.equal(prepared.isNew, true);
+
+  // Idempotent re-run returns the same account
+  const rePrepared = await prepareIsolatedTestnetAccount({
+    operatorAuthId: opUser.authUserId,
+    operatorSessionToken: opSession.sessionToken,
+    email: prepared.email,
+  });
+  assert.equal(rePrepared.accountId, prepared.accountId);
+  assert.equal(rePrepared.isNew, false);
+
+  // 2. isJobPristineInitial accepts pristine initial job
+  assert.equal(
+    isJobPristineInitial({
+      status: "PENDING",
+      fencingToken: 0n,
+      leaseExpiresAt: null,
+      dispatchedAt: null,
+      attempts: 0,
+      failureClassification: null,
+    }),
+    true,
+  );
+
+  // isJobPristineInitial rejects non-zero fencing token
+  assert.equal(
+    isJobPristineInitial({
+      status: "PENDING",
+      fencingToken: 1n,
+      leaseExpiresAt: null,
+      dispatchedAt: null,
+      attempts: 0,
+      failureClassification: null,
+    }),
+    false,
+  );
+
+  // isJobPristineInitial rejects non-PENDING status
+  assert.equal(
+    isJobPristineInitial({
+      status: "LEASED",
+      fencingToken: 0n,
+      leaseExpiresAt: null,
+      dispatchedAt: null,
+      attempts: 0,
+      failureClassification: null,
+    }),
+    false,
+  );
+
+  // isJobPristineInitial rejects dispatched job
+  assert.equal(
+    isJobPristineInitial({
+      status: "PENDING",
+      fencingToken: 0n,
+      leaseExpiresAt: null,
+      dispatchedAt: new Date(),
+      attempts: 0,
+      failureClassification: null,
+    }),
+    false,
+  );
+
+  // isJobPristineInitial rejects attempts > 0
+  assert.equal(
+    isJobPristineInitial({
+      status: "PENDING",
+      fencingToken: 0n,
+      leaseExpiresAt: null,
+      dispatchedAt: null,
+      attempts: 1,
+      failureClassification: null,
+    }),
+    false,
+  );
+
+  // 3. Dry-run evaluates the prepared account with pristine job as clean
+  const dryRunEnv = {
+    ...process.env,
+    FLOW_ENV: "test",
+    FLOW_EXECUTION: "disabled",
+    FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+    FLOW_PROVIDER_COMPATIBILITY_TOKEN: "valid_test_token_12345678",
+    FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: prepared.accountId,
+    FLOW_WALLET_PROVIDER: "outlayer",
+    FLOW_WALLET_ENCRYPTION_KEY:
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    FLOW_OUTLAYER_API_URL: "https://testnet-api.outlayer.ai",
+    FLOW_CUSTODY_OPERATOR_AUTH_ID: opUser.authUserId,
+    FLOW_CUSTODY_OPERATOR_SESSION_TOKEN: opSession.sessionToken,
+  };
+
+  const dryRunResult = await runTestnetRehearsal({
+    dryRun: true,
+    accountId: prepared.accountId,
+    operatorAuthId: opUser.authUserId,
+    operatorSessionToken: opSession.sessionToken,
+    env: dryRunEnv,
+  });
+
+  assert.equal(dryRunResult.dryRun, true);
+  assert.equal(dryRunResult.preflight.targetAccountClean, true);
+  // Authorization is missing because requirement 8 forbids premature authorization creation
+  assert.deepEqual(dryRunResult.preflight.missingPrerequisites, [
+    "COMPATIBILITY_AUTHORIZATION_MISSING",
+  ]);
+
+  // 4. CLI error sanitization: emits allowlisted error codes and sanitized diagnostics
+  const flowErr = new FlowError(
+    "INVALID_CONFIGURATION",
+    "Sensitive DB query leaked: SELECT * FROM secrets WHERE key='raw_secret'",
+  );
+  const sanitizedFlowErr = formatSanitizedCliError(flowErr);
+  assert.equal(sanitizedFlowErr.code, "INVALID_CONFIGURATION");
+  assert.ok(!sanitizedFlowErr.diagnostic.includes("secrets"));
+  assert.ok(!sanitizedFlowErr.diagnostic.includes("raw_secret"));
+  assert.ok(sanitizedFlowErr.diagnostic.includes("preconditions"));
+
+  const rawErr = new Error(
+    "Connection refused: postgresql://admin:super_secret_pw@db.internal:5432/flow_prod",
+  );
+  const sanitizedRawErr = formatSanitizedCliError(rawErr);
+  assert.equal(sanitizedRawErr.code, "UNEXPECTED_ERROR");
+  assert.ok(!sanitizedRawErr.diagnostic.includes("super_secret_pw"));
+  assert.ok(!sanitizedRawErr.diagnostic.includes("postgresql"));
+  assert.ok(sanitizedRawErr.diagnostic.includes("audit logs"));
 });
