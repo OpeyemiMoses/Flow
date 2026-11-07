@@ -10,6 +10,7 @@ import {
 import type { NetworkId } from "../../domain/providers.ts";
 import { FlowError } from "../../foundation/errors.ts";
 import { log } from "../../foundation/logger.ts";
+import type { ProviderCompatibilityConfig } from "../../foundation/wallet-environment.ts";
 
 export type SanitizedProviderErrorCode =
   | "BAD_REQUEST"
@@ -237,16 +238,22 @@ const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 export class OutLayerAdapter {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly compatibilityConfig?: ProviderCompatibilityConfig;
+  private liveRegistrationCount = 0;
 
-  constructor(baseUrl = "https://api.outlayer.ai", timeoutMs = 5_000) {
+  constructor(
+    baseUrl = "https://api.outlayer.ai",
+    timeoutMs = 5_000,
+    options?: { readonly compatibilityConfig?: ProviderCompatibilityConfig },
+  ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.timeoutMs = timeoutMs;
+    this.compatibilityConfig = options?.compatibilityConfig;
   }
 
-  private assertLoopbackWhenExecutionDisabled(): void {
-    if (!isFinancialExecutionDisabled()) {
-      return;
-    }
+  private assertEndpointPermitted(
+    action: "register" | "query" = "query",
+  ): void {
     let parsed: URL;
     try {
       parsed = new URL(this.baseUrl);
@@ -256,11 +263,53 @@ export class OutLayerAdapter {
         "OutLayer adapter baseUrl is not a valid URL.",
       );
     }
-    if (!LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+    if (LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) {
+      return;
+    }
+
+    // Remote endpoint reachability check:
+    // 1. Live financial execution must be disabled in FLOW
+    if (!isFinancialExecutionDisabled()) {
+      throw new FlowError(
+        "INVALID_CONFIGURATION",
+        "Live OutLayer network requests are prohibited while FLOW_EXECUTION is not disabled.",
+      );
+    }
+
+    // 2. Separate fail-closed Provider Compatibility Mode check
+    if (
+      !this.compatibilityConfig ||
+      this.compatibilityConfig.mode !== "authorized"
+    ) {
       throw new FlowError(
         "INVALID_CONFIGURATION",
         "Live OutLayer network requests are prohibited while FLOW_EXECUTION=disabled; only local simulated loopback endpoints are permitted.",
       );
+    }
+
+    // 3. Strict host allowlist
+    const ALLOWED_REMOTE_HOSTS = new Set([
+      "api.outlayer.ai",
+      "api.outlayer.fastnear.com",
+      "api.testnet.outlayer.fastnear.com",
+    ]);
+    if (!ALLOWED_REMOTE_HOSTS.has(parsed.hostname.toLowerCase())) {
+      throw new FlowError(
+        "INVALID_CONFIGURATION",
+        `OutLayer host ${parsed.hostname} is not in the authorized compatibility allowlist.`,
+      );
+    }
+
+    // 4. Registration quota check
+    if (action === "register") {
+      if (
+        this.liveRegistrationCount >= this.compatibilityConfig.maxRegistrations
+      ) {
+        throw new FlowError(
+          "INVALID_CONFIGURATION",
+          `Provider compatibility mode registration limit reached (maximum ${this.compatibilityConfig.maxRegistrations} registration allowed).`,
+        );
+      }
     }
   }
 
@@ -268,7 +317,7 @@ export class OutLayerAdapter {
     endpoint: string,
     options: RequestInit,
   ): Promise<Response> {
-    this.assertLoopbackWhenExecutionDisabled();
+    this.assertEndpointPermitted("query");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -300,6 +349,8 @@ export class OutLayerAdapter {
   async register(
     input: OutLayerRegisterInput = {},
   ): Promise<OutLayerRegisterResult> {
+    this.assertEndpointPermitted("register");
+    this.liveRegistrationCount++;
     const body =
       input.accountId && input.pubkey && input.signature && input.message
         ? {

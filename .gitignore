@@ -6,6 +6,7 @@ src/generated/prisma/
 .env*
 !.env.example
 !.env.staging.example
+!.env.integration.example
 .pgpass
 secrets/
 *.key

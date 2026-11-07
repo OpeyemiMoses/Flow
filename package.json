@@ -26,7 +26,8 @@
     "db:validate": "prisma validate",
     "db:deploy": "prisma migrate deploy",
     "db:status": "prisma migrate status",
-    "db:check": "node --env-file-if-exists=.env scripts/check-database.ts"
+    "db:check": "node --env-file-if-exists=.env scripts/check-database.ts",
+    "check:integration": "node --env-file-if-exists=.env scripts/check-integration.ts"
   },
   "dependencies": {
     "@better-auth/prisma-adapter": "1.7.18",

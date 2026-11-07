@@ -218,6 +218,23 @@ test("the checked-in web dotenv template contains only runtime settings", () => 
   assertWebEnvironment(template);
 });
 
+test("the checked-in integration dotenv template contains valid syntax and fail-closed defaults", () => {
+  const template = parseEnv(
+    readFileSync(
+      new URL("../.env.integration.example", import.meta.url),
+      "utf8",
+    ),
+  );
+  assert.equal(template.FLOW_ENV, "local");
+  assert.equal(template.FLOW_EXECUTION, "disabled");
+  assert.equal(template.FLOW_PROVIDER_COMPATIBILITY_MODE, "disabled");
+  assert.equal(template.FLOW_PROVIDER_COMPATIBILITY_MAX_REGISTRATIONS, "1");
+  assert.ok(template.FLOW_OUTLAYER_API_URL);
+  assert.ok(template.FLOW_NEAR_RPC_URL);
+  assert.ok(template.FLOW_BASE_RPC_URL);
+  assert.ok(template.FLOW_SOLANA_RPC_URL);
+});
+
 test("the npm development command binds explicitly to IPv4 loopback", () => {
   const manifest = JSON.parse(
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),

@@ -103,3 +103,76 @@ test("rejects insecure remote HTTP API URLs", () => {
     invalid,
   );
 });
+
+test("wallet environment defaults provider compatibility mode to disabled", () => {
+  const config = readWalletConfig(validSource());
+  assert.equal(config.compatibility.mode, "disabled");
+  assert.equal(config.compatibility.maxRegistrations, 0);
+});
+
+test("wallet environment enforces fail-closed validation for provider compatibility mode", () => {
+  const source = validSource();
+  const validToken = "0123456789abcdef0123456789abcdef";
+  const validAccountId = "11111111-2222-3333-4444-555555555555";
+
+  // 1. Missing token must fail
+  assert.throws(
+    () =>
+      readWalletConfig({
+        ...source,
+        FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+        FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: validAccountId,
+      }),
+    invalid,
+  );
+
+  // 2. Placeholder token must fail
+  assert.throws(
+    () =>
+      readWalletConfig({
+        ...source,
+        FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+        FLOW_PROVIDER_COMPATIBILITY_TOKEN: "replace-with-token-12345",
+        FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: validAccountId,
+      }),
+    invalid,
+  );
+
+  // 3. Missing isolated account ID must fail
+  assert.throws(
+    () =>
+      readWalletConfig({
+        ...source,
+        FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+        FLOW_PROVIDER_COMPATIBILITY_TOKEN: validToken,
+      }),
+    invalid,
+  );
+
+  // 4. FLOW_EXECUTION != 'disabled' must fail
+  assert.throws(
+    () =>
+      readWalletConfig({
+        ...source,
+        FLOW_EXECUTION: "enabled",
+        FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+        FLOW_PROVIDER_COMPATIBILITY_TOKEN: validToken,
+        FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: validAccountId,
+      }),
+    invalid,
+  );
+
+  // 5. Valid compatibility mode configuration succeeds
+  const authorized = readWalletConfig({
+    ...source,
+    FLOW_EXECUTION: "disabled",
+    FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+    FLOW_PROVIDER_COMPATIBILITY_TOKEN: validToken,
+    FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: validAccountId,
+    FLOW_NEAR_RPC_URL: "https://rpc.mainnet.near.org",
+  });
+  assert.equal(authorized.compatibility.mode, "authorized");
+  assert.equal(authorized.compatibility.maxRegistrations, 1);
+  assert.equal(authorized.compatibility.isolatedAccountId, validAccountId);
+  assert.equal(authorized.rpc?.nearRpcUrl, "https://rpc.mainnet.near.org");
+});

@@ -24,6 +24,7 @@ import { readConfig } from "../src/foundation/environment.ts";
 import { getPrismaClient } from "../src/foundation/prisma.ts";
 import {
   activateWalletIfReady,
+  assertOperatorIdentityRegistered,
   attachWalletAddressesAndCapabilities,
   claimJobLease,
   commitJobSuccess,
@@ -94,7 +95,7 @@ async function createTestAccount(
     `,
       [`Personal Account ${prefix}`, userId],
     );
-    return { userId, accountId: accountResult.rows[0]!.id, kind };
+    return { userId, accountId: accountResult.rows[0]!.id, authUserId, kind };
   } else {
     const accountResult = await client.query<{ id: string }>(
       `
@@ -119,7 +120,7 @@ async function createTestAccount(
     `,
       [accountId, userId],
     );
-    return { userId, accountId, kind };
+    return { userId, accountId, authUserId, kind };
   }
 }
 
@@ -2817,4 +2818,78 @@ test("M2 Phase 4 operator recovery: two-person escalation and resolution for UNK
   } finally {
     await mockServer.close();
   }
+});
+
+test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and verifyOperatorInDatabase reject unauthenticated operator IDs", async () => {
+  const db = getPrismaClient();
+
+  // Create real registered auth users for operators
+  const opRealA = await createTestAccount(pool, "PERSONAL", "real-op-a");
+  const opRealB = await createTestAccount(pool, "PERSONAL", "real-op-b");
+  const fakeOperatorAuthId = "unregistered-fake-operator-id";
+
+  // 1. assertOperatorIdentityRegistered rejects fake operator ID
+  await assert.rejects(
+    assertOperatorIdentityRegistered(db, fakeOperatorAuthId),
+    { code: "INVALID_OPERATOR_IDENTITY" },
+  );
+
+  // 2. assertOperatorIdentityRegistered succeeds for real registered auth user
+  await assertOperatorIdentityRegistered(db, opRealA.authUserId);
+  await assertOperatorIdentityRegistered(db, opRealB.authUserId);
+
+  // 3. Test verifyOperatorInDatabase on escalateJobToManualReview
+  const acc = await createTestAccount(pool, "PERSONAL", "op-verify-test");
+  const job = await ensureProvisioningJobForAccount(
+    db,
+    acc.accountId,
+    randomUUID(),
+  );
+
+  // Set job status to UNKNOWN to allow escalation
+  await pool.query(
+    "UPDATE flow.wallet_provisioning_jobs SET status = 'UNKNOWN', failure_classification = 'POST_DISPATCH_AMBIGUOUS' WHERE id = $1::uuid",
+    [job.id],
+  );
+
+  // Escalation with fake operator and verifyOperatorInDatabase: true must be rejected
+  await assert.rejects(
+    escalateJobToManualReview(db, {
+      jobId: job.id,
+      accountId: acc.accountId,
+      operatorAuthId: fakeOperatorAuthId,
+      reasonCode: "AMBIGUOUS_REGISTRATION_OUTCOME",
+      providerInspectionSummary: "NO_REMOTE_WALLET_FOUND",
+      requestId: randomUUID(),
+      verifyOperatorInDatabase: true,
+    }),
+    { code: "INVALID_OPERATOR_IDENTITY" },
+  );
+
+  // Escalation with real operator and verifyOperatorInDatabase: true succeeds
+  await escalateJobToManualReview(db, {
+    jobId: job.id,
+    accountId: acc.accountId,
+    operatorAuthId: opRealA.authUserId,
+    reasonCode: "AMBIGUOUS_REGISTRATION_OUTCOME",
+    providerInspectionSummary: "NO_REMOTE_WALLET_FOUND",
+    requestId: randomUUID(),
+    verifyOperatorInDatabase: true,
+  });
+
+  // Resolution with fake approver must be rejected
+  await assert.rejects(
+    resolveQuarantinedProvisioningJob(db, {
+      resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+      jobId: job.id,
+      accountId: acc.accountId,
+      expectedAccountKind: "PERSONAL",
+      expectedDispatchAttemptId: "00000000-0000-0000-0000-000000000000",
+      initiatorOperatorAuthId: opRealA.authUserId,
+      approverOperatorAuthId: fakeOperatorAuthId, // fake!
+      requestId: randomUUID(),
+      verifyOperatorInDatabase: true,
+    }),
+    { code: "INVALID_OPERATOR_IDENTITY" },
+  );
 });

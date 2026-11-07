@@ -1414,6 +1414,7 @@ export interface EscalateToManualReviewInput {
   readonly providerInspectionSummary: ProviderInspectionSummary;
   readonly expectedDispatchAttemptId?: string;
   readonly requestId: string;
+  readonly verifyOperatorInDatabase?: boolean;
 }
 
 /**
@@ -1483,6 +1484,18 @@ export async function escalateJobToManualReview(
         "WALLET_ACCOUNT_MISMATCH",
         `Job ${input.jobId} does not belong to account ${input.accountId}.`,
       );
+    }
+
+    if (input.verifyOperatorInDatabase) {
+      const authUsers = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM flow.auth_users WHERE id = ${input.operatorAuthId.trim()}
+      `;
+      if (!authUsers[0]) {
+        throw new FlowError(
+          "INVALID_OPERATOR_IDENTITY",
+          `Operator ${input.operatorAuthId} is not a registered user in flow.auth_users.`,
+        );
+      }
     }
 
     if (input.expectedAccountKind !== undefined) {
@@ -1576,6 +1589,7 @@ export type QuarantinedJobResolutionInput =
       readonly keyDigest: string;
       readonly handoffUrl?: string;
       readonly requestId: string;
+      readonly verifyOperatorInDatabase?: boolean;
     }
   | {
       readonly resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE";
@@ -1586,6 +1600,7 @@ export type QuarantinedJobResolutionInput =
       readonly initiatorOperatorAuthId: string;
       readonly approverOperatorAuthId: string;
       readonly requestId: string;
+      readonly verifyOperatorInDatabase?: boolean;
     };
 
 /**
@@ -1676,6 +1691,19 @@ export async function resolveQuarantinedProvisioningJob(
         "WALLET_ACCOUNT_MISMATCH",
         `Job ${input.jobId} does not belong to account ${input.accountId}.`,
       );
+    }
+
+    if (input.verifyOperatorInDatabase) {
+      const authUsers = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM flow.auth_users WHERE id = ${initiator} OR id = ${approver}
+      `;
+      const foundIds = new Set(authUsers.map((u) => u.id));
+      if (!foundIds.has(initiator) || !foundIds.has(approver)) {
+        throw new FlowError(
+          "INVALID_OPERATOR_IDENTITY",
+          "Both initiator and approver must be registered users in flow.auth_users.",
+        );
+      }
     }
 
     if (input.expectedAccountKind !== undefined) {
@@ -1938,4 +1966,30 @@ export async function resolveQuarantinedProvisioningJob(
       fencingToken: nextFencingToken,
     };
   });
+}
+
+/**
+ * Asserts that an operator authentication identifier exists as an active user in `flow.auth_users`.
+ * Used by administrative controllers to reject fabricated or unauthenticated operator identifiers.
+ */
+export async function assertOperatorIdentityRegistered(
+  db: FlowDb,
+  operatorAuthId: string,
+): Promise<void> {
+  const trimmed = operatorAuthId.trim();
+  if (!OPERATOR_AUTH_ID_REGEX.test(trimmed)) {
+    throw new FlowError(
+      "INVALID_OPERATOR_IDENTITY",
+      "Operator authentication identifier format is invalid.",
+    );
+  }
+  const users = await db.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM flow.auth_users WHERE id = ${trimmed}
+  `;
+  if (!users[0]) {
+    throw new FlowError(
+      "INVALID_OPERATOR_IDENTITY",
+      `Operator ${trimmed} is not a registered user in flow.auth_users.`,
+    );
+  }
 }

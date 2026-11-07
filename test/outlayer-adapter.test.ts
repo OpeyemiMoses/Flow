@@ -551,3 +551,39 @@ test("isAmbiguousRegistrationError classifies all uncertain post-dispatch regist
     }
   }
 });
+
+test("OutLayerAdapter enforces fail-closed provider compatibility mode on remote endpoints", async () => {
+  // 1. Remote endpoint without compatibility config -> throws INVALID_CONFIGURATION
+  const unconfiguredAdapter = new OutLayerAdapter("https://api.outlayer.ai");
+  await assert.rejects(() => unconfiguredAdapter.register({}), {
+    code: "INVALID_CONFIGURATION",
+  });
+  await assert.rejects(() => unconfiguredAdapter.getAddress("wk_key", "base"), {
+    code: "INVALID_CONFIGURATION",
+  });
+
+  // 2. Remote endpoint with mode: 'disabled' -> throws INVALID_CONFIGURATION
+  const disabledAdapter = new OutLayerAdapter("https://api.outlayer.ai", 5000, {
+    compatibilityConfig: { mode: "disabled", maxRegistrations: 0 },
+  });
+  await assert.rejects(() => disabledAdapter.register({}), {
+    code: "INVALID_CONFIGURATION",
+  });
+
+  // 3. Remote endpoint not in allowlist -> throws INVALID_CONFIGURATION
+  const forbiddenHostAdapter = new OutLayerAdapter(
+    "https://evil.example.com",
+    5000,
+    {
+      compatibilityConfig: {
+        mode: "authorized",
+        authorizedToken: "valid_test_token_12345",
+        isolatedAccountId: "00000000-0000-0000-0000-000000000000",
+        maxRegistrations: 1,
+      },
+    },
+  );
+  await assert.rejects(() => forbiddenHostAdapter.register({}), {
+    code: "INVALID_CONFIGURATION",
+  });
+});
