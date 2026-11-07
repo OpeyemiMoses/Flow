@@ -62,6 +62,11 @@ import {
   runTestnetRehearsal,
 } from "../scripts/rehearse-testnet-registration.ts";
 import { prepareIsolatedTestnetAccount } from "../scripts/prepare-testnet-account.ts";
+import {
+  listSupportedAssets,
+  getAccountBalances,
+  upsertWalletBalance,
+} from "../src/server/assets/asset-service.ts";
 
 assert.equal(
   process.env.FLOW_ENV,
@@ -4709,4 +4714,290 @@ test("M2 Phase 5.5 Operational Preflight: Pristine onboarding job vs in-flight j
   assert.ok(!sanitizedRawErr.diagnostic.includes("super_secret_pw"));
   assert.ok(!sanitizedRawErr.diagnostic.includes("postgresql"));
   assert.ok(sanitizedRawErr.diagnostic.includes("audit logs"));
+});
+
+test("m3 phase 1: asset registry, schema constraints, role separation and tenant isolation", async () => {
+  // 1. Seeded assets and network deployments integrity (queried by appDb)
+  const allAssets = await listSupportedAssets(appDb);
+  assert.ok(
+    allAssets.length >= 12,
+    `Expected at least 12 network assets, got ${allAssets.length}`,
+  );
+
+  // Verify NEAR Native
+  const nearNative = allAssets.find(
+    (a) =>
+      a.network === "near" &&
+      a.chainId === "near-mainnet" &&
+      a.asset.symbol === "NEAR",
+  );
+  assert.ok(nearNative);
+  assert.equal(nearNative.tokenStandard, "NATIVE");
+  assert.equal(nearNative.contractAddress, null);
+  assert.equal(nearNative.decimals, 24);
+
+  // Verify Circle Native USDC on NEAR Mainnet (authoritative contract)
+  const nearUsdc = allAssets.find(
+    (a) =>
+      a.network === "near" &&
+      a.chainId === "near-mainnet" &&
+      a.asset.symbol === "USDC",
+  );
+  assert.ok(nearUsdc);
+  assert.equal(
+    nearUsdc.contractAddress,
+    "17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",
+  );
+  assert.equal(nearUsdc.decimals, 6);
+  assert.equal(nearUsdc.tokenStandard, "NEP141");
+
+  // Verify Bridged USDC.e on NEAR Mainnet
+  const nearUsdce = allAssets.find(
+    (a) =>
+      a.network === "near" &&
+      a.chainId === "near-mainnet" &&
+      a.asset.symbol === "USDC.e",
+  );
+  assert.ok(nearUsdce);
+  assert.equal(
+    nearUsdce.contractAddress,
+    "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.factory.bridge.near",
+  );
+  assert.equal(nearUsdce.decimals, 6);
+
+  // Verify NO unverified USDC on near-testnet
+  const nearTestnetUsdc = allAssets.find(
+    (a) =>
+      a.network === "near" &&
+      a.chainId === "near-testnet" &&
+      a.asset.symbol === "USDC",
+  );
+  assert.equal(
+    nearTestnetUsdc,
+    undefined,
+    "Unverified USDC must not be seeded on near-testnet",
+  );
+
+  // Verify Base Mainnet USDC (EIP-55 checksummed)
+  const baseUsdc = allAssets.find(
+    (a) =>
+      a.network === "base" && a.chainId === "8453" && a.asset.symbol === "USDC",
+  );
+  assert.ok(baseUsdc);
+  assert.equal(
+    baseUsdc.contractAddress,
+    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  );
+  assert.equal(baseUsdc.decimals, 6);
+
+  // Verify Base Sepolia USDC
+  const baseSepoliaUsdc = allAssets.find(
+    (a) =>
+      a.network === "base" &&
+      a.chainId === "84532" &&
+      a.asset.symbol === "USDC",
+  );
+  assert.ok(baseSepoliaUsdc);
+  assert.equal(
+    baseSepoliaUsdc.contractAddress,
+    "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  );
+  assert.equal(baseSepoliaUsdc.decimals, 6);
+
+  // Verify Solana Mainnet & Devnet USDC
+  const solanaMainnetUsdc = allAssets.find(
+    (a) =>
+      a.network === "solana" &&
+      a.chainId === "solana-mainnet" &&
+      a.asset.symbol === "USDC",
+  );
+  assert.ok(solanaMainnetUsdc);
+  assert.equal(
+    solanaMainnetUsdc.contractAddress,
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  );
+  assert.equal(solanaMainnetUsdc.decimals, 6);
+
+  const solanaDevnetUsdc = allAssets.find(
+    (a) =>
+      a.network === "solana" &&
+      a.chainId === "solana-devnet" &&
+      a.asset.symbol === "USDC",
+  );
+  assert.ok(solanaDevnetUsdc);
+  assert.equal(
+    solanaDevnetUsdc.contractAddress,
+    "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  );
+  assert.equal(solanaDevnetUsdc.decimals, 6);
+
+  // Filter checks
+  const baseOnly = await listSupportedAssets(appDb, { network: "base" });
+  assert.ok(baseOnly.every((a) => a.network === "base"));
+
+  const mainnetOnly = await listSupportedAssets(appDb, { chainId: "8453" });
+  assert.ok(mainnetOnly.every((a) => a.chainId === "8453"));
+
+  // 2. Database role separation and least-privilege enforcement
+  // App role can SELECT from flow.assets
+  const selectRes = await pool.query(
+    "SELECT count(*)::int as count FROM flow.assets",
+  );
+  assert.ok(selectRes.rows[0].count >= 5);
+
+  // App role CANNOT INSERT into flow.assets (permission denied: 42501)
+  await assert.rejects(
+    async () => {
+      await pool.query(
+        "INSERT INTO flow.assets (symbol, name, kind) VALUES ('SPAM', 'Spam Token', 'FUNGIBLE_TOKEN')",
+      );
+    },
+    (err: unknown) => (err as { code?: string }).code === "42501",
+  );
+
+  // App role CANNOT INSERT into flow.network_assets (permission denied: 42501)
+  await assert.rejects(
+    async () => {
+      await pool.query(
+        "INSERT INTO flow.network_assets (asset_id, network, chain_id, token_standard, decimals) VALUES ($1, 'near', 'near-mainnet', 'NEP141', 18)",
+        ["10000000-0000-0000-0000-000000000001"],
+      );
+    },
+    (err: unknown) => (err as { code?: string }).code === "42501",
+  );
+
+  // App role CANNOT INSERT into flow.wallet_balances (permission denied: 42501)
+  await assert.rejects(
+    async () => {
+      await pool.query(
+        "INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance) VALUES ($1, $2, 100)",
+        [randomUUID(), "20000000-0000-0000-0000-000000000001"],
+      );
+    },
+    (err: unknown) => (err as { code?: string }).code === "42501",
+  );
+
+  // 3. PostgreSQL Schema Constraints
+  // Negative balance constraint (CHECK atomic_balance >= 0)
+  await assert.rejects(
+    async () => {
+      await workerPool.query(
+        `INSERT INTO flow.wallet_balances (wallet_id, network_asset_id, atomic_balance)
+         VALUES ($1, '20000000-0000-0000-0000-000000000001'::uuid, -100)`,
+        [randomUUID()],
+      );
+    },
+    (err: unknown) => (err as { code?: string }).code === "23514", // check_violation
+  );
+
+  // Decimals range constraint (CHECK decimals >= 0 AND decimals <= 36)
+  await assert.rejects(
+    async () => {
+      await operatorPool.query(
+        `INSERT INTO flow.network_assets (id, asset_id, network, chain_id, token_standard, decimals, is_verified, is_deposit_eligible)
+         VALUES (gen_random_uuid(), '10000000-0000-0000-0000-000000000001'::uuid, 'near', 'near-mainnet', 'NEP141', 37, true, true)`,
+      );
+    },
+    (err: unknown) => (err as { code?: string }).code === "23514", // check_violation
+  );
+
+  // 4. Tenant isolation and account portfolio projection
+  const accountA = await createTestAccount(pool, "PERSONAL", "m3-tenant-a");
+  const accountB = await createTestAccount(pool, "PERSONAL", "m3-tenant-b");
+
+  // Worker inserts a wallet for Account A
+  const walletAId = randomUUID();
+  await workerPool.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, environment, provider_wallet_id, near_account_id,
+      encrypted_credential, key_id, key_digest, status, policy_state
+    ) VALUES (
+      $1::uuid, $2::uuid, 'OUTLAYER', 'testnet',
+      $3, 'mock-near-acc', 'mock-envelope', 'v1', 'mock-digest',
+      'PROVISIONING'::flow.wallet_status, 'none'
+    )`,
+    [walletAId, accountA.accountId, `prov-${walletAId}`],
+  );
+
+  // Worker records a balance for Account A (5 NEAR = 5 * 10^24)
+  const nearTestnetAssetId = "20000000-0000-0000-0000-000000000002";
+  await upsertWalletBalance(db, {
+    walletId: walletAId,
+    networkAssetId: nearTestnetAssetId,
+    atomicBalance: 5_000_000_000_000_000_000_000_000n,
+    blockHeight: 1234567n,
+    syncStatus: "SYNCED",
+    finality: "FINALIZED",
+  });
+
+  // User A querying Account A: SUCCEEDS
+  const projA = await getAccountBalances(
+    appDb,
+    accountA.accountId,
+    accountA.userId,
+  );
+  assert.equal(projA.accountId, accountA.accountId);
+  assert.ok(projA.wallet);
+  assert.equal(projA.wallet.status, "PROVISIONING");
+  assert.equal(projA.wallet.eligibleForDeposits, false);
+  assert.equal(projA.balances.length, 1);
+  assert.equal(
+    projA.balances[0]!.atomicBalance,
+    5_000_000_000_000_000_000_000_000n,
+  );
+  assert.equal(projA.balances[0]!.displayBalance, "5");
+  assert.equal(projA.balances[0]!.isZeroConfirmed, false);
+  assert.equal(projA.balances[0]!.syncStatus, "SYNCED");
+
+  // User B querying Account A: FAILS with ACCOUNT_NOT_FOUND (tenant barrier)
+  await assert.rejects(
+    async () => {
+      await getAccountBalances(appDb, accountA.accountId, accountB.userId);
+    },
+    (err: unknown) =>
+      err instanceof FlowError && err.code === "ACCOUNT_NOT_FOUND",
+  );
+
+  // User A querying Account B: FAILS with ACCOUNT_NOT_FOUND
+  await assert.rejects(
+    async () => {
+      await getAccountBalances(appDb, accountB.accountId, accountA.userId);
+    },
+    (err: unknown) =>
+      err instanceof FlowError && err.code === "ACCOUNT_NOT_FOUND",
+  );
+
+  // Confirmed zero balance vs NOT_SYNCED balance
+  await upsertWalletBalance(db, {
+    walletId: walletAId,
+    networkAssetId: nearTestnetAssetId,
+    atomicBalance: 0n,
+    blockHeight: 1234568n,
+    syncStatus: "SYNCED",
+  });
+
+  const projAZero = await getAccountBalances(
+    appDb,
+    accountA.accountId,
+    accountA.userId,
+  );
+  assert.equal(projAZero.balances[0]!.atomicBalance, 0n);
+  assert.equal(projAZero.balances[0]!.displayBalance, "0");
+  assert.equal(projAZero.balances[0]!.isZeroConfirmed, true);
+
+  await upsertWalletBalance(db, {
+    walletId: walletAId,
+    networkAssetId: nearTestnetAssetId,
+    atomicBalance: 0n,
+    blockHeight: null,
+    syncStatus: "NOT_SYNCED",
+  });
+
+  const projANotSynced = await getAccountBalances(
+    appDb,
+    accountA.accountId,
+    accountA.userId,
+  );
+  assert.equal(projANotSynced.balances[0]!.isZeroConfirmed, false);
+  assert.equal(projANotSynced.balances[0]!.syncStatus, "NOT_SYNCED");
 });

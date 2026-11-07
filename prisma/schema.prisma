@@ -298,6 +298,7 @@ model FlowWallet {
   account             FlowAccount        @relation(fields: [accountId], references: [id], onDelete: Restrict)
   addresses           WalletAddress[]
   capabilities        WalletCapability[]
+  balances            WalletBalance[]
 
   @@index([providerWalletId])
   @@map("wallets")
@@ -423,5 +424,69 @@ model CustodyRecoveryApproval {
 
   @@index([jobId, status])
   @@map("custody_recovery_approvals")
+  @@schema("flow")
+}
+
+model FlowAsset {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  symbol        String
+  name          String
+  kind          String         @default("FUNGIBLE_TOKEN")
+  description   String?
+  iconUrl       String?        @map("icon_url")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @default(now()) @updatedAt @map("updated_at")
+  networkAssets NetworkAsset[]
+
+  @@index([symbol])
+  @@map("assets")
+  @@schema("flow")
+}
+
+model NetworkAsset {
+  id                String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  assetId           String          @map("asset_id") @db.Uuid
+  network           String
+  chainId           String          @map("chain_id")
+  tokenStandard     String          @map("token_standard")
+  contractAddress   String?         @map("contract_address")
+  decimals          Int
+  symbolOverride    String?         @map("symbol_override")
+  nameOverride      String?         @map("name_override")
+  isVerified        Boolean         @default(true) @map("is_verified")
+  isDepositEligible Boolean         @default(false) @map("is_deposit_eligible")
+  status            String          @default("ACTIVE")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @default(now()) @updatedAt @map("updated_at")
+  asset             FlowAsset       @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  balances          WalletBalance[]
+
+  @@index([network, chainId])
+  @@index([contractAddress])
+  @@map("network_assets")
+  @@schema("flow")
+}
+
+model WalletBalance {
+  id                  String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  walletId            String       @map("wallet_id") @db.Uuid
+  networkAssetId      String       @map("network_asset_id") @db.Uuid
+  tokenAccountAddress String?      @map("token_account_address")
+  atomicBalance       Decimal      @default(0) @map("atomic_balance") @db.Decimal(78, 0)
+  blockHeight         BigInt?      @map("block_height")
+  blockTimestamp      DateTime?    @map("block_timestamp")
+  observedAt          DateTime     @default(now()) @map("observed_at")
+  finality            String       @default("UNKNOWN")
+  syncStatus          String       @default("NOT_SYNCED") @map("sync_status")
+  lastSyncedAt        DateTime?    @map("last_synced_at")
+  lastError           String?      @map("last_error")
+  createdAt           DateTime     @default(now()) @map("created_at")
+  updatedAt           DateTime     @default(now()) @updatedAt @map("updated_at")
+  wallet              FlowWallet   @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  networkAsset        NetworkAsset @relation(fields: [networkAssetId], references: [id], onDelete: Restrict)
+
+  @@index([walletId, syncStatus])
+  @@index([networkAssetId])
+  @@map("wallet_balances")
   @@schema("flow")
 }

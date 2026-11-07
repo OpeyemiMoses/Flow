@@ -1,4 +1,4 @@
-type FlowErrorCode =
+export type FlowErrorCode =
   | "INVALID_CONFIGURATION"
   | "DATABASE_UNAVAILABLE"
   | "DATABASE_NOT_READY"
@@ -30,7 +30,13 @@ type FlowErrorCode =
   | "CUSTODY_EXECUTION_BLOCKED"
   | "INVALID_REQUEST_ID"
   | "INVALID_RECOVERY_EVIDENCE"
-  | "TWO_PERSON_APPROVAL_REQUIRED";
+  | "TWO_PERSON_APPROVAL_REQUIRED"
+  | "INVALID_DECIMALS"
+  | "INVALID_AMOUNT"
+  | "PRECISION_OVERFLOW"
+  | "AMOUNT_OVERFLOW"
+  | "INSUFFICIENT_FUNDS"
+  | "ACCOUNT_NOT_FOUND";
 
 export class FlowError extends Error {
   readonly code: FlowErrorCode;
