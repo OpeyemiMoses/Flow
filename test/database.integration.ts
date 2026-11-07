@@ -24,15 +24,22 @@ import { readConfig } from "../src/foundation/environment.ts";
 import { getPrismaClient } from "../src/foundation/prisma.ts";
 import {
   activateWalletIfReady,
+  assertOperatorAuthority,
   assertOperatorIdentityRegistered,
   attachWalletAddressesAndCapabilities,
   claimJobLease,
+  claimCompatibilityRegistration,
   commitJobSuccess,
+  completeCompatibilityRegistration,
+  createCompatibilityAuthorization,
+  createCustodyRecoveryApproval,
   createProvisioningJob,
+  enrollCustodyOperator,
   ensureProvisioningJobForAccount,
   escalateJobToManualReview,
   getAccountWalletPublicProjection,
   persistRegisteredWallet,
+  quarantineCompatibilityRegistration,
   recordJobAmbiguous,
   recordJobDispatch,
   recordJobTerminalFailure,
@@ -1984,6 +1991,15 @@ for (const [action, statement] of [
   ["delete a wallet address", "DELETE FROM flow.wallet_addresses"],
   ["delete a wallet capability", "DELETE FROM flow.wallet_capabilities"],
   ["delete a provisioning job", "DELETE FROM flow.wallet_provisioning_jobs"],
+  [
+    "delete a provider compatibility authorization",
+    "DELETE FROM flow.provider_compatibility_authorizations",
+  ],
+  ["delete a custody operator", "DELETE FROM flow.custody_operators"],
+  [
+    "delete a custody recovery approval",
+    "DELETE FROM flow.custody_recovery_approvals",
+  ],
 ] as const) {
   test(`the runtime role cannot ${action}`, async () => {
     const client = await pool.connect();
@@ -2838,6 +2854,16 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
   await assertOperatorIdentityRegistered(db, opRealA.authUserId);
   await assertOperatorIdentityRegistered(db, opRealB.authUserId);
 
+  // Enroll opRealA into flow.custody_operators
+  await enrollCustodyOperator(db, {
+    authUserId: opRealA.authUserId,
+    enrolledBy: "security-officer-seed",
+  });
+  await assertOperatorAuthority(db, opRealA.authUserId);
+  await assert.rejects(assertOperatorAuthority(db, opRealB.authUserId), {
+    code: "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+  });
+
   // 3. Test verifyOperatorInDatabase on escalateJobToManualReview
   const acc = await createTestAccount(pool, "PERSONAL", "op-verify-test");
   const job = await ensureProvisioningJobForAccount(
@@ -2848,9 +2874,15 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
 
   // Set job status to UNKNOWN to allow escalation
   await pool.query(
-    "UPDATE flow.wallet_provisioning_jobs SET status = 'UNKNOWN', failure_classification = 'POST_DISPATCH_AMBIGUOUS' WHERE id = $1::uuid",
+    "UPDATE flow.wallet_provisioning_jobs SET status = 'UNKNOWN', failure_classification = 'POST_DISPATCH_AMBIGUOUS', dispatch_attempt_id = gen_random_uuid(), dispatched_at = CURRENT_TIMESTAMP WHERE id = $1::uuid",
     [job.id],
   );
+
+  const jobRows = await pool.query<{ dispatch_attempt_id: string }>(
+    "SELECT dispatch_attempt_id FROM flow.wallet_provisioning_jobs WHERE id = $1::uuid",
+    [job.id],
+  );
+  const dispatchAttemptId = jobRows.rows[0]!.dispatch_attempt_id;
 
   // Escalation with fake operator and verifyOperatorInDatabase: true must be rejected
   await assert.rejects(
@@ -2884,7 +2916,7 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
       jobId: job.id,
       accountId: acc.accountId,
       expectedAccountKind: "PERSONAL",
-      expectedDispatchAttemptId: "00000000-0000-0000-0000-000000000000",
+      expectedDispatchAttemptId: dispatchAttemptId,
       initiatorOperatorAuthId: opRealA.authUserId,
       approverOperatorAuthId: fakeOperatorAuthId, // fake!
       requestId: randomUUID(),
@@ -2892,4 +2924,206 @@ test("M2 Phase 5 operator authentication: assertOperatorIdentityRegistered and v
     }),
     { code: "INVALID_OPERATOR_IDENTITY" },
   );
+
+  // Resolution where approver is not enrolled in flow.custody_operators must be rejected
+  await assert.rejects(
+    resolveQuarantinedProvisioningJob(db, {
+      resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+      jobId: job.id,
+      accountId: acc.accountId,
+      expectedAccountKind: "PERSONAL",
+      expectedDispatchAttemptId: dispatchAttemptId,
+      initiatorOperatorAuthId: opRealA.authUserId,
+      approverOperatorAuthId: opRealB.authUserId, // real user, but not enrolled as operator!
+      requestId: randomUUID(),
+      verifyOperatorInDatabase: true,
+    }),
+    { code: "CUSTODY_OPERATOR_AUTHORIZATION_ERROR" },
+  );
+
+  // Enroll opRealB as operator
+  await enrollCustodyOperator(db, {
+    authUserId: opRealB.authUserId,
+    enrolledBy: "security-officer-seed",
+  });
+
+  // Resolution without independent flow.custody_recovery_approvals record must be rejected
+  await assert.rejects(
+    resolveQuarantinedProvisioningJob(db, {
+      resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+      jobId: job.id,
+      accountId: acc.accountId,
+      expectedAccountKind: "PERSONAL",
+      expectedDispatchAttemptId: dispatchAttemptId,
+      initiatorOperatorAuthId: opRealA.authUserId,
+      approverOperatorAuthId: opRealB.authUserId,
+      requestId: randomUUID(),
+      verifyOperatorInDatabase: true,
+    }),
+    { code: "CUSTODY_INDEPENDENT_APPROVAL_REQUIRED" },
+  );
+
+  // Create valid independent recovery approval record
+  await createCustodyRecoveryApproval(db, {
+    jobId: job.id,
+    accountId: acc.accountId,
+    approverAuthId: opRealB.authUserId,
+    resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+  });
+
+  // Resolution now succeeds and atomically consumes the approval record
+  const resolutionResult = await resolveQuarantinedProvisioningJob(db, {
+    resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE",
+    jobId: job.id,
+    accountId: acc.accountId,
+    expectedAccountKind: "PERSONAL",
+    expectedDispatchAttemptId: dispatchAttemptId,
+    initiatorOperatorAuthId: opRealA.authUserId,
+    approverOperatorAuthId: opRealB.authUserId,
+    requestId: randomUUID(),
+    verifyOperatorInDatabase: true,
+  });
+  assert.equal(resolutionResult.status, "PENDING");
+});
+
+test("M2 Phase 5.1 durable compatibility authorization: enforces budget of 1, racing claims, ambiguity consumption, and expiration", async () => {
+  const db = getPrismaClient();
+  const acc = await createTestAccount(pool, "PERSONAL", "compat-budget-test");
+
+  // 1. Check constraints on max_registrations and registrations_attempted
+  await assert.rejects(
+    pool.query(
+      `INSERT INTO flow.provider_compatibility_authorizations (
+        account_id, environment, allowed_methods, max_registrations, expires_at
+      ) VALUES ($1::uuid, 'testnet', ARRAY['POST /register'], 2, CURRENT_TIMESTAMP + interval '1 hour')`,
+      [acc.accountId],
+    ),
+    { code: "23514" }, // CHECK constraint violation
+  );
+
+  // 2. Create durable single-use compatibility authorization record
+  const auth = await createCompatibilityAuthorization(db, {
+    accountId: acc.accountId,
+    environment: "testnet",
+  });
+  assert.ok(auth.id);
+  assert.ok(auth.expiresAt > new Date());
+
+  // 3. Concurrent workers race to claim the single-registration budget
+  const dispatch1 = randomUUID();
+  const dispatch2 = randomUUID();
+  const [claim1, claim2] = await Promise.allSettled([
+    claimCompatibilityRegistration(db, auth.id, "worker-1", dispatch1),
+    claimCompatibilityRegistration(db, auth.id, "worker-2", dispatch2),
+  ]);
+
+  const fulfilled = [claim1, claim2].filter((c) => c.status === "fulfilled");
+  const rejected = [claim1, claim2].filter((c) => c.status === "rejected");
+
+  assert.equal(
+    fulfilled.length,
+    1,
+    "Exactly one worker must succeed in claiming the single registration",
+  );
+  assert.equal(rejected.length, 1, "Competing worker must be rejected");
+
+  const winner = (
+    fulfilled[0] as PromiseFulfilledResult<{
+      id: string;
+      accountId: string;
+      environment: string;
+    }>
+  ).value;
+  assert.equal(winner.accountId, acc.accountId);
+  assert.equal(winner.environment, "testnet");
+
+  // 4. Ambiguity quarantine: external provider drop consumes the budget permanently
+  await quarantineCompatibilityRegistration(
+    db,
+    auth.id,
+    dispatch1,
+    "POST_DISPATCH_AMBIGUOUS",
+  );
+
+  // Subsequent claim attempt fails because budget is consumed
+  await assert.rejects(
+    claimCompatibilityRegistration(db, auth.id, "worker-1", randomUUID()),
+    { code: "CUSTODY_REGISTRATION_BUDGET_EXCEEDED" },
+  );
+
+  // 5. Successful registration lifecycle
+  const acc2 = await createTestAccount(pool, "PERSONAL", "compat-success-test");
+  const auth2 = await createCompatibilityAuthorization(db, {
+    accountId: acc2.accountId,
+    environment: "testnet",
+  });
+  const dispatch3 = randomUUID();
+  await claimCompatibilityRegistration(
+    db,
+    auth2.id,
+    "worker-success",
+    dispatch3,
+  );
+  await completeCompatibilityRegistration(db, auth2.id, dispatch3);
+
+  const auth2Rows = await pool.query<{
+    status: string;
+    registrations_completed: number;
+    consumed_at: Date | null;
+  }>(
+    "SELECT status, registrations_completed, consumed_at FROM flow.provider_compatibility_authorizations WHERE id = $1::uuid",
+    [auth2.id],
+  );
+  assert.equal(auth2Rows.rows[0]!.status, "CONSUMED");
+  assert.equal(auth2Rows.rows[0]!.registrations_completed, 1);
+  assert.ok(auth2Rows.rows[0]!.consumed_at);
+
+  // 6. Expired authorization cannot be claimed
+  const acc3 = await createTestAccount(pool, "PERSONAL", "compat-expired-test");
+  const expiredInsert = await pool.query<{ id: string }>(
+    `INSERT INTO flow.provider_compatibility_authorizations (
+      account_id, environment, allowed_methods, status, max_registrations, expires_at
+    ) VALUES ($1::uuid, 'testnet', ARRAY['POST /register'], 'AUTHORIZED', 1, CURRENT_TIMESTAMP - interval '1 minute')
+    RETURNING id`,
+    [acc3.accountId],
+  );
+  const expiredId = expiredInsert.rows[0]!.id;
+
+  await assert.rejects(
+    claimCompatibilityRegistration(db, expiredId, "worker-late", randomUUID()),
+    { code: "CUSTODY_REGISTRATION_BUDGET_EXCEEDED" },
+  );
+});
+
+test("M2 Phase 5.1 OutLayerAdapter prohibited execution methods throw CUSTODY_EXECUTION_BLOCKED", async () => {
+  const adapter = new OutLayerAdapter("http://127.0.0.1:9999");
+
+  await assert.rejects(adapter.sign(), {
+    name: "FlowError",
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(adapter.broadcastTransaction(), {
+    name: "FlowError",
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(adapter.transfer(), {
+    name: "FlowError",
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(adapter.withdraw(), {
+    name: "FlowError",
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(adapter.swap(), {
+    name: "FlowError",
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(adapter.deleteWallet(), {
+    name: "FlowError",
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(adapter.mutatePolicy(), {
+    name: "FlowError",
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
 });

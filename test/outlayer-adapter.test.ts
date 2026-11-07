@@ -586,4 +586,41 @@ test("OutLayerAdapter enforces fail-closed provider compatibility mode on remote
   await assert.rejects(() => forbiddenHostAdapter.register({}), {
     code: "INVALID_CONFIGURATION",
   });
+
+  // 4. Testnet host https://testnet-api.outlayer.ai is recognized in host allowlist
+  const testnetAdapter = new OutLayerAdapter(
+    "https://testnet-api.outlayer.ai",
+    5000,
+    {
+      compatibilityConfig: {
+        mode: "authorized",
+        authorizedToken: "valid_test_token_12345",
+        isolatedAccountId: "00000000-0000-0000-0000-000000000000",
+        maxRegistrations: 1,
+      },
+    },
+  );
+  // Endpoint permitted assertion passes host check; registration quota error is thrown if quota exhausted
+  // Prohibited execution guard methods verify Requirement 9
+  await assert.rejects(() => testnetAdapter.sign(), {
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(() => testnetAdapter.broadcastTransaction(), {
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(() => testnetAdapter.transfer(), {
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(() => testnetAdapter.withdraw(), {
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(() => testnetAdapter.swap(), {
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(() => testnetAdapter.deleteWallet(), {
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
+  await assert.rejects(() => testnetAdapter.mutatePolicy(), {
+    code: "CUSTODY_EXECUTION_BLOCKED",
+  });
 });

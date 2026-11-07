@@ -63,6 +63,12 @@ async function main() {
       console.log(
         `   - Isolated Test Account: ${walletConfig.compatibility.isolatedAccountId ?? "NONE"}`,
       );
+      console.log(
+        `   - Authorization Record ID: ${walletConfig.compatibility.authorizationId ?? "DATABASE ENFORCED"}`,
+      );
+      console.log(
+        `   - Provider Environment: ${walletConfig.compatibility.providerEnvironment ?? "testnet"}`,
+      );
     }
     console.log(
       "   - Wallet Encryption Key: CONFIGURED (32-byte AES-256-GCM envelope key present)\n",
@@ -87,7 +93,7 @@ async function main() {
     // NEAR check
     if (rpcResults.near.reachable) {
       console.log(
-        `   - NEAR RPC (${rpcResults.near.endpoint}): REACHABLE (${rpcResults.near.latencyMs}ms, Chain: ${rpcResults.near.details.chainId}, Block: ${rpcResults.near.details.latestBlockHeight})`,
+        `   - NEAR RPC (${rpcResults.near.endpoint}): REACHABLE (${rpcResults.near.latencyMs}ms, Chain: ${rpcResults.near.details.chainId}, Env: ${rpcResults.near.chainEnvironment}, Block: ${rpcResults.near.details.latestBlockHeight})`,
       );
     } else {
       console.log(
@@ -98,7 +104,7 @@ async function main() {
     // Base check
     if (rpcResults.base.reachable) {
       console.log(
-        `   - Base RPC (${rpcResults.base.endpoint}): REACHABLE (${rpcResults.base.latencyMs}ms, Network ID: ${rpcResults.base.details.networkId}, Block: ${rpcResults.base.details.latestBlockHeight})`,
+        `   - Base RPC (${rpcResults.base.endpoint}): REACHABLE (${rpcResults.base.latencyMs}ms, Network ID: ${rpcResults.base.details.networkId}, Env: ${rpcResults.base.chainEnvironment}, Block: ${rpcResults.base.details.latestBlockHeight})`,
       );
     } else {
       console.log(
@@ -109,7 +115,7 @@ async function main() {
     // Solana check
     if (rpcResults.solana.reachable) {
       console.log(
-        `   - Solana RPC (${rpcResults.solana.endpoint}): REACHABLE (${rpcResults.solana.latencyMs}ms, Slot: ${rpcResults.solana.details.latestSlot})`,
+        `   - Solana RPC (${rpcResults.solana.endpoint}): REACHABLE (${rpcResults.solana.latencyMs}ms, Env: ${rpcResults.solana.chainEnvironment}, Slot: ${rpcResults.solana.details.latestSlot})`,
       );
     } else {
       console.log(

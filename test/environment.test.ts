@@ -6,6 +6,7 @@ import pg from "pg";
 import { createDatabasePool } from "../src/foundation/database.ts";
 import {
   assertWebEnvironment,
+  assertWorkerEnvironment,
   readConfig,
 } from "../src/foundation/environment.ts";
 
@@ -228,11 +229,44 @@ test("the checked-in integration dotenv template contains valid syntax and fail-
   assert.equal(template.FLOW_ENV, "local");
   assert.equal(template.FLOW_EXECUTION, "disabled");
   assert.equal(template.FLOW_PROVIDER_COMPATIBILITY_MODE, "disabled");
+  assert.equal(template.FLOW_PROVIDER_COMPATIBILITY_ENVIRONMENT, "testnet");
   assert.equal(template.FLOW_PROVIDER_COMPATIBILITY_MAX_REGISTRATIONS, "1");
   assert.ok(template.FLOW_OUTLAYER_API_URL);
   assert.ok(template.FLOW_NEAR_RPC_URL);
   assert.ok(template.FLOW_BASE_RPC_URL);
   assert.ok(template.FLOW_SOLANA_RPC_URL);
+});
+
+test("assertWebEnvironment rejects custody encryption key in web runtime", () => {
+  assert.throws(
+    () =>
+      assertWebEnvironment({
+        FLOW_DATABASE_URL:
+          "postgresql://flow_local_app:password@127.0.0.1:55432/flow_local",
+        FLOW_WALLET_ENCRYPTION_KEY:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      }),
+    {
+      code: "INVALID_CONFIGURATION",
+      message: /Custody encryption keys are isolated to the wallet worker/,
+    },
+  );
+});
+
+test("assertWorkerEnvironment rejects migration database URL in worker runtime", () => {
+  assert.throws(
+    () =>
+      assertWorkerEnvironment({
+        FLOW_DATABASE_URL:
+          "postgresql://flow_local_app:password@127.0.0.1:55432/flow_local",
+        FLOW_MIGRATION_DATABASE_URL:
+          "postgresql://flow_local_migrator:password@127.0.0.1:55432/flow_local",
+      }),
+    {
+      code: "INVALID_CONFIGURATION",
+      message: /Supply only the FLOW runtime database credential/,
+    },
+  );
 });
 
 test("the npm development command binds explicitly to IPv4 loopback", () => {

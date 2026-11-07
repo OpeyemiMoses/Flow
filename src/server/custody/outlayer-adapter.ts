@@ -10,7 +10,10 @@ import {
 import type { NetworkId } from "../../domain/providers.ts";
 import { FlowError } from "../../foundation/errors.ts";
 import { log } from "../../foundation/logger.ts";
-import type { ProviderCompatibilityConfig } from "../../foundation/wallet-environment.ts";
+import {
+  ALLOWED_OUTLAYER_HOSTS,
+  type ProviderCompatibilityConfig,
+} from "../../foundation/wallet-environment.ts";
 
 export type SanitizedProviderErrorCode =
   | "BAD_REQUEST"
@@ -172,6 +175,8 @@ const policyResponseSchema = z.object({
   wallet_id: z.string().uuid(),
   controller: z.string().optional(),
   frozen: z.boolean(),
+  version: z.number().int().optional(),
+  locked: z.boolean().optional(),
   policy: z.enum(["none", "stored"]).optional(),
   rules: z.record(z.string(), z.unknown()).optional(),
   approval: z.record(z.string(), z.unknown()).optional(),
@@ -253,6 +258,7 @@ export class OutLayerAdapter {
 
   private assertEndpointPermitted(
     action: "register" | "query" = "query",
+    endpointPath = "/register",
   ): void {
     let parsed: URL;
     try {
@@ -287,20 +293,28 @@ export class OutLayerAdapter {
       );
     }
 
-    // 3. Strict host allowlist
-    const ALLOWED_REMOTE_HOSTS = new Set([
-      "api.outlayer.ai",
-      "api.outlayer.fastnear.com",
-      "api.testnet.outlayer.fastnear.com",
-    ]);
-    if (!ALLOWED_REMOTE_HOSTS.has(parsed.hostname.toLowerCase())) {
+    // 3. Strict host allowlist (must be in ALLOWED_OUTLAYER_HOSTS)
+    if (!ALLOWED_OUTLAYER_HOSTS.includes(parsed.hostname.toLowerCase())) {
       throw new FlowError(
         "INVALID_CONFIGURATION",
         `OutLayer host ${parsed.hostname} is not in the authorized compatibility allowlist.`,
       );
     }
 
-    // 4. Registration quota check
+    // 4. Exact endpoint allowlist for compatibility rehearsal
+    const ALLOWED_ENDPOINTS = new Set([
+      "/register",
+      "/wallet/v1/address",
+      "/wallet/v1/policy",
+    ]);
+    if (!ALLOWED_ENDPOINTS.has(endpointPath)) {
+      throw new FlowError(
+        "INVALID_CONFIGURATION",
+        `OutLayer endpoint ${endpointPath} is not in the authorized compatibility allowlist.`,
+      );
+    }
+
+    // 5. Registration quota check
     if (action === "register") {
       if (
         this.liveRegistrationCount >= this.compatibilityConfig.maxRegistrations
@@ -317,7 +331,8 @@ export class OutLayerAdapter {
     endpoint: string,
     options: RequestInit,
   ): Promise<Response> {
-    this.assertEndpointPermitted("query");
+    const endpointPath = endpoint.split("?")[0]!;
+    this.assertEndpointPermitted("query", endpointPath);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -596,5 +611,60 @@ export class OutLayerAdapter {
     }
 
     return mintTrustedAdapterPolicyEvidence(parsed.data);
+  }
+
+  /**
+   * PROHIBITED EXECUTION GUARDS:
+   * Verification of Requirement 9: Compatibility mode and FLOW_EXECUTION=disabled
+   * cannot invoke signing, transaction broadcasting, transfers, swaps, wallet deletion,
+   * policy mutation, or payment execution.
+   */
+  async sign(): Promise<never> {
+    throw new FlowError(
+      "CUSTODY_EXECUTION_BLOCKED",
+      "Signing operations are strictly prohibited while FLOW_EXECUTION=disabled.",
+    );
+  }
+
+  async broadcastTransaction(): Promise<never> {
+    throw new FlowError(
+      "CUSTODY_EXECUTION_BLOCKED",
+      "Transaction broadcasting is strictly prohibited while FLOW_EXECUTION=disabled.",
+    );
+  }
+
+  async transfer(): Promise<never> {
+    throw new FlowError(
+      "CUSTODY_EXECUTION_BLOCKED",
+      "Fund transfers are strictly prohibited while FLOW_EXECUTION=disabled.",
+    );
+  }
+
+  async withdraw(): Promise<never> {
+    throw new FlowError(
+      "CUSTODY_EXECUTION_BLOCKED",
+      "Fund withdrawals are strictly prohibited while FLOW_EXECUTION=disabled.",
+    );
+  }
+
+  async swap(): Promise<never> {
+    throw new FlowError(
+      "CUSTODY_EXECUTION_BLOCKED",
+      "Token swaps are strictly prohibited while FLOW_EXECUTION=disabled.",
+    );
+  }
+
+  async deleteWallet(): Promise<never> {
+    throw new FlowError(
+      "CUSTODY_EXECUTION_BLOCKED",
+      "Wallet deletion is strictly prohibited while FLOW_EXECUTION=disabled.",
+    );
+  }
+
+  async mutatePolicy(): Promise<never> {
+    throw new FlowError(
+      "CUSTODY_EXECUTION_BLOCKED",
+      "Custody policy mutation is strictly prohibited while FLOW_EXECUTION=disabled.",
+    );
   }
 }

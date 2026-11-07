@@ -49,6 +49,7 @@ test("checkNearRpc parses valid status response from NEAR JSON-RPC", async () =>
     const result = await checkNearRpc(mock.url, 1000);
     assert.equal(result.network, "near");
     assert.equal(result.reachable, true);
+    assert.equal(result.chainEnvironment, "mainnet");
     assert.equal(result.details.chainId, "mainnet");
     assert.equal(result.details.latestBlockHeight, 223449716);
   } finally {
@@ -71,6 +72,7 @@ test("checkBaseRpc parses valid net_version and eth_blockNumber batch response f
     const result = await checkBaseRpc(mock.url, 1000);
     assert.equal(result.network, "base");
     assert.equal(result.reachable, true);
+    assert.equal(result.chainEnvironment, "mainnet");
     assert.equal(result.details.networkId, "8453");
     assert.equal(result.details.latestBlockHeight, 54272843);
   } finally {
@@ -82,11 +84,14 @@ test("checkSolanaRpc parses valid getSlot response from Solana JSON-RPC", async 
   const mock = await createMockRpcServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id: "flow-solana-check",
-        result: 466467757,
-      }),
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 1, result: 466467757 },
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          result: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        },
+      ]),
     );
   });
 
@@ -94,7 +99,32 @@ test("checkSolanaRpc parses valid getSlot response from Solana JSON-RPC", async 
     const result = await checkSolanaRpc(mock.url, 1000);
     assert.equal(result.network, "solana");
     assert.equal(result.reachable, true);
+    assert.equal(result.chainEnvironment, "mainnet");
     assert.equal(result.details.latestSlot, 466467757);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("checkSolanaRpc identifies devnet genesis hash correctly", async () => {
+  const mock = await createMockRpcServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 1, result: 12345 },
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          result: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+        },
+      ]),
+    );
+  });
+
+  try {
+    const result = await checkSolanaRpc(mock.url, 1000);
+    assert.equal(result.reachable, true);
+    assert.equal(result.chainEnvironment, "devnet");
   } finally {
     await mock.close();
   }

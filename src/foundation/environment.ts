@@ -60,6 +60,15 @@ function assertCredentialScope(
 
 export function assertWebEnvironment(source: EnvironmentInput): void {
   assertCredentialScope(source, "runtime");
+  if (source.FLOW_WALLET_ENCRYPTION_KEY !== undefined) {
+    invalidConfig(
+      "Supply only the FLOW web runtime credentials to this process. Custody encryption keys are isolated to the wallet worker.",
+    );
+  }
+}
+
+export function assertWorkerEnvironment(source: EnvironmentInput): void {
+  assertCredentialScope(source, "runtime");
 }
 
 function parseDatabaseUrl(value: string | undefined, variable: string): URL {

@@ -24,6 +24,8 @@ model AuthUser {
   sessions       AuthSession[]
   googleBindings GoogleSubjectBinding[]
   flowUser       FlowUser?
+  custodyOperator CustodyOperator?
+  recoveryApprovals CustodyRecoveryApproval[]
 
   @@map("auth_users")
   @@schema("flow")
@@ -184,6 +186,8 @@ model FlowAccount {
   creation        BusinessCreation?
   wallet          FlowWallet?
   provisioningJob WalletProvisioningJob?
+  compatibilityAuthorizations ProviderCompatibilityAuthorization[]
+  recoveryApprovals CustodyRecoveryApproval[]
 
   @@unique([id, kind])
   @@map("accounts")
@@ -353,8 +357,66 @@ model WalletProvisioningJob {
   createdAt             DateTime    @default(now()) @map("created_at")
   updatedAt             DateTime    @default(now()) @updatedAt @map("updated_at")
   account               FlowAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  recoveryApprovals     CustodyRecoveryApproval[]
 
   @@index([accountId, status])
   @@map("wallet_provisioning_jobs")
+  @@schema("flow")
+}
+
+model ProviderCompatibilityAuthorization {
+  id                     String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId              String      @map("account_id") @db.Uuid
+  environment            String
+  allowedMethods         String[]    @map("allowed_methods")
+  status                 String      @default("AUTHORIZED")
+  maxRegistrations       Int         @default(1) @map("max_registrations")
+  registrationsAttempted Int         @default(0) @map("registrations_attempted")
+  registrationsCompleted Int         @default(0) @map("registrations_completed")
+  claimedAt              DateTime?   @map("claimed_at")
+  claimedBy              String?     @map("claimed_by")
+  consumedAt             DateTime?   @map("consumed_at")
+  expiresAt              DateTime    @map("expires_at")
+  dispatchAttemptId      String?     @map("dispatch_attempt_id") @db.Uuid
+  createdAt              DateTime    @default(now()) @map("created_at")
+  updatedAt              DateTime    @default(now()) @updatedAt @map("updated_at")
+  account                FlowAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+
+  @@index([accountId, status])
+  @@map("provider_compatibility_authorizations")
+  @@schema("flow")
+}
+
+model CustodyOperator {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  authUserId String   @unique @map("auth_user_id")
+  role       String   @default("CUSTODY_OPERATOR")
+  status     String   @default("ACTIVE")
+  enrolledBy String   @map("enrolled_by")
+  enrolledAt DateTime @default(now()) @map("enrolled_at")
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+  user       AuthUser @relation(fields: [authUserId], references: [id], onDelete: Restrict)
+
+  @@map("custody_operators")
+  @@schema("flow")
+}
+
+model CustodyRecoveryApproval {
+  id                String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  jobId             String                @map("job_id") @db.Uuid
+  accountId         String                @map("account_id") @db.Uuid
+  approverAuthId    String                @map("approver_auth_id")
+  resolution        String
+  approvalTokenHash String                @unique @map("approval_token_hash")
+  status            String                @default("PENDING")
+  expiresAt         DateTime              @map("expires_at")
+  consumedAt        DateTime?             @map("consumed_at")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  job               WalletProvisioningJob @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  account           FlowAccount           @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  approver          AuthUser              @relation(fields: [approverAuthId], references: [id], onDelete: Restrict)
+
+  @@index([jobId, status])
+  @@map("custody_recovery_approvals")
   @@schema("flow")
 }

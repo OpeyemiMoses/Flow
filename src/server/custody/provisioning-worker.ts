@@ -15,7 +15,10 @@ import {
   activateWalletIfReady,
   attachWalletAddressesAndCapabilities,
   claimJobLease,
+  claimCompatibilityRegistration,
+  completeCompatibilityRegistration,
   persistRegisteredWallet,
+  quarantineCompatibilityRegistration,
   recordJobAmbiguous,
   recordJobDispatch,
   recordJobTerminalFailure,
@@ -62,6 +65,7 @@ export interface WalletProvisioningWorkerOptions {
   readonly baseBackoffMs?: number;
   readonly maxBackoffMs?: number;
   readonly hooks?: ProvisioningWorkerHooks;
+  readonly compatibilityAuthorizationId?: string;
 }
 
 export type ProvisioningJobOutcome =
@@ -199,6 +203,7 @@ export class WalletProvisioningWorker {
   private readonly baseBackoffMs: number;
   private readonly maxBackoffMs: number;
   private readonly hooks?: ProvisioningWorkerHooks;
+  private readonly compatibilityAuthorizationId?: string;
 
   private running = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -225,6 +230,7 @@ export class WalletProvisioningWorker {
       options.maxBackoffMs ?? 5_000,
     );
     this.hooks = options.hooks;
+    this.compatibilityAuthorizationId = options.compatibilityAuthorizationId;
   }
 
   computeBackoffDelayMs(attempt: number): number {
@@ -436,11 +442,28 @@ export class WalletProvisioningWorker {
         });
       }
 
+      if (this.compatibilityAuthorizationId) {
+        await claimCompatibilityRegistration(
+          this.db,
+          this.compatibilityAuthorizationId,
+          this.workerId,
+          dispatchAttemptId,
+        );
+      }
+
       // External provider call OUTSIDE any DB transaction
       let regResult;
       try {
         regResult = await this.adapter.register({});
       } catch (error) {
+        if (this.compatibilityAuthorizationId) {
+          await quarantineCompatibilityRegistration(
+            this.db,
+            this.compatibilityAuthorizationId,
+            dispatchAttemptId,
+            "POST_DISPATCH_AMBIGUOUS",
+          );
+        }
         if (isAmbiguousRegistrationError(error)) {
           await recordJobAmbiguous(this.db, leased.id, leased.fencingToken, {
             code: "POST_DISPATCH_AMBIGUOUS",
@@ -507,6 +530,14 @@ export class WalletProvisioningWorker {
         },
       );
       walletStatus = "SETUP_PENDING";
+
+      if (this.compatibilityAuthorizationId) {
+        await completeCompatibilityRegistration(
+          this.db,
+          this.compatibilityAuthorizationId,
+          dispatchAttemptId,
+        );
+      }
 
       if (this.hooks?.onAfterStage1Persist) {
         await this.hooks.onAfterStage1Persist({

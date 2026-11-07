@@ -3,6 +3,8 @@ export interface BlockchainConnectivityResult {
   readonly endpoint: string;
   readonly reachable: boolean;
   readonly latencyMs: number;
+  readonly chainEnvironment?:
+    "mainnet" | "testnet" | "sepolia" | "devnet" | "unknown";
   readonly details: Readonly<Record<string, unknown>>;
   readonly error?: string;
 }
@@ -30,13 +32,17 @@ function scrubEndpointForLogging(endpoint: string): string {
     const url = new URL(endpoint);
     url.username = "";
     url.password = "";
-    // Remove query params containing key/token
+    // Remove query params containing key/token or secrets
     for (const key of Array.from(url.searchParams.keys())) {
-      if (/key|token|auth|secret|api/i.test(key)) {
-        url.searchParams.set(key, "[REDACTED]");
-      }
+      url.searchParams.set(key, "[REDACTED]");
     }
-    return url.origin + url.pathname;
+    // Redact path tokens if path has secret keys (e.g. /v2/secret_key or /v3/key)
+    const sanitizedPath = url.pathname.replace(
+      /\/([a-zA-Z0-9_-]{16,})/g,
+      "/[REDACTED_KEY]",
+    );
+    const search = url.search ? url.search : "";
+    return url.origin + sanitizedPath + search;
   } catch {
     return "[MALFORMED_ENDPOINT]";
   }
@@ -94,11 +100,19 @@ export async function checkNearRpc(
         ? syncInfo.latest_block_time
         : undefined;
 
+    let chainEnvironment: "mainnet" | "testnet" | "unknown" = "unknown";
+    if (chainId === "mainnet") {
+      chainEnvironment = "mainnet";
+    } else if (chainId === "testnet") {
+      chainEnvironment = "testnet";
+    }
+
     return {
       network: "near",
       endpoint: scrubbed,
       reachable: Boolean(chainId && blockHeight !== undefined),
       latencyMs,
+      chainEnvironment,
       details: {
         chainId,
         latestBlockHeight: blockHeight,
@@ -180,6 +194,13 @@ export async function checkBaseRpc(
         ? parseInt(blockHex, 16)
         : undefined;
 
+    let chainEnvironment: "mainnet" | "sepolia" | "unknown" = "unknown";
+    if (netVersion === "8453") {
+      chainEnvironment = "mainnet";
+    } else if (netVersion === "84532") {
+      chainEnvironment = "sepolia";
+    }
+
     return {
       network: "base",
       endpoint: scrubbed,
@@ -187,6 +208,7 @@ export async function checkBaseRpc(
         blockHeight !== undefined && !Number.isNaN(blockHeight),
       ),
       latencyMs,
+      chainEnvironment,
       details: {
         networkId: netVersion,
         latestBlockHeight: blockHeight,
@@ -228,12 +250,10 @@ export async function checkSolanaRpc(
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: "flow-solana-check",
-        method: "getSlot",
-        params: [],
-      }),
+      body: JSON.stringify([
+        { jsonrpc: "2.0", id: 1, method: "getSlot", params: [] },
+        { jsonrpc: "2.0", id: 2, method: "getGenesisHash", params: [] },
+      ]),
       signal: controller.signal,
     });
 
@@ -249,16 +269,41 @@ export async function checkSolanaRpc(
       };
     }
 
-    const data = (await response.json()) as Record<string, unknown>;
-    const slot = typeof data?.result === "number" ? data.result : undefined;
+    const data = (await response.json()) as
+      Array<Record<string, unknown>> | Record<string, unknown>;
+
+    let slot: number | undefined;
+    let genesisHash: string | undefined;
+
+    if (Array.isArray(data)) {
+      const slotRes = data.find((r) => r?.id === 1);
+      const genesisRes = data.find((r) => r?.id === 2);
+      slot = typeof slotRes?.result === "number" ? slotRes.result : undefined;
+      genesisHash =
+        typeof genesisRes?.result === "string" ? genesisRes.result : undefined;
+    } else if (data && typeof data === "object") {
+      slot = typeof data.result === "number" ? data.result : undefined;
+    }
+
+    let chainEnvironment: "mainnet" | "devnet" | "testnet" | "unknown" =
+      "unknown";
+    if (genesisHash === "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d") {
+      chainEnvironment = "mainnet";
+    } else if (genesisHash === "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG") {
+      chainEnvironment = "devnet";
+    } else if (genesisHash === "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY") {
+      chainEnvironment = "testnet";
+    }
 
     return {
       network: "solana",
       endpoint: scrubbed,
       reachable: typeof slot === "number" && slot > 0,
       latencyMs,
+      chainEnvironment,
       details: {
         latestSlot: slot,
+        genesisHash,
       },
     };
   } catch (err) {

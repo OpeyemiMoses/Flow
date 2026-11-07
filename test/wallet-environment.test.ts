@@ -163,16 +163,36 @@ test("wallet environment enforces fail-closed validation for provider compatibil
   );
 
   // 5. Valid compatibility mode configuration succeeds
+  const validAuthId = "abcdef01-abcd-abcd-abcd-abcdef012345";
   const authorized = readWalletConfig({
     ...source,
     FLOW_EXECUTION: "disabled",
     FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+    FLOW_PROVIDER_COMPATIBILITY_AUTHORIZATION_ID: validAuthId,
+    FLOW_PROVIDER_COMPATIBILITY_ENVIRONMENT: "testnet",
     FLOW_PROVIDER_COMPATIBILITY_TOKEN: validToken,
     FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: validAccountId,
+    FLOW_OUTLAYER_API_URL: "https://testnet-api.outlayer.ai",
     FLOW_NEAR_RPC_URL: "https://rpc.mainnet.near.org",
   });
   assert.equal(authorized.compatibility.mode, "authorized");
+  assert.equal(authorized.compatibility.authorizationId, validAuthId);
+  assert.equal(authorized.compatibility.providerEnvironment, "testnet");
   assert.equal(authorized.compatibility.maxRegistrations, 1);
   assert.equal(authorized.compatibility.isolatedAccountId, validAccountId);
   assert.equal(authorized.rpc?.nearRpcUrl, "https://rpc.mainnet.near.org");
+
+  // 6. Invalid authorization ID format fails
+  assert.throws(
+    () =>
+      readWalletConfig({
+        ...source,
+        FLOW_EXECUTION: "disabled",
+        FLOW_PROVIDER_COMPATIBILITY_MODE: "authorized",
+        FLOW_PROVIDER_COMPATIBILITY_AUTHORIZATION_ID: "not-a-uuid",
+        FLOW_PROVIDER_COMPATIBILITY_TOKEN: validToken,
+        FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: validAccountId,
+      }),
+    invalid,
+  );
 });

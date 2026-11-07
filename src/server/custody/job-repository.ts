@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import {
   evaluateWalletFundReadiness,
   isValidNearAddress,
@@ -9,6 +10,7 @@ import {
   type ProviderPolicyEvidenceInput,
 } from "../../domain/custody.ts";
 import { FlowError } from "../../foundation/errors.ts";
+import { log } from "../../foundation/logger.ts";
 import type { FlowDb } from "../../foundation/prisma.ts";
 import {
   outlayerChainSchema,
@@ -1496,6 +1498,19 @@ export async function escalateJobToManualReview(
           `Operator ${input.operatorAuthId} is not a registered user in flow.auth_users.`,
         );
       }
+      const operators = await tx.$queryRaw<
+        Array<{ authUserId: string; status: string }>
+      >`
+        SELECT auth_user_id AS "authUserId", status
+        FROM flow.custody_operators
+        WHERE auth_user_id = ${input.operatorAuthId.trim()}
+      `;
+      if (!operators[0] || operators[0].status !== "ACTIVE") {
+        throw new FlowError(
+          "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+          `Operator ${input.operatorAuthId} does not possess active custody operator authority in flow.custody_operators.`,
+        );
+      }
     }
 
     if (input.expectedAccountKind !== undefined) {
@@ -1590,6 +1605,7 @@ export type QuarantinedJobResolutionInput =
       readonly handoffUrl?: string;
       readonly requestId: string;
       readonly verifyOperatorInDatabase?: boolean;
+      readonly approvalToken?: string;
     }
   | {
       readonly resolution: "RESET_CONFIRMED_PRE_CREATION_FAILURE";
@@ -1601,6 +1617,7 @@ export type QuarantinedJobResolutionInput =
       readonly approverOperatorAuthId: string;
       readonly requestId: string;
       readonly verifyOperatorInDatabase?: boolean;
+      readonly approvalToken?: string;
     };
 
 /**
@@ -1704,6 +1721,76 @@ export async function resolveQuarantinedProvisioningJob(
           "Both initiator and approver must be registered users in flow.auth_users.",
         );
       }
+
+      // Explicit custody operator authority check
+      const operators = await tx.$queryRaw<
+        Array<{ authUserId: string; status: string }>
+      >`
+        SELECT auth_user_id AS "authUserId", status
+        FROM flow.custody_operators
+        WHERE auth_user_id IN (${initiator}, ${approver})
+      `;
+      const activeOps = new Set(
+        operators.filter((o) => o.status === "ACTIVE").map((o) => o.authUserId),
+      );
+      if (!activeOps.has(initiator) || !activeOps.has(approver)) {
+        throw new FlowError(
+          "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+          "Both initiator and approver must possess active custody operator authority in flow.custody_operators.",
+        );
+      }
+
+      // Independent authenticated approval check
+      let approvalQuery: Array<{ id: string; approvalTokenHash: string }>;
+      if (input.approvalToken) {
+        const tokenHash = createHash("sha256")
+          .update(input.approvalToken)
+          .digest("hex");
+        approvalQuery = await tx.$queryRaw<
+          Array<{ id: string; approvalTokenHash: string }>
+        >`
+          SELECT id, approval_token_hash AS "approvalTokenHash"
+          FROM flow.custody_recovery_approvals
+          WHERE job_id = ${input.jobId}::uuid
+            AND account_id = ${input.accountId}::uuid
+            AND approver_auth_id = ${approver}
+            AND resolution = ${input.resolution}
+            AND approval_token_hash = ${tokenHash}
+            AND status = 'PENDING'
+            AND expires_at > CURRENT_TIMESTAMP
+          FOR UPDATE
+        `;
+      } else {
+        approvalQuery = await tx.$queryRaw<
+          Array<{ id: string; approvalTokenHash: string }>
+        >`
+          SELECT id, approval_token_hash AS "approvalTokenHash"
+          FROM flow.custody_recovery_approvals
+          WHERE job_id = ${input.jobId}::uuid
+            AND account_id = ${input.accountId}::uuid
+            AND approver_auth_id = ${approver}
+            AND resolution = ${input.resolution}
+            AND status = 'PENDING'
+            AND expires_at > CURRENT_TIMESTAMP
+          ORDER BY created_at DESC
+          LIMIT 1
+          FOR UPDATE
+        `;
+      }
+
+      if (!approvalQuery[0]) {
+        throw new FlowError(
+          "CUSTODY_INDEPENDENT_APPROVAL_REQUIRED",
+          "Independent authenticated operator approval record is required for recovery resolution.",
+        );
+      }
+
+      // Consume the approval record atomically
+      await tx.$executeRaw`
+        UPDATE flow.custody_recovery_approvals
+        SET status = 'CONSUMED', consumed_at = CURRENT_TIMESTAMP
+        WHERE id = ${approvalQuery[0].id}::uuid
+      `;
     }
 
     if (input.expectedAccountKind !== undefined) {
@@ -1992,4 +2079,249 @@ export async function assertOperatorIdentityRegistered(
       `Operator ${trimmed} is not a registered user in flow.auth_users.`,
     );
   }
+}
+
+/**
+ * Asserts that an operator possesses active custody operator authority in `flow.custody_operators`.
+ */
+export async function assertOperatorAuthority(
+  db: FlowDb,
+  operatorAuthId: string,
+  requiredRole?: "CUSTODY_OPERATOR" | "SECURITY_OFFICER" | "CUSTODY_ADMIN",
+): Promise<void> {
+  await assertOperatorIdentityRegistered(db, operatorAuthId);
+  const trimmed = operatorAuthId.trim();
+  const ops = await db.$queryRaw<
+    Array<{ id: string; role: string; status: string }>
+  >`
+    SELECT id, role, status FROM flow.custody_operators
+    WHERE auth_user_id = ${trimmed}
+  `;
+  if (!ops[0] || ops[0].status !== "ACTIVE") {
+    throw new FlowError(
+      "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+      `Operator ${trimmed} does not possess active custody operator authority in flow.custody_operators.`,
+    );
+  }
+  if (
+    requiredRole &&
+    ops[0].role !== requiredRole &&
+    ops[0].role !== "CUSTODY_ADMIN"
+  ) {
+    throw new FlowError(
+      "CUSTODY_OPERATOR_AUTHORIZATION_ERROR",
+      `Operator ${trimmed} with role ${ops[0].role} lacks required role ${requiredRole}.`,
+    );
+  }
+}
+
+/**
+ * Enrolls or updates a user as an authorized custody operator in `flow.custody_operators`.
+ */
+export async function enrollCustodyOperator(
+  db: FlowDb,
+  input: {
+    readonly authUserId: string;
+    readonly role?: "CUSTODY_OPERATOR" | "SECURITY_OFFICER" | "CUSTODY_ADMIN";
+    readonly enrolledBy: string;
+  },
+): Promise<{
+  readonly id: string;
+  readonly authUserId: string;
+  readonly role: string;
+}> {
+  await assertOperatorIdentityRegistered(db, input.authUserId);
+  const role = input.role ?? "CUSTODY_OPERATOR";
+  const rows = await db.$queryRaw<
+    Array<{ id: string; authUserId: string; role: string }>
+  >`
+    INSERT INTO flow.custody_operators (auth_user_id, role, status, enrolled_by)
+    VALUES (${input.authUserId.trim()}, ${role}, 'ACTIVE', ${input.enrolledBy.trim()})
+    ON CONFLICT (auth_user_id)
+    DO UPDATE SET status = 'ACTIVE', role = ${role}, updated_at = CURRENT_TIMESTAMP
+    RETURNING id, auth_user_id AS "authUserId", role
+  `;
+  return rows[0]!;
+}
+
+/**
+ * Creates an independently authenticated approval record in `flow.custody_recovery_approvals`.
+ */
+export async function createCustodyRecoveryApproval(
+  db: FlowDb,
+  input: {
+    readonly jobId: string;
+    readonly accountId: string;
+    readonly approverAuthId: string;
+    readonly resolution:
+      "ATTACH_RECOVERED_WALLET" | "RESET_CONFIRMED_PRE_CREATION_FAILURE";
+    readonly approvalToken?: string;
+    readonly validityMinutes?: number;
+  },
+): Promise<{
+  readonly id: string;
+  readonly token: string;
+  readonly expiresAt: Date;
+}> {
+  await assertOperatorAuthority(db, input.approverAuthId);
+  const token = input.approvalToken ?? randomUUID();
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const validityMinutes = input.validityMinutes ?? 30;
+
+  const rows = await db.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
+    INSERT INTO flow.custody_recovery_approvals (
+      job_id, account_id, approver_auth_id, resolution,
+      approval_token_hash, status, expires_at
+    ) VALUES (
+      ${input.jobId}::uuid,
+      ${input.accountId}::uuid,
+      ${input.approverAuthId.trim()},
+      ${input.resolution},
+      ${tokenHash},
+      'PENDING',
+      CURRENT_TIMESTAMP + (${validityMinutes} * interval '1 minute')
+    )
+    RETURNING id, expires_at AS "expiresAt"
+  `;
+
+  return { id: rows[0]!.id, token, expiresAt: rows[0]!.expiresAt };
+}
+
+export interface CreateCompatibilityAuthorizationInput {
+  readonly accountId: string;
+  readonly environment: "testnet" | "mainnet";
+  readonly allowedMethods?: readonly string[];
+  readonly validityMinutes?: number;
+}
+
+/**
+ * Creates a durable, database-enforced single-registration authorization record.
+ */
+export async function createCompatibilityAuthorization(
+  db: FlowDb,
+  input: CreateCompatibilityAuthorizationInput,
+): Promise<{ readonly id: string; readonly expiresAt: Date }> {
+  if (!UUID_REGEX.test(input.accountId.trim())) {
+    throw new FlowError("INVALID_CONFIGURATION", "Invalid account ID.");
+  }
+  const validityMinutes = input.validityMinutes ?? 60;
+  const methods = input.allowedMethods ?? [
+    "POST /register",
+    "GET /wallet/v1/address",
+    "GET /wallet/v1/policy",
+  ];
+
+  const rows = await db.$queryRaw<Array<{ id: string; expiresAt: Date }>>`
+    INSERT INTO flow.provider_compatibility_authorizations (
+      account_id, environment, allowed_methods, status,
+      max_registrations, registrations_attempted, registrations_completed,
+      expires_at
+    ) VALUES (
+      ${input.accountId.trim()}::uuid,
+      ${input.environment},
+      ${methods},
+      'AUTHORIZED',
+      1,
+      0,
+      0,
+      CURRENT_TIMESTAMP + (${validityMinutes} * interval '1 minute')
+    )
+    RETURNING id, expires_at AS "expiresAt"
+  `;
+
+  return rows[0]!;
+}
+
+/**
+ * Claims a compatibility registration budget in PostgreSQL using atomic check-and-set.
+ * Enforced across multiple competing workers and worker restarts.
+ */
+export async function claimCompatibilityRegistration(
+  db: FlowDb,
+  authorizationId: string,
+  claimedBy: string,
+  dispatchAttemptId: string,
+): Promise<{
+  readonly id: string;
+  readonly accountId: string;
+  readonly environment: string;
+}> {
+  if (
+    !UUID_REGEX.test(authorizationId.trim()) ||
+    !UUID_REGEX.test(dispatchAttemptId.trim())
+  ) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      "Invalid UUID for authorization or dispatch attempt.",
+    );
+  }
+
+  const rows = await db.$queryRaw<
+    Array<{ id: string; accountId: string; environment: string }>
+  >`
+    UPDATE flow.provider_compatibility_authorizations
+    SET status = 'CLAIMED',
+        claimed_at = CURRENT_TIMESTAMP,
+        claimed_by = ${claimedBy.trim()},
+        registrations_attempted = registrations_attempted + 1,
+        dispatch_attempt_id = ${dispatchAttemptId.trim()}::uuid
+    WHERE id = ${authorizationId.trim()}::uuid
+      AND status = 'AUTHORIZED'
+      AND registrations_attempted < max_registrations
+      AND expires_at > CURRENT_TIMESTAMP
+    RETURNING id, account_id AS "accountId", environment
+  `;
+
+  if (!rows[0]) {
+    throw new FlowError(
+      "CUSTODY_REGISTRATION_BUDGET_EXCEEDED",
+      "Provider compatibility registration budget is consumed, expired, or claimed by another worker.",
+    );
+  }
+
+  return rows[0];
+}
+
+/**
+ * Marks a claimed compatibility registration as completed upon successful OutLayer response.
+ */
+export async function completeCompatibilityRegistration(
+  db: FlowDb,
+  authorizationId: string,
+  dispatchAttemptId: string,
+): Promise<void> {
+  await db.$executeRaw`
+    UPDATE flow.provider_compatibility_authorizations
+    SET status = 'CONSUMED',
+        registrations_completed = 1,
+        consumed_at = CURRENT_TIMESTAMP
+    WHERE id = ${authorizationId.trim()}::uuid
+      AND status = 'CLAIMED'
+      AND dispatch_attempt_id = ${dispatchAttemptId.trim()}::uuid
+  `;
+}
+
+/**
+ * Quarantines a claimed compatibility registration upon uncertain/ambiguous external outcome.
+ * Permanently consumes the budget so that no retry can occur.
+ */
+export async function quarantineCompatibilityRegistration(
+  db: FlowDb,
+  authorizationId: string,
+  dispatchAttemptId: string,
+  reason?: string,
+): Promise<void> {
+  if (reason) {
+    log("error", "quarantine_compatibility_registration", {
+      authorizationId,
+      reason,
+    });
+  }
+  await db.$executeRaw`
+    UPDATE flow.provider_compatibility_authorizations
+    SET status = 'CONSUMED',
+        consumed_at = CURRENT_TIMESTAMP
+    WHERE id = ${authorizationId.trim()}::uuid
+      AND dispatch_attempt_id = ${dispatchAttemptId.trim()}::uuid
+  `;
 }

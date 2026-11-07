@@ -3,12 +3,16 @@ import { FlowError } from "./errors.ts";
 
 export const ALLOWED_OUTLAYER_HOSTS = Object.freeze([
   "api.outlayer.ai",
+  "testnet-api.outlayer.ai",
   "api.outlayer.fastnear.com",
   "api.testnet.outlayer.fastnear.com",
   "127.0.0.1",
   "localhost",
   "[::1]",
 ]);
+
+export const OUTLAYER_MAINNET_API_URL = "https://api.outlayer.ai";
+export const OUTLAYER_TESTNET_API_URL = "https://testnet-api.outlayer.ai";
 
 const walletConfigSchema = z.object({
   FLOW_WALLET_PROVIDER: z.enum(["outlayer", "mock"]).default("outlayer"),
@@ -23,6 +27,13 @@ const walletConfigSchema = z.object({
   FLOW_PROVIDER_COMPATIBILITY_MODE: z
     .enum(["disabled", "authorized"])
     .default("disabled"),
+  FLOW_PROVIDER_COMPATIBILITY_AUTHORIZATION_ID: z
+    .string()
+    .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+    .optional(),
+  FLOW_PROVIDER_COMPATIBILITY_ENVIRONMENT: z
+    .enum(["testnet", "mainnet"])
+    .default("testnet"),
   FLOW_PROVIDER_COMPATIBILITY_TOKEN: z.string().min(16).max(256).optional(),
   FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID: z
     .string()
@@ -50,8 +61,11 @@ export type WalletEnvironmentInput = Readonly<
 
 export interface ProviderCompatibilityConfig {
   readonly mode: "disabled" | "authorized";
+  readonly authorizationId?: string;
   readonly authorizedToken?: string;
   readonly isolatedAccountId?: string;
+  readonly providerEnvironment?: "testnet" | "mainnet";
+  readonly allowedMethods?: readonly string[];
   readonly maxRegistrations: number;
 }
 
@@ -74,6 +88,8 @@ export function readWalletConfig(
     FLOW_WALLET_KEY_ID,
     FLOW_OUTLAYER_API_URL,
     FLOW_PROVIDER_COMPATIBILITY_MODE,
+    FLOW_PROVIDER_COMPATIBILITY_AUTHORIZATION_ID,
+    FLOW_PROVIDER_COMPATIBILITY_ENVIRONMENT,
     FLOW_PROVIDER_COMPATIBILITY_TOKEN,
     FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID,
     FLOW_PROVIDER_COMPATIBILITY_MAX_REGISTRATIONS,
@@ -145,8 +161,15 @@ export function readWalletConfig(
 
     compatibilityConfig = {
       mode: "authorized",
+      authorizationId: FLOW_PROVIDER_COMPATIBILITY_AUTHORIZATION_ID,
       authorizedToken: FLOW_PROVIDER_COMPATIBILITY_TOKEN,
       isolatedAccountId: FLOW_PROVIDER_COMPATIBILITY_ACCOUNT_ID,
+      providerEnvironment: FLOW_PROVIDER_COMPATIBILITY_ENVIRONMENT,
+      allowedMethods: [
+        "POST /register",
+        "GET /wallet/v1/address",
+        "GET /wallet/v1/policy",
+      ],
       maxRegistrations: FLOW_PROVIDER_COMPATIBILITY_MAX_REGISTRATIONS,
     };
   } else {
