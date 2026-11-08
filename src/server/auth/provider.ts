@@ -50,6 +50,8 @@ export async function lockAuthUser(db: FlowDb, id: string): Promise<void> {
 
 type AuthContext = {
   emailLogin?: string;
+  emailSlot?: string;
+  emailDigest?: string;
   google?: { nonceHash: string; startOrder: bigint; linkUserId?: string };
   captureOtp?: (email: string, code: string) => void;
 };
@@ -290,6 +292,25 @@ export function provider(
                 user.email !== context.emailLogin
               ) {
                 throw new ApiFailure(401, "INVALID_PROOF");
+              }
+              if (context.emailSlot && context.emailDigest) {
+                const [ticket] = await db.$queryRaw<{ id: string }[]>`
+                  SELECT flow.issue_email_auth_ticket(${context.emailSlot}, ${context.emailDigest}) AS id
+                `;
+                if (ticket?.id) {
+                  await db.$executeRaw`
+                    SELECT set_config('flow.active_auth_ticket_id', ${ticket.id}, true)
+                  `;
+                }
+              }
+            } else if (google && verifiedGoogle) {
+              const [ticket] = await db.$queryRaw<{ id: string }[]>`
+                SELECT flow.issue_google_auth_ticket(${verifiedGoogle.subject}, ${session.userId}, ${google.startOrder}) AS id
+              `;
+              if (ticket?.id) {
+                await db.$executeRaw`
+                  SELECT set_config('flow.active_auth_ticket_id', ${ticket.id}, true)
+                `;
               }
             }
           },

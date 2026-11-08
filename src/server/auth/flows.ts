@@ -241,6 +241,8 @@ async function verifyCode(
     try {
       const result = await provider(tx, auth, {
         emailLogin: intent.email,
+        emailSlot: intent.slot,
+        emailDigest: intent.digest,
       }).api.signInEmailOTP({
         body: { email: intent.email, otp: code },
         headers: authHeaders(request.headers),
@@ -257,7 +259,7 @@ async function verifyCode(
       }
       if (previous && previous.id !== created.id)
         await tx.authSession.deleteMany({ where: { id: previous.id } });
-      await tx.authIntent.delete({ where: { slot: intent.slot } });
+      await tx.authIntent.deleteMany({ where: { slot: intent.slot } });
       await audit(
         tx,
         intent.purpose === "recover-email" ? "recovery" : "sign-in",
@@ -514,6 +516,7 @@ async function changeSecurity(
   const { auth } = runtime();
   await transaction(async (tx) => {
     const session = await requireSession(tx, request.headers, true);
+    await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${session.token}, true)`;
     await requireProof(tx, request, session, purpose);
     const user = await tx.authUser.findUniqueOrThrow({
       where: { id: session.userId },
@@ -555,6 +558,7 @@ async function signOut(request: Request): Promise<Response> {
     const session = await readSession(tx, request.headers);
     if (session) {
       await lockAuthUser(tx, session.userId);
+      await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${session.token}, true)`;
       const deleted = await tx.authSession.deleteMany({
         where: { id: session.id },
       });

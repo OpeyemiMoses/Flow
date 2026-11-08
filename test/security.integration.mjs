@@ -850,16 +850,48 @@ test("expired sessions and attempts to revoke another user's session cannot auth
   const bobSession = sessions.find(({ current }) => current).id;
   await post(alice.client, "/api/security/sessions/revoke", { id: bobSession });
   await result(await bob.client.get("/api/me"), 200);
-  await app.db.query(
-    "UPDATE flow.auth_sessions SET created_at = timestamp '2000-01-01' WHERE id = $1",
-    [bobSession],
-  );
+  const bobCookie = (await bob.client.storageState()).cookies.find(
+    ({ name }) => name === sessionCookie,
+  )?.value;
+  const bobToken = decodeURIComponent(bobCookie).split(".")[0];
+  {
+    const client = await app.db.connect();
+    try {
+      await client.query(
+        "SELECT set_config('flow.current_session_token', $1, false)",
+        [bobToken],
+      );
+      const res = await client.query(
+        "UPDATE flow.auth_sessions SET created_at = timestamp '2000-01-01' WHERE id = $1",
+        [bobSession],
+      );
+      assert.equal(res.rowCount, 1);
+    } finally {
+      client.release();
+    }
+  }
   await result(await bob.client.get(`/api/accounts/${bob.account.id}`), 401);
   const { sessions: other } = await status(alice.client);
-  await app.db.query(
-    "UPDATE flow.auth_sessions SET expires_at = timestamp '2000-01-01' WHERE id = $1",
-    [other.find(({ current }) => current).id],
-  );
+  const aliceCookie = (await alice.client.storageState()).cookies.find(
+    ({ name }) => name === sessionCookie,
+  )?.value;
+  const aliceToken = decodeURIComponent(aliceCookie).split(".")[0];
+  {
+    const client = await app.db.connect();
+    try {
+      await client.query(
+        "SELECT set_config('flow.current_session_token', $1, false)",
+        [aliceToken],
+      );
+      const res = await client.query(
+        "UPDATE flow.auth_sessions SET expires_at = timestamp '2000-01-01' WHERE id = $1",
+        [other.find(({ current }) => current).id],
+      );
+      assert.equal(res.rowCount, 1);
+    } finally {
+      client.release();
+    }
+  }
   await result(await alice.client.get("/api/me"), 401);
 });
 
@@ -1156,4 +1188,13 @@ test("m3 phase 3: authenticated portfolio API — authorization, cross-tenant is
     `/api/accounts/${owner.account.id}/portfolio/refresh`,
   );
   assert.equal(rapidRefresh.status(), 429);
+
+  // 8. Durable cooldown is visible on GET portfolio while active
+  const ownerGetDuringCooldown = await owner.client.get(
+    `/api/accounts/${owner.account.id}/portfolio`,
+  );
+  assert.equal(ownerGetDuringCooldown.status(), 200);
+  const cooldownData = await ownerGetDuringCooldown.json();
+  assert.ok(cooldownData.cooldownRemainingSeconds > 0);
+  assert.ok(cooldownData.cooldownRemainingSeconds <= 15);
 });

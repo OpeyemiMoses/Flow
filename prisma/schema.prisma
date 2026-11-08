@@ -26,6 +26,7 @@ model AuthUser {
   flowUser       FlowUser?
   custodyOperator CustodyOperator?
   recoveryApprovals CustodyRecoveryApproval[]
+  issuanceTickets AuthIssuanceTicket[]
 
   @@map("auth_users")
   @@schema("flow")
@@ -188,6 +189,7 @@ model FlowAccount {
   provisioningJob WalletProvisioningJob?
   compatibilityAuthorizations ProviderCompatibilityAuthorization[]
   recoveryApprovals CustodyRecoveryApproval[]
+  refreshLease    PortfolioRefreshLease?
 
   @@unique([id, kind])
   @@map("accounts")
@@ -488,5 +490,33 @@ model WalletBalance {
   @@index([walletId, syncStatus])
   @@index([networkAssetId])
   @@map("wallet_balances")
+  @@schema("flow")
+}
+
+model PortfolioRefreshLease {
+  accountId       String      @id @map("account_id") @db.Uuid
+  lastRefreshedAt DateTime?   @map("last_refreshed_at")
+  leaseExpiresAt  DateTime?   @map("lease_expires_at")
+  leaseHolder     String?     @map("lease_holder")
+  fencingToken    BigInt      @default(0) @map("fencing_token")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @default(now()) @updatedAt @map("updated_at")
+  account         FlowAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@map("portfolio_refresh_leases")
+  @@schema("flow")
+}
+
+model AuthIssuanceTicket {
+  ticketId   String    @id @default(dbgenerated("gen_random_uuid()")) @map("ticket_id") @db.Uuid
+  userId     String    @map("user_id")
+  flowType   String    @map("flow_type")
+  intentSlot String?   @map("intent_slot")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  consumedAt DateTime? @map("consumed_at")
+  user       AuthUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, userId])
+  @@map("auth_issuance_tickets")
   @@schema("flow")
 }
