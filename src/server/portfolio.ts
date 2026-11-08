@@ -16,7 +16,10 @@ export type {
   SerializedAccountPortfolio,
   SerializedWalletBalanceRecord,
 } from "../domain/portfolio.ts";
-export { REFRESH_COOLDOWN_MS, serializePortfolio } from "../domain/portfolio.ts";
+export {
+  REFRESH_COOLDOWN_MS,
+  serializePortfolio,
+} from "../domain/portfolio.ts";
 
 const refreshState = new Map<
   string,
