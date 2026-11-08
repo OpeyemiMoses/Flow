@@ -58,6 +58,13 @@ export interface WalletBalanceRecord {
   readonly networkAsset: NetworkAssetWithAsset;
 }
 
+export interface WalletAddressProjection {
+  readonly network: NetworkId;
+  readonly chainId: string;
+  readonly address: string;
+  readonly publicKey?: string | null;
+}
+
 export interface AccountPortfolioProjection {
   readonly accountId: string;
   readonly wallet: {
@@ -68,8 +75,11 @@ export interface AccountPortfolioProjection {
     readonly policyState: string;
     readonly eligibleForDeposits: boolean;
     readonly depositWarning: string | null;
+    readonly addresses: ReadonlyArray<WalletAddressProjection>;
   } | null;
   readonly balances: ReadonlyArray<WalletBalanceRecord>;
+  readonly lastSyncedAt?: Date | null;
+  readonly isStale?: boolean;
 }
 
 export const VALID_NETWORKS: ReadonlySet<string> = new Set([

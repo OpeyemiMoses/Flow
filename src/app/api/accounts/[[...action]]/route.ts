@@ -6,6 +6,10 @@ import {
 } from "../../../../server/accounts.ts";
 import { api, reply } from "../../../../server/http.ts";
 import {
+  readPortfolio,
+  refreshPortfolio,
+} from "../../../../server/portfolio.ts";
+import {
   changeMember,
   invite,
   readTeam,
@@ -36,8 +40,21 @@ export async function GET(
         return readTeam(request, accountId(id));
       if (request.method === "POST" && section === "invites")
         return invite(request, accountId(id));
+      if (section === "portfolio") {
+        if (request.method === "GET")
+          return readPortfolio(request, accountId(id));
+        if (request.method === "POST")
+          return refreshPortfolio(request, accountId(id));
+      }
     }
     if (id && child && parts.length === 3) {
+      if (
+        section === "portfolio" &&
+        child === "refresh" &&
+        request.method === "POST"
+      ) {
+        return refreshPortfolio(request, accountId(id));
+      }
       if (
         section === "members" &&
         ["PATCH", "DELETE"].includes(request.method)

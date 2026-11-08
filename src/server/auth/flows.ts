@@ -246,6 +246,7 @@ async function verifyCode(
         headers: authHeaders(request.headers),
         returnHeaders: true,
       });
+      await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${result.response.token}, true)`;
       const created = await tx.authSession.findUniqueOrThrow({
         where: { token: result.response.token },
       });
@@ -570,39 +571,42 @@ async function signOut(request: Request): Promise<Response> {
 export async function securitySnapshot(headers: Headers) {
   const { db } = runtime();
   const session = await requireSession(db, headers);
-  const user = await db.authUser.findUniqueOrThrow({
-    where: { id: session.userId },
-    select: {
-      email: true,
-      emailEnrolled: true,
-      mailboxPaused: true,
-      identities: { select: { providerId: true } },
-    },
+  return db.$transaction(async (tx) => {
+    const user = await tx.authUser.findUniqueOrThrow({
+      where: { id: session.userId },
+      select: {
+        email: true,
+        emailEnrolled: true,
+        mailboxPaused: true,
+        identities: { select: { providerId: true } },
+      },
+    });
+    await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${session.token}, true)`;
+    const sessions = await tx.authSession.findMany({
+      where: {
+        userId: session.userId,
+        expiresAt: { gt: new Date() },
+        createdAt: { gt: new Date(Date.now() - sessionLimitMs) },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { id: true, createdAt: true, expiresAt: true },
+      take: 25,
+    });
+    return {
+      email: user.email,
+      emailEnrolled: user.emailEnrolled,
+      mailboxPaused: user.mailboxPaused,
+      googleLinked: user.identities.some(
+        ({ providerId }) => providerId === "google",
+      ),
+      sessions: sessions.map((record) => ({
+        id: record.id,
+        createdAt: record.createdAt.toISOString(),
+        expiresAt: record.expiresAt.toISOString(),
+        current: record.id === session.id,
+      })),
+    };
   });
-  const sessions = await db.authSession.findMany({
-    where: {
-      userId: session.userId,
-      expiresAt: { gt: new Date() },
-      createdAt: { gt: new Date(Date.now() - sessionLimitMs) },
-    },
-    orderBy: { createdAt: "desc" },
-    select: { id: true, createdAt: true, expiresAt: true },
-    take: 25,
-  });
-  return {
-    email: user.email,
-    emailEnrolled: user.emailEnrolled,
-    mailboxPaused: user.mailboxPaused,
-    googleLinked: user.identities.some(
-      ({ providerId }) => providerId === "google",
-    ),
-    sessions: sessions.map((record) => ({
-      id: record.id,
-      createdAt: record.createdAt.toISOString(),
-      expiresAt: record.expiresAt.toISOString(),
-      current: record.id === session.id,
-    })),
-  };
 }
 
 async function securityStatus(request: Request): Promise<Response> {
@@ -618,6 +622,7 @@ async function revokeSession(request: Request): Promise<Response> {
   const { auth } = runtime();
   const removedCurrent = await transaction(async (tx) => {
     const session = await requireSession(tx, request.headers, true);
+    await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${session.token}, true)`;
     const removed = await tx.authSession.deleteMany({
       where: { userId: session.userId, id },
     });

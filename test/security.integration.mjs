@@ -1102,3 +1102,58 @@ test("Chromium follows the Google redirect, onboards accounts and enforces tenan
     await payer.close();
   }
 });
+
+test("m3 phase 3: authenticated portfolio API — authorization, cross-tenant isolation, and refresh rate limiting", async () => {
+  const owner = await person("portfolio-owner-p3@example.com");
+  const stranger = await person("portfolio-stranger-p3@example.com");
+  const unauth = await app.createClient();
+
+  // 1. Unauthenticated GET returns 401
+  const unauthRes = await unauth.get(
+    `/api/accounts/${owner.account.id}/portfolio`,
+  );
+  assert.equal(unauthRes.status(), 401);
+
+  // 2. Cross-tenant GET returns 404 (does not leak existence of other tenant's account)
+  const strangerRes = await stranger.client.get(
+    `/api/accounts/${owner.account.id}/portfolio`,
+  );
+  assert.equal(strangerRes.status(), 404);
+
+  // 3. Authenticated owner GET returns 200 with portfolio payload
+  const ownerRes = await owner.client.get(
+    `/api/accounts/${owner.account.id}/portfolio`,
+  );
+  assert.equal(ownerRes.status(), 200);
+  const data = await ownerRes.json();
+  assert.equal(data.accountId, owner.account.id);
+  assert.ok(Array.isArray(data.balances));
+  assert.equal(typeof data.isStale, "boolean");
+
+  // 4. Unauthenticated POST refresh returns 401
+  const unauthRefresh = await unauth.post(
+    `/api/accounts/${owner.account.id}/portfolio/refresh`,
+  );
+  assert.equal(unauthRefresh.status(), 401);
+
+  // 5. Cross-tenant POST refresh returns 404
+  const strangerRefresh = await stranger.client.post(
+    `/api/accounts/${owner.account.id}/portfolio/refresh`,
+  );
+  assert.equal(strangerRefresh.status(), 404);
+
+  // 6. Authenticated owner POST refresh returns 200 with cooldown seconds
+  const ownerRefresh = await owner.client.post(
+    `/api/accounts/${owner.account.id}/portfolio/refresh`,
+  );
+  assert.equal(ownerRefresh.status(), 200);
+  const refreshData = await ownerRefresh.json();
+  assert.equal(refreshData.accountId, owner.account.id);
+  assert.ok(refreshData.cooldownRemainingSeconds > 0);
+
+  // 7. Immediate subsequent refresh within 15-second cooldown returns 429
+  const rapidRefresh = await owner.client.post(
+    `/api/accounts/${owner.account.id}/portfolio/refresh`,
+  );
+  assert.equal(rapidRefresh.status(), 429);
+});

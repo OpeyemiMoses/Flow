@@ -33,6 +33,22 @@ export function cookie(
   return `${name}=${value}; Path=/; Max-Age=${seconds}; HttpOnly; SameSite=Lax${config.secure ? "; Secure" : ""}`;
 }
 
+export function extractCookieSessionToken(
+  headers: Headers,
+  cookieName: string,
+): string | null {
+  const cookieHeader = headers.get("cookie");
+  if (!cookieHeader) return null;
+  const parts = cookieHeader.split(";").map((part) => part.trim());
+  const prefix = `${cookieName}=`;
+  const match = parts.find((part) => part.startsWith(prefix));
+  if (!match) return null;
+  const raw = match.slice(prefix.length);
+  const decoded = decodeURIComponent(raw);
+  const token = decoded.split(".")[0];
+  return token && token.length > 0 ? token : null;
+}
+
 export function readNonce(headers: Headers, name: string): string | undefined {
   const matches = headers
     .get("cookie")
@@ -50,18 +66,45 @@ export async function readSession(
   refresh = false,
 ) {
   const { auth } = runtime();
-  const result = await provider(db, auth).api.getSession({
-    headers: authHeaders(headers),
-    query: { disableRefresh: !refresh },
-    returnHeaders: true,
-  });
-  const session = result.response?.session;
-  if (
-    !session ||
-    Date.now() >= new Date(session.createdAt).getTime() + sessionLimitMs
-  )
-    return null;
-  return { id: session.id, userId: session.userId, headers: result.headers };
+  const rawHeaders = authHeaders(headers);
+  const candidateToken =
+    extractCookieSessionToken(headers, auth.cookies.session) ??
+    headers
+      .get("authorization")
+      ?.replace(/^Bearer\s+/i, "")
+      .trim() ??
+    null;
+
+  const resolveWithContext = async (tx: FlowDb) => {
+    if (candidateToken) {
+      await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${candidateToken}, true)`;
+    }
+    const result = await provider(tx, auth).api.getSession({
+      headers: rawHeaders,
+      query: { disableRefresh: !refresh },
+      returnHeaders: true,
+    });
+    const session = result.response?.session;
+    if (
+      !session ||
+      Date.now() >= new Date(session.createdAt).getTime() + sessionLimitMs
+    )
+      return null;
+    return {
+      id: session.id,
+      userId: session.userId,
+      token: (session as { token?: string }).token ?? candidateToken,
+      headers: result.headers,
+    };
+  };
+
+  const dbWithTx = db as {
+    $transaction?: <T>(fn: (tx: FlowDb) => Promise<T>) => Promise<T>;
+  };
+  if (typeof dbWithTx.$transaction === "function") {
+    return dbWithTx.$transaction(resolveWithContext);
+  }
+  return resolveWithContext(db);
 }
 
 export async function requireSession(
@@ -74,6 +117,7 @@ export async function requireSession(
   if (!session) throw new ApiFailure(401, "AUTH_REQUIRED");
   if (lock) {
     await lockAuthUser(db, session.userId);
+    await db.$executeRaw`SELECT set_config('flow.current_session_token', ${session.token}, true)`;
     const current = await db.authSession.findUnique({
       where: { id: session.id },
     });

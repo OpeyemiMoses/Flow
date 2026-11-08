@@ -142,117 +142,6 @@ export async function getAccountBalances(
     );
   }
 
-  // 1. Resolve caller user from active unexpired session
-  const sessions = await db.$queryRaw<
-    Array<{
-      userId: string;
-      authUserId: string;
-      active: boolean;
-    }>
-  >`
-    SELECT u.id as "userId", u.auth_user_id as "authUserId", u.active
-    FROM flow.auth_sessions s
-    JOIN flow.users u ON u.auth_user_id = s.user_id
-    WHERE s.token = ${sessionToken.trim()}
-      AND s.expires_at > CURRENT_TIMESTAMP
-      AND u.active = true
-  `;
-
-  const session = sessions[0];
-  if (!session) {
-    throw new FlowError(
-      "ACCOUNT_NOT_FOUND",
-      "Account not found or access denied.",
-    );
-  }
-
-  const callerUserId = session.userId;
-
-  // 2. Verify tenant access
-  const accounts = await db.$queryRaw<
-    Array<{
-      id: string;
-      kind: string;
-      personalOwnerId: string | null;
-    }>
-  >`
-    SELECT id, kind::text as kind, personal_owner_id as "personalOwnerId"
-    FROM flow.accounts
-    WHERE id = ${accountId}::uuid
-  `;
-
-  const account = accounts[0];
-  if (!account) {
-    throw new FlowError(
-      "ACCOUNT_NOT_FOUND",
-      "Account not found or access denied.",
-    );
-  }
-
-  if (account.kind === "PERSONAL") {
-    if (account.personalOwnerId !== callerUserId) {
-      throw new FlowError(
-        "ACCOUNT_NOT_FOUND",
-        "Account not found or access denied.",
-      );
-    }
-  } else {
-    const memberships = await db.$queryRaw<Array<{ role: string }>>`
-      SELECT role::text as role
-      FROM flow.account_memberships
-      WHERE account_id = ${accountId}::uuid
-        AND user_id = ${callerUserId}::uuid
-        AND status = 'ACTIVE'::flow.member_status
-    `;
-    if (!memberships[0]) {
-      throw new FlowError(
-        "ACCOUNT_NOT_FOUND",
-        "Account not found or access denied.",
-      );
-    }
-  }
-
-  // 3. Fetch account wallet projection (if provisioned)
-  const wallets = await db.$queryRaw<
-    Array<{
-      id: string;
-      environment: string;
-      status: string;
-      policyState: string;
-    }>
-  >`
-    SELECT id, environment, status::text as status, policy_state as "policyState"
-    FROM flow.wallet_public_projections
-    WHERE account_id = ${accountId}::uuid
-  `;
-
-  const wallet = wallets[0];
-  let walletMeta = null;
-  if (wallet) {
-    const isTestnet = wallet.environment === "testnet";
-    walletMeta = {
-      id: wallet.id,
-      environment: wallet.environment,
-      isTestnet,
-      status: wallet.status,
-      policyState: wallet.policyState,
-      eligibleForDeposits: false, // Strict M3 Phase 1 invariant: deposits disabled
-      depositWarning: isTestnet
-        ? "TESTNET_WALLET: Addresses are for testnet provider compatibility rehearsal only. NEVER send mainnet or real funds to testnet addresses."
-        : null,
-    };
-  }
-
-  if (!wallet) {
-    return {
-      accountId,
-      wallet: null,
-      balances: [],
-    };
-  }
-
-  // Set database-level tenant RLS context and query wallet balances inside a transaction
-  // so the RLS context applies reliably on the same connection.
   type BalanceQueryRow = {
     id: string;
     walletId: string;
@@ -284,15 +173,147 @@ export async function getAccountBalances(
     assetIconUrl: string | null;
   };
 
-  const queryBalancesWithContext = async (
+  const executeInContext = async (
     tx: FlowDb,
-  ): Promise<BalanceQueryRow[]> => {
+  ): Promise<AccountPortfolioProjection> => {
+    // 1. Set database-level tenant and session context for the transaction
     await tx.$executeRaw`
-      SELECT set_config('flow.current_account_id', ${accountId}, true),
-             set_config('flow.current_session_token', ${sessionToken.trim()}, true)
+      SELECT set_config('flow.current_session_token', ${sessionToken.trim()}, true),
+             set_config('flow.current_account_id', ${accountId}, true)
     `;
 
-    return tx.$queryRaw<BalanceQueryRow[]>`
+    // 2. Resolve caller user from active unexpired session
+    const sessions = await tx.$queryRaw<
+      Array<{
+        userId: string;
+        authUserId: string;
+        active: boolean;
+      }>
+    >`
+      SELECT u.id as "userId", u.auth_user_id as "authUserId", u.active
+      FROM flow.auth_sessions s
+      JOIN flow.users u ON u.auth_user_id = s.user_id
+      WHERE s.token = ${sessionToken.trim()}
+        AND s.expires_at > CURRENT_TIMESTAMP
+        AND u.active = true
+    `;
+
+    const session = sessions[0];
+    if (!session) {
+      throw new FlowError(
+        "ACCOUNT_NOT_FOUND",
+        "Account not found or access denied.",
+      );
+    }
+
+    const callerUserId = session.userId;
+
+    // 3. Verify tenant access
+    const accounts = await tx.$queryRaw<
+      Array<{
+        id: string;
+        kind: string;
+        personalOwnerId: string | null;
+      }>
+    >`
+      SELECT id, kind::text as kind, personal_owner_id as "personalOwnerId"
+      FROM flow.accounts
+      WHERE id = ${accountId}::uuid
+    `;
+
+    const account = accounts[0];
+    if (!account) {
+      throw new FlowError(
+        "ACCOUNT_NOT_FOUND",
+        "Account not found or access denied.",
+      );
+    }
+
+    if (account.kind === "PERSONAL") {
+      if (account.personalOwnerId !== callerUserId) {
+        throw new FlowError(
+          "ACCOUNT_NOT_FOUND",
+          "Account not found or access denied.",
+        );
+      }
+    } else {
+      const memberships = await tx.$queryRaw<Array<{ role: string }>>`
+        SELECT role::text as role
+        FROM flow.account_memberships
+        WHERE account_id = ${accountId}::uuid
+          AND user_id = ${callerUserId}::uuid
+          AND status = 'ACTIVE'::flow.member_status
+      `;
+      if (!memberships[0]) {
+        throw new FlowError(
+          "ACCOUNT_NOT_FOUND",
+          "Account not found or access denied.",
+        );
+      }
+    }
+
+    // 4. Fetch account wallet projection (if provisioned)
+    const wallets = await tx.$queryRaw<
+      Array<{
+        id: string;
+        environment: string;
+        status: string;
+        policyState: string;
+      }>
+    >`
+      SELECT id, environment, status::text as status, policy_state as "policyState"
+      FROM flow.wallet_public_projections
+      WHERE account_id = ${accountId}::uuid
+    `;
+
+    const wallet = wallets[0];
+    let walletMeta = null;
+    if (wallet) {
+      const isTestnet = wallet.environment === "testnet";
+      const addressRows = await tx.$queryRaw<
+        Array<{
+          network: string;
+          chainId: string;
+          address: string;
+          publicKey: string | null;
+        }>
+      >`
+        SELECT network, chain_id as "chainId", address, public_key as "publicKey"
+        FROM flow.wallet_addresses
+        WHERE wallet_id = ${wallet.id}::uuid
+        ORDER BY network, chain_id
+      `;
+
+      walletMeta = {
+        id: wallet.id,
+        environment: wallet.environment,
+        isTestnet,
+        status: wallet.status,
+        policyState: wallet.policyState,
+        eligibleForDeposits: false, // Strict M3 Phase 1 invariant: deposits disabled
+        depositWarning: isTestnet
+          ? "TESTNET_WALLET: Addresses are for testnet provider compatibility rehearsal only. NEVER send mainnet or real funds to testnet addresses."
+          : null,
+        addresses: addressRows.map((a) => ({
+          network: a.network as NetworkId,
+          chainId: a.chainId,
+          address: a.address,
+          publicKey: a.publicKey,
+        })),
+      };
+    }
+
+    if (!wallet) {
+      return {
+        accountId,
+        wallet: null,
+        balances: [],
+        lastSyncedAt: null,
+        isStale: false,
+      };
+    }
+
+    const balanceRows = await tx.$queryRaw<BalanceQueryRow[]>`
       SELECT
         wb.id,
         wb.wallet_id AS "walletId",
@@ -328,66 +349,82 @@ export async function getAccountBalances(
       WHERE wb.wallet_id = ${wallet.id}::uuid
       ORDER BY na.network, na.chain_id, a.symbol
     `;
+
+    const balances: WalletBalanceRecord[] = balanceRows.map((r) => {
+      const atomic = BigInt(r.atomicBalance);
+      const display = formatAtomicToDisplay(atomic, r.decimals);
+      const isZeroConfirmed = r.syncStatus === "SYNCED" && atomic === 0n;
+
+      return {
+        id: r.id,
+        walletId: r.walletId,
+        networkAssetId: r.networkAssetId,
+        tokenAccountAddress: r.tokenAccountAddress,
+        atomicBalance: atomic,
+        displayBalance: display,
+        blockHeight: r.blockHeight !== null ? BigInt(r.blockHeight) : null,
+        blockTimestamp: r.blockTimestamp,
+        observedAt: r.observedAt,
+        finality: r.finality as BalanceFinality,
+        syncStatus: r.syncStatus as SyncStatus,
+        isZeroConfirmed,
+        lastSyncedAt: r.lastSyncedAt,
+        lastError: r.lastError,
+        networkAsset: {
+          id: r.networkAssetId,
+          assetId: r.assetId,
+          network: r.network as NetworkId,
+          chainId: r.chainId,
+          tokenStandard: r.tokenStandard as TokenStandard,
+          contractAddress: r.contractAddress,
+          decimals: r.decimals,
+          symbolOverride: r.symbolOverride,
+          nameOverride: r.nameOverride,
+          isVerified: r.isVerified,
+          isDepositEligible: r.isDepositEligible,
+          status: r.status as "ACTIVE" | "DEPRECATED" | "UNSUPPORTED",
+          asset: {
+            id: r.assetId,
+            symbol: r.assetSymbol,
+            name: r.assetName,
+            kind: r.assetKind as AssetKind,
+            description: r.assetDescription,
+            iconUrl: r.assetIconUrl,
+          },
+        },
+      };
+    });
+
+    let latestSyncedAt: Date | null = null;
+    for (const b of balances) {
+      if (
+        b.lastSyncedAt &&
+        (!latestSyncedAt || b.lastSyncedAt > latestSyncedAt)
+      ) {
+        latestSyncedAt = b.lastSyncedAt;
+      }
+    }
+
+    const isStale = latestSyncedAt
+      ? Date.now() - latestSyncedAt.getTime() > 120_000
+      : balances.length > 0;
+
+    return {
+      accountId,
+      wallet: walletMeta,
+      balances,
+      lastSyncedAt: latestSyncedAt,
+      isStale,
+    };
   };
 
   const dbWithTx = db as {
     $transaction?: <T>(fn: (tx: FlowDb) => Promise<T>) => Promise<T>;
   };
-  const balanceRows: BalanceQueryRow[] =
-    typeof dbWithTx.$transaction === "function"
-      ? await dbWithTx.$transaction(queryBalancesWithContext)
-      : await queryBalancesWithContext(db);
-
-  const balances: WalletBalanceRecord[] = balanceRows.map((r) => {
-    const atomic = BigInt(r.atomicBalance);
-    const display = formatAtomicToDisplay(atomic, r.decimals);
-    const isZeroConfirmed = r.syncStatus === "SYNCED" && atomic === 0n;
-
-    return {
-      id: r.id,
-      walletId: r.walletId,
-      networkAssetId: r.networkAssetId,
-      tokenAccountAddress: r.tokenAccountAddress,
-      atomicBalance: atomic,
-      displayBalance: display,
-      blockHeight: r.blockHeight !== null ? BigInt(r.blockHeight) : null,
-      blockTimestamp: r.blockTimestamp,
-      observedAt: r.observedAt,
-      finality: r.finality as BalanceFinality,
-      syncStatus: r.syncStatus as SyncStatus,
-      isZeroConfirmed,
-      lastSyncedAt: r.lastSyncedAt,
-      lastError: r.lastError,
-      networkAsset: {
-        id: r.networkAssetId,
-        assetId: r.assetId,
-        network: r.network as NetworkId,
-        chainId: r.chainId,
-        tokenStandard: r.tokenStandard as TokenStandard,
-        contractAddress: r.contractAddress,
-        decimals: r.decimals,
-        symbolOverride: r.symbolOverride,
-        nameOverride: r.nameOverride,
-        isVerified: r.isVerified,
-        isDepositEligible: r.isDepositEligible,
-        status: r.status as "ACTIVE" | "DEPRECATED" | "UNSUPPORTED",
-        asset: {
-          id: r.assetId,
-          symbol: r.assetSymbol,
-          name: r.assetName,
-          kind: r.assetKind as AssetKind,
-          description: r.assetDescription,
-          iconUrl: r.assetIconUrl,
-        },
-      },
-    };
-  });
-
-  return {
-    accountId,
-    wallet: walletMeta,
-    balances,
-  };
+  if (typeof dbWithTx.$transaction === "function") {
+    return dbWithTx.$transaction(executeInContext);
+  }
+  return executeInContext(db);
 }
 
 /**
