@@ -108,6 +108,7 @@ export async function verifyEvmTransfer(
       topics: string[];
       data: string;
       removed?: boolean;
+      logIndex?: string;
     }>;
   }>(params.rpcUrl, "eth_getTransactionReceipt", [params.txHash], options);
 
@@ -187,10 +188,14 @@ export async function verifyEvmTransfer(
   const requiredConfs = BigInt(
     params.requiredConfirmations ?? (params.network.includes("base") ? 1 : 6),
   );
-  const finality: VerificationFinality =
-    isCanonicallyFinalized || confirmations >= requiredConfs
-      ? "FINALIZED"
-      : "CONFIRMED";
+  let finality: VerificationFinality;
+  if (isCanonicallyFinalized) {
+    finality = "FINALIZED";
+  } else if (confirmations >= requiredConfs) {
+    finality = "CONFIRMED";
+  } else {
+    finality = "PENDING";
+  }
 
   // 4. Asset & Amount Extraction & Event Index
   let atomicAmount = 0n;
@@ -232,7 +237,9 @@ export async function verifyEvmTransfer(
     }
 
     const matchingLog = transferLogs[matchingLogIndex]!;
-    eventIndex = matchingLogIndex;
+    eventIndex = matchingLog.logIndex
+      ? parseInt(matchingLog.logIndex, 16)
+      : matchingLogIndex;
 
     if (matchingLog.topics[1]) {
       fromAddress = parseTopicToAddress(matchingLog.topics[1]).toLowerCase();
@@ -373,6 +380,7 @@ export async function verifySolanaTransfer(
   }
 
   let atomicAmount = 0n;
+  let solanaEventIndex = 0;
   const fromAddress = tx.transaction.message.accountKeys[0]?.pubkey ?? "";
   const toAddress = normExpectedRecipient;
 
@@ -414,7 +422,8 @@ export async function verifySolanaTransfer(
       atomicAmount = postAmount - preAmount;
     } else {
       // Check parsed transfer instructions
-      for (const inst of tx.transaction.message.instructions) {
+      for (let i = 0; i < tx.transaction.message.instructions.length; i++) {
+        const inst = tx.transaction.message.instructions[i]!;
         if (
           inst.parsed?.type === "transfer" ||
           inst.parsed?.type === "transferChecked"
@@ -425,6 +434,7 @@ export async function verifySolanaTransfer(
             info?.authority === normExpectedRecipient
           ) {
             atomicAmount = BigInt(String(info.amount || info.lamports || "0"));
+            solanaEventIndex = i;
             break;
           }
         }
@@ -454,7 +464,7 @@ export async function verifySolanaTransfer(
   return {
     network: params.network,
     txHash: params.txSignature,
-    eventIndex: 0,
+    eventIndex: solanaEventIndex,
     fromAddress,
     toAddress,
     assetId: params.expectedAssetId,
@@ -551,10 +561,20 @@ export async function verifyNearTransfer(
   const fromAddress = tx.transaction.signer_id;
   let toAddress = tx.transaction.receiver_id;
 
+  let nearEventIndex = 0;
   if (!normTokenContract) {
     // Native NEAR Transfer
-    const transferAction = tx.transaction.actions.find((a) => a.Transfer);
-    if (!transferAction || !transferAction.Transfer) {
+    const transferActionIndex = tx.transaction.actions.findIndex(
+      (a) => a.Transfer,
+    );
+    if (transferActionIndex === -1) {
+      throw new FlowError(
+        "RECIPIENT_ADDRESS_MISMATCH",
+        "NEAR transaction has no native Transfer action",
+      );
+    }
+    const transferAction = tx.transaction.actions[transferActionIndex]!;
+    if (!transferAction.Transfer) {
       throw new FlowError(
         "RECIPIENT_ADDRESS_MISMATCH",
         "NEAR transaction has no native Transfer action",
@@ -567,15 +587,23 @@ export async function verifyNearTransfer(
       );
     }
     atomicAmount = BigInt(transferAction.Transfer.deposit);
+    nearEventIndex = transferActionIndex;
   } else {
     // NEP-141 Token Transfer
-    const ftAction = tx.transaction.actions.find(
+    const ftActionIndex = tx.transaction.actions.findIndex(
       (a) =>
         a.FunctionCall &&
         (a.FunctionCall.method_name === "ft_transfer" ||
           a.FunctionCall.method_name === "ft_transfer_call"),
     );
-    if (!ftAction || !ftAction.FunctionCall) {
+    if (ftActionIndex === -1) {
+      throw new FlowError(
+        "RECIPIENT_ADDRESS_MISMATCH",
+        "RECIPIENT_ADDRESS_MISMATCH: NEAR transaction has no ft_transfer FunctionCall action",
+      );
+    }
+    const ftAction = tx.transaction.actions[ftActionIndex]!;
+    if (!ftAction.FunctionCall) {
       throw new FlowError(
         "RECIPIENT_ADDRESS_MISMATCH",
         "RECIPIENT_ADDRESS_MISMATCH: NEAR transaction has no ft_transfer FunctionCall action",
@@ -600,6 +628,7 @@ export async function verifyNearTransfer(
         );
       }
       atomicAmount = BigInt(decodedArgs.amount || "0");
+      nearEventIndex = ftActionIndex;
     } catch (err) {
       throw new FlowError(
         "CUSTODY_PROVIDER_ERROR",
@@ -618,7 +647,7 @@ export async function verifyNearTransfer(
   return {
     network: params.network,
     txHash: params.txHash,
-    eventIndex: 0,
+    eventIndex: nearEventIndex,
     fromAddress,
     toAddress,
     assetId: params.expectedAssetId,

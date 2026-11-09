@@ -241,6 +241,132 @@ export async function fetchOneClickDryQuote(params: {
   }
 }
 
+export interface OneClickCommittedQuoteResult {
+  readonly ok: boolean;
+  readonly depositAddress?: string;
+  readonly depositMemo?: string | null;
+  readonly depositDeadline?: string;
+  readonly amountInAtomic?: string;
+  readonly amountOutAtomic?: string;
+  readonly timeEstimateSeconds?: number | null;
+  readonly correlationId?: string;
+  readonly signature?: string;
+  readonly quoteTimestamp?: string | null;
+  readonly errorMessage?: string;
+}
+
+/**
+ * Requests an authentic committed execution quote from 1Click with dry: false.
+ * Returns genuine provider deposit instructions when execution is authorized.
+ */
+export async function fetchOneClickCommittedQuote(params: {
+  originAsset: string;
+  destinationAsset: string;
+  swapType: QuoteSwapType;
+  amountAtomic: string;
+  refundTo: string;
+  recipient: string;
+  deadlineSeconds?: number;
+  apiBase?: string;
+}): Promise<OneClickCommittedQuoteResult> {
+  const apiBase = params.apiBase ?? DEFAULT_ONE_CLICK_API_BASE;
+  const deadlineDate = new Date(
+    Date.now() + (params.deadlineSeconds ?? 900) * 1000,
+  );
+
+  const payload = {
+    dry: false,
+    swapType: params.swapType,
+    slippageTolerance: 100, // 1%
+    originAsset: params.originAsset,
+    depositType: "ORIGIN_CHAIN" as const,
+    destinationAsset: params.destinationAsset,
+    amount: params.amountAtomic,
+    refundTo: params.refundTo,
+    refundType: "ORIGIN_CHAIN" as const,
+    recipient: params.recipient,
+    recipientType: "DESTINATION_CHAIN" as const,
+    deadline: deadlineDate.toISOString(),
+  };
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    const response = await fetch(`${apiBase}/v0/quote`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    const data = (await response.json()) as OneClickRawResponse & {
+      depositAddress?: string;
+      depositMemo?: string;
+      quote?: {
+        depositAddress?: string;
+        depositMemo?: string;
+        memo?: string;
+        deadline?: string;
+        amountIn: string;
+        amountOut: string;
+        timeEstimate?: number;
+      };
+    };
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        errorMessage:
+          data.message ??
+          data.error ??
+          `Provider error (HTTP ${response.status})`,
+      };
+    }
+
+    const depositAddress = data.depositAddress ?? data.quote?.depositAddress;
+    if (!depositAddress) {
+      return {
+        ok: false,
+        errorMessage: "Provider response did not contain a deposit address.",
+      };
+    }
+
+    const memo =
+      data.depositMemo ?? data.quote?.depositMemo ?? data.quote?.memo ?? null;
+    const deadline =
+      data.quote?.deadline ?? data.quoteRequest?.deadline ?? payload.deadline;
+
+    return {
+      ok: true,
+      depositAddress,
+      depositMemo: memo,
+      depositDeadline: deadline,
+      amountInAtomic: data.quote?.amountIn,
+      amountOutAtomic: data.quote?.amountOut,
+      timeEstimateSeconds: data.quote?.timeEstimate ?? null,
+      correlationId: data.correlationId,
+      signature: data.signature,
+      quoteTimestamp: data.timestamp ?? null,
+    };
+  } catch (err: unknown) {
+    const isTimeout =
+      err instanceof Error &&
+      (err.name === "AbortError" || err.message.includes("abort"));
+    return {
+      ok: false,
+      errorMessage: isTimeout
+        ? "Provider committed quote request timed out."
+        : "Failed to connect to route provider for committed quote.",
+    };
+  }
+}
+
 export type OneClickExecutionStage =
   | "SOURCE_DEPOSIT_OBSERVED"
   | "SOURCE_FINALIZED"

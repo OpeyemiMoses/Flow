@@ -7,7 +7,9 @@ import {
   verifyOnChainTransfer,
   type EvidenceSource,
   type VerifiedTransferResult,
+  type VerifyOnChainTransferParams,
 } from "./on-chain-verifier.ts";
+import { fetchOneClickExecutionStatus } from "../providers/one-click-adapter.ts";
 
 export { isValidTransactionHash };
 
@@ -45,8 +47,6 @@ export interface ProviderExecutionEvidence {
   readonly blockHeight?: bigint;
   readonly blockHash?: string;
   readonly memo?: string | null;
-  readonly verifiedSourceTransfer?: VerifiedTransferResult;
-  readonly verifiedDestTransfer?: VerifiedTransferResult;
 }
 
 export interface WorkerHealthStatus {
@@ -56,6 +56,14 @@ export interface WorkerHealthStatus {
   readonly processedCount: number;
   readonly settledCount: number;
   readonly exceptionCount: number;
+}
+
+export interface PaymentMonitoringWorkerOptions {
+  readonly workerId?: string;
+  readonly workerDb?: FlowDb;
+  readonly onChainVerifier?: (
+    params: VerifyOnChainTransferParams,
+  ) => Promise<VerifiedTransferResult>;
 }
 
 /**
@@ -71,20 +79,21 @@ export interface WorkerHealthStatus {
 export class PaymentMonitoringWorker {
   private readonly workerDb: FlowDb;
   private readonly workerId: string;
+  private readonly onChainVerifier: (
+    params: VerifyOnChainTransferParams,
+  ) => Promise<VerifiedTransferResult>;
   private isRunning = false;
   private lastPolledAt: Date | null = null;
   private processedCount = 0;
   private settledCount = 0;
   private exceptionCount = 0;
 
-  constructor(options?: {
-    readonly workerId?: string;
-    readonly workerDb?: FlowDb;
-  }) {
+  constructor(options?: PaymentMonitoringWorkerOptions) {
     this.workerDb = options?.workerDb ?? getPrismaClient("worker");
     this.workerId =
       options?.workerId ??
       `payment-worker-${Math.random().toString(36).slice(2, 10)}`;
+    this.onChainVerifier = options?.onChainVerifier ?? verifyOnChainTransfer;
   }
 
   /**
@@ -254,11 +263,104 @@ export class PaymentMonitoringWorker {
   }
 
   /**
+   * Default production evidence fetcher:
+   * 1. If cross-chain with 1Click, queries 1Click status API.
+   * 2. If direct transfer or on-chain tx hash already present on attempt, uses that.
+   */
+  async fetchExecutionEvidence(
+    attempt: MonitoredAttemptRecord,
+  ): Promise<ProviderExecutionEvidence> {
+    if (
+      attempt.routeType.startsWith("CROSS_CHAIN") &&
+      (attempt.depositAddress || attempt.providerCorrelationId)
+    ) {
+      const statusRes = await fetchOneClickExecutionStatus({
+        depositAddress: attempt.depositAddress ?? "",
+        depositMemo: attempt.depositMemo,
+        correlationId: attempt.providerCorrelationId,
+      });
+
+      if (!statusRes.ok || statusRes.stage === "FAILED") {
+        return {
+          status: "FAILED",
+          failureReason: statusRes.failureReason ?? "1Click execution failed",
+          sourceTxHash: statusRes.sourceTxHash,
+          destinationTxHash: statusRes.destinationTxHash,
+          rawEvidence: statusRes.rawResponse,
+        };
+      }
+
+      if (statusRes.stage === "REFUNDED") {
+        return {
+          status: "REFUNDED",
+          failureReason: "1Click issued refund",
+          sourceTxHash: statusRes.sourceTxHash,
+          rawEvidence: statusRes.rawResponse,
+        };
+      }
+
+      if (
+        statusRes.stage === "SOURCE_DEPOSIT_OBSERVED" ||
+        statusRes.stage === "SOURCE_FINALIZED"
+      ) {
+        return {
+          status: "DETECTED",
+          sourceTxHash: statusRes.sourceTxHash,
+          evidenceSource: "1CLICK_STATUS_API",
+          rawEvidence: statusRes.rawResponse,
+        };
+      }
+
+      if (statusRes.stage === "ROUTING_IN_PROGRESS") {
+        return {
+          status: "ROUTING",
+          sourceTxHash: statusRes.sourceTxHash,
+          destinationTxHash: statusRes.destinationTxHash,
+          evidenceSource: "1CLICK_STATUS_API",
+          rawEvidence: statusRes.rawResponse,
+        };
+      }
+
+      if (
+        statusRes.stage === "DESTINATION_FINALIZED" ||
+        statusRes.stage === "DESTINATION_TRANSFER_OBSERVED"
+      ) {
+        return {
+          status: "SETTLED",
+          sourceTxHash: statusRes.sourceTxHash,
+          destinationTxHash: statusRes.destinationTxHash,
+          evidenceSource: "1CLICK_STATUS_API",
+          rawEvidence: statusRes.rawResponse,
+        };
+      }
+
+      return {
+        status: "PENDING",
+        sourceTxHash: statusRes.sourceTxHash,
+        destinationTxHash: statusRes.destinationTxHash,
+        rawEvidence: statusRes.rawResponse,
+      };
+    }
+
+    if (attempt.sourceTxHash) {
+      return {
+        status: "DETECTED",
+        sourceTxHash: attempt.sourceTxHash,
+        evidenceSource: "CHAIN_RPC_DIRECT",
+      };
+    }
+
+    return {
+      status: "PENDING",
+    };
+  }
+
+  /**
    * Reconciles an attempt against verified provider or indexer evidence.
    */
   async reconcileAttempt(
     attemptPublicId: string,
-    evidenceProvider: (
+    evidenceProvider?: (
       attempt: MonitoredAttemptRecord,
     ) => Promise<ProviderExecutionEvidence>,
   ): Promise<{ readonly transitioned: boolean; readonly newStatus: string }> {
@@ -358,7 +460,9 @@ export class PaymentMonitoringWorker {
     this.processedCount++;
 
     // Query evidence from provider / indexer
-    const evidence = await evidenceProvider(attempt);
+    const fetcher =
+      evidenceProvider ?? ((att) => this.fetchExecutionEvidence(att));
+    const evidence = await fetcher(attempt);
 
     if (evidence.status === "FAILED") {
       if (attempt.status !== "EXPIRED" && attempt.status !== "FAILED") {
@@ -457,28 +561,20 @@ export class PaymentMonitoringWorker {
       if (existingSource.length > 0) {
         sourceFinalized = existingSource[0]!.finality === "FINALIZED";
       } else {
-        // Genuine verification: either passed from verified fixture/test or queried on-chain
-        let sourceVerification: VerifiedTransferResult;
-        if (evidence.verifiedSourceTransfer) {
-          sourceVerification = evidence.verifiedSourceTransfer;
-        } else {
-          const sourceContract = await this.resolveTokenContract(
-            attempt.sourceNetwork,
-            attempt.sourceAssetId,
-          );
+        const sourceContract = await this.resolveTokenContract(
+          attempt.sourceNetwork,
+          attempt.sourceAssetId,
+        );
 
-          sourceVerification = await verifyOnChainTransfer({
-            network: attempt.sourceNetwork,
-            txHash: sTx,
-            expectedRecipient: attempt.depositAddress ?? "",
-            expectedAssetId: attempt.sourceAssetId,
-            expectedTokenContract: sourceContract,
-            minimumAtomicAmount: BigInt(
-              attempt.quotedSourceAtomicAmount || "1",
-            ),
-            expectedMemo: attempt.depositMemo,
-          });
-        }
+        const sourceVerification = await this.onChainVerifier({
+          network: attempt.sourceNetwork,
+          txHash: sTx,
+          expectedRecipient: attempt.depositAddress ?? "",
+          expectedAssetId: attempt.sourceAssetId,
+          expectedTokenContract: sourceContract,
+          minimumAtomicAmount: BigInt(attempt.quotedSourceAtomicAmount || "1"),
+          expectedMemo: attempt.depositMemo,
+        });
 
         const recordRes = await recordVerificationInDatabase(
           this.workerDb,
@@ -533,31 +629,26 @@ export class PaymentMonitoringWorker {
       if (existingDest.length > 0) {
         destFinalized = existingDest[0]!.finality === "FINALIZED";
       } else {
-        let destVerification: VerifiedTransferResult;
-        if (evidence.verifiedDestTransfer) {
-          destVerification = evidence.verifiedDestTransfer;
-        } else {
-          const registeredRecipient = await this.getRecipientRegisteredAddress(
-            attempt.id,
-            attempt.destinationNetwork,
-          );
+        const registeredRecipient = await this.getRecipientRegisteredAddress(
+          attempt.id,
+          attempt.destinationNetwork,
+        );
 
-          const destContract = await this.resolveTokenContract(
-            attempt.destinationNetwork,
-            attempt.destinationAssetId,
-          );
+        const destContract = await this.resolveTokenContract(
+          attempt.destinationNetwork,
+          attempt.destinationAssetId,
+        );
 
-          destVerification = await verifyOnChainTransfer({
-            network: attempt.destinationNetwork,
-            txHash: dTx,
-            expectedRecipient: registeredRecipient,
-            expectedAssetId: attempt.destinationAssetId,
-            expectedTokenContract: destContract,
-            minimumAtomicAmount: BigInt(
-              attempt.quotedDestinationAtomicAmount || "1",
-            ),
-          });
-        }
+        const destVerification = await this.onChainVerifier({
+          network: attempt.destinationNetwork,
+          txHash: dTx,
+          expectedRecipient: registeredRecipient,
+          expectedAssetId: attempt.destinationAssetId,
+          expectedTokenContract: destContract,
+          minimumAtomicAmount: BigInt(
+            attempt.quotedDestinationAtomicAmount || "1",
+          ),
+        });
 
         await recordVerificationInDatabase(
           this.workerDb,
@@ -572,8 +663,12 @@ export class PaymentMonitoringWorker {
 
     // Settle Attempt when all required on-chain verifications are FINALIZED
     const isCrossChain = attempt.routeType.startsWith("CROSS_CHAIN");
+    const effectiveDestTx = isCrossChain ? dTx : sTx;
     const canSettle =
-      sourceFinalized && (!isCrossChain || destFinalized) && sTx && dTx;
+      sourceFinalized &&
+      (!isCrossChain || destFinalized) &&
+      sTx &&
+      effectiveDestTx;
 
     if (canSettle) {
       const settleRows = await this.workerDb.$queryRaw<
@@ -590,7 +685,7 @@ export class PaymentMonitoringWorker {
         FROM flow.worker_settle_payment_attempt(
           ${attempt.attemptPublicId},
           ${sTx},
-          ${dTx}
+          ${effectiveDestTx}
         )
       `;
 
@@ -657,12 +752,10 @@ export class PaymentMonitoringWorker {
           for (const attempt of leasedAttempts) {
             if (options?.signal?.aborted) break;
             try {
-              if (options?.evidenceProvider) {
-                await this.reconcileAttempt(
-                  attempt.attemptPublicId,
-                  options.evidenceProvider,
-                );
-              }
+              await this.reconcileAttempt(
+                attempt.attemptPublicId,
+                options?.evidenceProvider,
+              );
             } catch (err) {
               log("error", "payment_monitoring_attempt_reconciliation_error", {
                 workerId: this.workerId,

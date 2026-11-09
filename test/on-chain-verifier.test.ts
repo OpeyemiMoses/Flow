@@ -522,4 +522,208 @@ describe("on-chain-verifier: genuine multi-chain transfer verification", () => {
       server.close();
     }
   });
+
+  it("distinguishes confirmation depth (CONFIRMED) from consensus finality (FINALIZED)", async () => {
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        const json = JSON.parse(body);
+        if (json.method === "eth_getTransactionByHash") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: {
+                hash: json.params[0],
+                from: "0x1111111111111111111111111111111111111111",
+                to: "0x2222222222222222222222222222222222222222",
+                value: "0xde0b6b3a7640000",
+                input: "0x",
+                blockNumber: "0x20", // Block 32
+                blockHash: "0xblockhash32",
+              },
+            }),
+          );
+        } else if (json.method === "eth_getTransactionReceipt") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: {
+                status: "0x1",
+                blockNumber: "0x20",
+                blockHash: "0xblockhash32",
+                logs: [],
+              },
+            }),
+          );
+        } else if (json.method === "eth_blockNumber") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: "0x30", // Block 48 (17 confirmations, >= required 6)
+            }),
+          );
+        } else if (json.method === "eth_getBlockByNumber") {
+          if (json.params[0] === "finalized") {
+            // Consensus finalized block is only at 25 (less than txBlock 32)
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: json.id,
+                result: {
+                  number: "0x19", // Block 25
+                  hash: "0xfinalizedblock25",
+                },
+              }),
+            );
+          } else {
+            res.end(
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: json.id,
+                result: {
+                  number: json.params[0],
+                  hash: "0xblockhash32",
+                },
+              }),
+            );
+          }
+        } else {
+          res.end(
+            JSON.stringify({ jsonrpc: "2.0", id: json.id, result: null }),
+          );
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    const rpcUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const result = await verifyEvmTransfer({
+        rpcUrl,
+        network: "ethereum-mainnet",
+        txHash: "0x" + "c".repeat(64),
+        expectedRecipient: "0x2222222222222222222222222222222222222222",
+        expectedAssetId: "ethereum-mainnet:ETH",
+        expectedTokenContract: null,
+        minimumAtomicAmount: 1000000000000000000n,
+        requiredConfirmations: 6,
+      });
+
+      assert.equal(result.isSuccess, true);
+      // With 17 confirmations but txBlock > finalizedHeight, it is CONFIRMED, not FINALIZED
+      assert.equal(result.finality, "CONFIRMED");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("parses actual hex logIndex from receipt into eventIndex for ERC-20 transfers", async () => {
+    const payerAddr = "0x1111111111111111111111111111111111111111";
+    const recipientAddr = "0x2222222222222222222222222222222222222222";
+    const tokenContract = "0x3333333333333333333333333333333333333333";
+
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        const json = JSON.parse(body);
+        if (json.method === "eth_getTransactionByHash") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: {
+                hash: json.params[0],
+                from: payerAddr,
+                to: tokenContract,
+                value: "0x0",
+                input: "0xa9059cbb",
+                blockNumber: "0x10",
+                blockHash: "0xblock16",
+              },
+            }),
+          );
+        } else if (json.method === "eth_getTransactionReceipt") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: {
+                status: "0x1",
+                blockNumber: "0x10",
+                blockHash: "0xblock16",
+                logs: [
+                  {
+                    address: "0x4444444444444444444444444444444444444444",
+                    topics: ["0xother"],
+                    data: "0x",
+                    logIndex: "0x0",
+                  },
+                  {
+                    address: tokenContract,
+                    topics: [
+                      ERC20_TRANSFER_EVENT_TOPIC,
+                      padAddressToTopic(payerAddr),
+                      padAddressToTopic(recipientAddr),
+                    ],
+                    data: "0x05f5e100", // 100,000,000 (100 USDC)
+                    logIndex: "0x4", // log index 4 in receipt
+                  },
+                ],
+              },
+            }),
+          );
+        } else if (json.method === "eth_blockNumber") {
+          res.end(
+            JSON.stringify({ jsonrpc: "2.0", id: json.id, result: "0x20" }),
+          );
+        } else if (json.method === "eth_getBlockByNumber") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: { number: "0x15", hash: "0xblock16" },
+            }),
+          );
+        } else {
+          res.end(
+            JSON.stringify({ jsonrpc: "2.0", id: json.id, result: null }),
+          );
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    const rpcUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      const result = await verifyEvmTransfer({
+        rpcUrl,
+        network: "ethereum-mainnet",
+        txHash: "0x" + "d".repeat(64),
+        expectedRecipient: recipientAddr,
+        expectedAssetId: "ethereum-mainnet:USDC",
+        expectedTokenContract: tokenContract,
+        minimumAtomicAmount: 50000000n,
+      });
+
+      assert.equal(result.isSuccess, true);
+      assert.equal(result.eventIndex, 4);
+      assert.equal(result.atomicAmount, 100000000n);
+      assert.equal(result.finality, "FINALIZED");
+    } finally {
+      server.close();
+    }
+  });
 });

@@ -31,7 +31,8 @@
     "authorize:testnet": "node --env-file-if-exists=.env scripts/rehearse-testnet-registration.ts --create-authorization",
     "rehearse:testnet": "node --env-file-if-exists=.env scripts/rehearse-testnet-registration.ts",
     "prepare:testnet-account": "node --env-file-if-exists=.env scripts/prepare-testnet-account.ts",
-    "check:balances": "node --env-file-if-exists=.env scripts/check-balances.ts"
+    "check:balances": "node --env-file-if-exists=.env scripts/check-balances.ts",
+    "worker:monitoring": "node --env-file-if-exists=.env scripts/run-payment-monitoring-worker.ts"
   },
   "dependencies": {
     "@better-auth/prisma-adapter": "1.7.18",

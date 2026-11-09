@@ -95,4 +95,130 @@ describe("payments: payment monitoring worker & hash validation", () => {
     const health = worker.getHealthStatus();
     assert.equal(health.isRunning, false);
   });
+
+  it("fetchExecutionEvidence accurately derives evidence for direct transfers and unobserved states", async () => {
+    const worker = new PaymentMonitoringWorker({
+      workerId: "test-evidence-worker",
+      workerDb: {} as unknown as FlowDb,
+    });
+
+    const directAttempt = {
+      id: "attempt-1",
+      attemptPublicId: "pa_test_1",
+      status: "DEPOSIT_COMMITTED",
+      depositAddress: "0x1234567890123456789012345678901234567890",
+      depositMemo: null,
+      depositDeadline: null,
+      quoteExpiresAt: null,
+      providerCorrelationId: null,
+      sourceNetwork: "ethereum-mainnet",
+      sourceAssetId: "ethereum-mainnet:ETH",
+      quotedSourceAtomicAmount: "1000000000000000000",
+      destinationNetwork: "ethereum-mainnet",
+      destinationAssetId: "ethereum-mainnet:ETH",
+      quotedDestinationAtomicAmount: "1000000000000000000",
+      routeType: "DIRECT_TRANSFER",
+      sourceTxHash: "0x" + "a".repeat(64),
+      destinationTxHash: null,
+      pollCount: 1,
+    };
+
+    const evidence = await worker.fetchExecutionEvidence(directAttempt);
+    assert.equal(evidence.status, "DETECTED");
+    assert.equal(evidence.sourceTxHash, "0x" + "a".repeat(64));
+    assert.equal(evidence.evidenceSource, "CHAIN_RPC_DIRECT");
+
+    // Unobserved pending attempt
+    const pendingAttempt = {
+      ...directAttempt,
+      sourceTxHash: null,
+    };
+    const pendingEvidence = await worker.fetchExecutionEvidence(pendingAttempt);
+    assert.equal(pendingEvidence.status, "PENDING");
+  });
+
+  it("reconciles attempt using injected onChainVerifier and refuses settlement without on-chain proof", async () => {
+    let verifierCalled = false;
+    const mockOnChainVerifier = async () => {
+      verifierCalled = true;
+      return {
+        network: "ethereum-mainnet",
+        txHash: "0x" + "a".repeat(64),
+        eventIndex: 0,
+        fromAddress: "0xpayer",
+        toAddress: "0xrecipient",
+        assetId: "ethereum-mainnet:ETH",
+        tokenContract: null,
+        atomicAmount: 1000000000000000000n,
+        blockHeight: 100n,
+        blockHash: "0xblock100",
+        finality: "CONFIRMED" as const,
+        memo: null,
+        evidenceSource: "CHAIN_RPC_DIRECT" as const,
+        rawEvidence: {},
+        isSuccess: true,
+      };
+    };
+
+    const mockDb = {
+      $queryRaw: async (query: unknown) => {
+        const queryStr = String(query);
+        if (queryStr.includes("SELECT\n        pa.id")) {
+          return [
+            {
+              id: "00000000-0000-0000-0000-000000000001",
+              attempt_public_id: "pa_test_reconcile",
+              status: "DEPOSIT_COMMITTED",
+              deposit_address: "0x1234567890123456789012345678901234567890",
+              deposit_memo: null,
+              deposit_deadline: null,
+              quote_expires_at: null,
+              provider_correlation_id: null,
+              source_network: "ethereum-mainnet",
+              source_asset_id: "ethereum-mainnet:ETH",
+              quoted_source_atomic_amount: "1000000000000000000",
+              destination_network: "ethereum-mainnet",
+              destination_asset_id: "ethereum-mainnet:ETH",
+              quoted_destination_atomic_amount: "1000000000000000000",
+              route_type: "DIRECT_TRANSFER",
+              source_tx_hash: "0x" + "a".repeat(64),
+              destination_tx_hash: null,
+              poll_count: 0,
+            },
+          ];
+        }
+        if (queryStr.includes("flow.payment_verifications")) {
+          // No existing verification yet
+          return [];
+        }
+        if (queryStr.includes("flow.record_payment_verification")) {
+          return [
+            {
+              verification_id: "v-1",
+              payment_attempt_id: "00000000-0000-0000-0000-000000000001",
+              verification_type: "SOURCE_DEPOSIT",
+              status: "SETTLING",
+              is_late_deposit: false,
+            },
+          ];
+        }
+        if (queryStr.includes("flow.network_assets")) {
+          return [];
+        }
+        return [];
+      },
+      $executeRaw: async () => 1,
+    } as unknown as FlowDb;
+
+    const worker = new PaymentMonitoringWorker({
+      workerId: "test-reconcile-worker",
+      workerDb: mockDb,
+      onChainVerifier: mockOnChainVerifier,
+    });
+
+    const res = await worker.reconcileAttempt("pa_test_reconcile");
+    assert.equal(verifierCalled, true);
+    // Because finality was CONFIRMED (not FINALIZED), it transitions to SETTLING, not SETTLED
+    assert.equal(res.newStatus, "SETTLING");
+  });
 });
