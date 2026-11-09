@@ -671,6 +671,7 @@ model PaymentVerification {
   verificationType String         @map("verification_type") @db.VarChar(32)
   network          String         @db.VarChar(64)
   txHash           String         @map("tx_hash") @db.VarChar(128)
+  eventIndex       Int            @default(0) @map("event_index")
   fromAddress      String         @map("from_address") @db.VarChar(256)
   toAddress        String         @map("to_address") @db.VarChar(256)
   assetId          String         @map("asset_id") @db.VarChar(128)
@@ -687,7 +688,7 @@ model PaymentVerification {
 
   paymentAttempt   PaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
 
-  @@unique([network, txHash, verificationType])
+  @@unique([network, txHash, eventIndex, verificationType])
   @@index([paymentAttemptId, verificationType])
   @@map("payment_verifications")
   @@schema("flow")

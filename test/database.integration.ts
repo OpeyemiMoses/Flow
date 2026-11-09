@@ -8500,6 +8500,29 @@ test("database integration: M5 Phase 4 financial ledger double-entry, RLS isolat
     const tenantAccountId = owner.accountId;
     const sessionToken = await createTestSession(adminClient, owner.authUserId);
 
+    // Register merchant wallet & address on destination network (base-mainnet)
+    const tenantWalletId = randomUUID();
+    await workerClient.query(
+      `INSERT INTO flow.wallets (
+        id, account_id, provider, environment, provider_wallet_id,
+        near_account_id, encrypted_credential, key_id, key_digest, status
+      ) VALUES (
+        $1::uuid, $2::uuid, 'OUTLAYER', 'mainnet',
+        'pw_dest_1', 'flow.near', 'enc_cred', 'v1', 'digest_1',
+        'ACTIVE'::flow.wallet_status
+      )`,
+      [tenantWalletId, tenantAccountId],
+    );
+
+    await workerClient.query(
+      `INSERT INTO flow.wallet_addresses (
+        id, wallet_id, network, chain_id, address, public_key
+      ) VALUES (
+        gen_random_uuid(), $1::uuid, 'base-mainnet', '8453', '0xdest_wallet', 'pk_dest_1'
+      )`,
+      [tenantWalletId],
+    );
+
     // 2. Double-Entry Invariant Test: Unbalanced journal must fail
     const custodyAcctId = randomUUID();
     const merchantAcctId = randomUUID();
@@ -8704,6 +8727,89 @@ test("database integration: M5 Phase 4 financial ledger double-entry, RLS isolat
         [attemptPublicId],
       ),
       /unique constraint|duplicate key|idx_payment_verifications_one_time_attribution/,
+    );
+
+    // Invariant check: Multi-transfer event_index allows distinct legitimate events on the same tx_hash
+    await workerClient.query(
+      `SELECT * FROM flow.record_payment_verification(
+        $1, 'SOURCE_DEPOSIT', 'ethereum-mainnet', '0xsource_tx_hash_1',
+        '0xpayer_source_1', '0x1234567890123456789012345678901234567890',
+        'ethereum-mainnet:USDC', NULL, 25000000, 100, '0xhash_1', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{"test": true}'::jsonb, 1
+      )`,
+      [attemptPublicId],
+    );
+
+    // Invariant check: Append-only immutability trigger and role revocation blocks UPDATE and DELETE on payment_verifications
+    await assert.rejects(
+      adminClient.query(
+        `UPDATE flow.payment_verifications SET finality = 'PENDING' WHERE tx_hash = '0xsource_tx_hash_1'`,
+      ),
+      /permission denied|PAYMENT_VERIFICATIONS_IMMUTABLE/,
+    );
+    await assert.rejects(
+      adminClient.query(
+        `DELETE FROM flow.payment_verifications WHERE tx_hash = '0xsource_tx_hash_1'`,
+      ),
+      /permission denied|PAYMENT_VERIFICATIONS_IMMUTABLE/,
+    );
+
+    // Invariant check: Destination delivery to unregistered recipient address fails
+    await assert.rejects(
+      workerClient.query(
+        `SELECT * FROM flow.record_payment_verification(
+          $1, 'DESTINATION_SETTLEMENT', 'base-mainnet', '0xdest_tx_hash_fraud',
+          '0xsolver_dest_1', '0xfraud_unregistered_wallet',
+          'base-mainnet:USDC', NULL, 25000000, 201, '0xhash_fraud', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{"test": true}'::jsonb
+        )`,
+        [attemptPublicId],
+      ),
+      /RECIPIENT_ADDRESS_MISMATCH/,
+    );
+
+    // Invariant check: Fixture evidence is blocked from satisfying live settlement
+    const fixturePrPublicId = `pr_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+        account_id, public_id, title, destination_network, destination_asset_id,
+        destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount, status
+      ) VALUES (
+        $1, $2, 'Fixture Invoice', 'base-mainnet', 'base-mainnet:USDC', 'USDC', 6, 'FIXED', 10000000, 'ACTIVE'
+      )`,
+      [tenantAccountId, fixturePrPublicId],
+    );
+
+    const fixtureAttemptId = `pa_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
+    await workerClient.query(
+      `INSERT INTO flow.payment_attempts (
+        payment_request_id, attempt_public_id, payer_mode, source_network, source_asset_id,
+        source_asset_symbol, source_decimals, route_type, route_status, quoted_source_atomic_amount,
+        quoted_destination_atomic_amount, status, quote_expires_at, verification_tier, is_provider_verified,
+        deposit_address
+      ) VALUES (
+        (SELECT id FROM flow.payment_requests WHERE public_id = $1),
+        $2, 'WALLET', 'base-mainnet', 'base-mainnet:USDC', 'USDC', 6,
+        'DIRECT_TRANSFER', 'SUPPORTED_AND_QUOTABLE', 10000000, 10000000,
+        'DEPOSIT_COMMITTED', CURRENT_TIMESTAMP + INTERVAL '10 minutes', 'PROVIDER_VERIFIED', true,
+        '0x1234567890123456789012345678901234567890'
+      )`,
+      [fixturePrPublicId, fixtureAttemptId],
+    );
+
+    await workerClient.query(
+      `SELECT * FROM flow.record_payment_verification(
+        $1, 'SOURCE_DEPOSIT', 'base-mainnet', '0xfixture_tx_hash_1',
+        '0xpayer_fixture', '0x1234567890123456789012345678901234567890',
+        'base-mainnet:USDC', NULL, 10000000, 250, '0xhash_fix', 'FINALIZED', NULL, 'FIXTURE_EVIDENCE', '{"fixture": true}'::jsonb
+      )`,
+      [fixtureAttemptId],
+    );
+
+    await assert.rejects(
+      workerClient.query(
+        `SELECT * FROM flow.worker_settle_payment_attempt($1, '0xfixture_tx_hash_1', '0xfixture_tx_hash_1')`,
+        [fixtureAttemptId],
+      ),
+      /FIXTURE_EVIDENCE_NOT_PERMITTED/,
     );
 
     // Verify invoice status marked COMPLETED

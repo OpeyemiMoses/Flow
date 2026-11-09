@@ -73,4 +73,26 @@ describe("payments: payment monitoring worker & hash validation", () => {
     assert.equal(health.isRunning, false);
     assert.equal(health.processedCount, 0);
   });
+
+  it("runLoop gracefully handles cancellation via AbortSignal", async () => {
+    const mockDb = {
+      $queryRaw: async () => [],
+    } as unknown as FlowDb;
+
+    const worker = new PaymentMonitoringWorker({
+      workerId: "test-loop-worker",
+      workerDb: mockDb,
+    });
+
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50);
+
+    await worker.runLoop({
+      pollIntervalMs: 10,
+      signal: ac.signal,
+    });
+
+    const health = worker.getHealthStatus();
+    assert.equal(health.isRunning, false);
+  });
 });

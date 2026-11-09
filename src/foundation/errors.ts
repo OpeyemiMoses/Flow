@@ -48,7 +48,9 @@ export type FlowErrorCode =
   | "MEMO_MISMATCH"
   | "NETWORK_MISMATCH"
   | "UNVERIFIED_SOURCE_DEPOSIT"
-  | "UNVERIFIED_DESTINATION_DELIVERY";
+  | "UNVERIFIED_DESTINATION_DELIVERY"
+  | "REORG_DETECTED"
+  | "FIXTURE_EVIDENCE_NOT_PERMITTED";
 
 export class FlowError extends Error {
   readonly code: FlowErrorCode;

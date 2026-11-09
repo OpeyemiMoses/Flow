@@ -20,6 +20,7 @@ export type VerificationFinality = "FINALIZED" | "CONFIRMED" | "PENDING";
 export interface VerifiedTransferResult {
   readonly network: string;
   readonly txHash: string;
+  readonly eventIndex: number;
   readonly fromAddress: string;
   readonly toAddress: string;
   readonly assetId: string;
@@ -81,6 +82,7 @@ export async function verifyEvmTransfer(
     return {
       network: params.network,
       txHash: params.txHash,
+      eventIndex: 0,
       fromAddress: tx.from.toLowerCase(),
       toAddress: (tx.to ?? "").toLowerCase(),
       assetId: params.expectedAssetId,
@@ -125,7 +127,7 @@ export async function verifyEvmTransfer(
     );
   }
 
-  // 3. Confirmations and Finality
+  // 3. Confirmations and Canonical Finality Verification
   const blockNumberRes = await callJsonRpc<string>(
     params.rpcUrl,
     "eth_blockNumber",
@@ -139,16 +141,62 @@ export async function verifyEvmTransfer(
   const confirmations =
     latestBlock >= txBlock ? latestBlock - txBlock + 1n : 0n;
 
+  // Reorganization Detection: verify block hash at tx height matches receipt blockHash
+  try {
+    const canonicalBlockRes = await callJsonRpc<{ hash: string } | null>(
+      params.rpcUrl,
+      "eth_getBlockByNumber",
+      [`0x${txBlock.toString(16)}`, false],
+      options,
+    );
+    if (
+      canonicalBlockRes.response.result?.hash &&
+      canonicalBlockRes.response.result.hash.toLowerCase() !==
+        receipt.blockHash.toLowerCase()
+    ) {
+      throw new FlowError(
+        "REORG_DETECTED",
+        `REORG_DETECTED: Block hash at height ${txBlock} diverged: receipt=${receipt.blockHash}, canonical=${canonicalBlockRes.response.result.hash}`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof FlowError && err.code === "REORG_DETECTED") {
+      throw err;
+    }
+  }
+
+  // Check canonical finalized block height if supported
+  let isCanonicallyFinalized = false;
+  try {
+    const finalizedRes = await callJsonRpc<{ number: string } | null>(
+      params.rpcUrl,
+      "eth_getBlockByNumber",
+      ["finalized", false],
+      options,
+    );
+    if (finalizedRes.response.result?.number) {
+      const finalizedHeight = BigInt(finalizedRes.response.result.number);
+      if (txBlock <= finalizedHeight) {
+        isCanonicallyFinalized = true;
+      }
+    }
+  } catch {
+    // Ignore unsupported "finalized" block tag on certain L2s/mocks
+  }
+
   const requiredConfs = BigInt(
     params.requiredConfirmations ?? (params.network.includes("base") ? 1 : 6),
   );
   const finality: VerificationFinality =
-    confirmations >= requiredConfs ? "FINALIZED" : "CONFIRMED";
+    isCanonicallyFinalized || confirmations >= requiredConfs
+      ? "FINALIZED"
+      : "CONFIRMED";
 
-  // 4. Asset & Amount Extraction
+  // 4. Asset & Amount Extraction & Event Index
   let atomicAmount = 0n;
   let fromAddress = tx.from.toLowerCase();
   let toAddress = (tx.to ?? "").toLowerCase();
+  let eventIndex = 0;
 
   if (!normTokenContract) {
     // Native ETH
@@ -169,19 +217,22 @@ export async function verifyEvmTransfer(
         log.address.toLowerCase() === normTokenContract,
     );
 
-    const matchingLog = transferLogs.find((log) => {
+    const matchingLogIndex = transferLogs.findIndex((log) => {
       const recipientTopic = log.topics[2];
       if (!recipientTopic) return false;
       const parsedRecipient = parseTopicToAddress(recipientTopic);
       return parsedRecipient.toLowerCase() === normExpectedRecipient;
     });
 
-    if (!matchingLog) {
+    if (matchingLogIndex === -1) {
       throw new FlowError(
         "RECIPIENT_ADDRESS_MISMATCH",
         `RECIPIENT_ADDRESS_MISMATCH: No ERC-20 transfer event found matching recipient ${normExpectedRecipient} on contract ${normTokenContract}`,
       );
     }
+
+    const matchingLog = transferLogs[matchingLogIndex]!;
+    eventIndex = matchingLogIndex;
 
     if (matchingLog.topics[1]) {
       fromAddress = parseTopicToAddress(matchingLog.topics[1]).toLowerCase();
@@ -200,6 +251,7 @@ export async function verifyEvmTransfer(
   return {
     network: params.network,
     txHash: params.txHash,
+    eventIndex,
     fromAddress,
     toAddress,
     assetId: params.expectedAssetId,
@@ -402,6 +454,7 @@ export async function verifySolanaTransfer(
   return {
     network: params.network,
     txHash: params.txSignature,
+    eventIndex: 0,
     fromAddress,
     toAddress,
     assetId: params.expectedAssetId,
@@ -565,6 +618,7 @@ export async function verifyNearTransfer(
   return {
     network: params.network,
     txHash: params.txHash,
+    eventIndex: 0,
     fromAddress,
     toAddress,
     assetId: params.expectedAssetId,
@@ -582,6 +636,127 @@ export async function verifyNearTransfer(
     },
     isSuccess: true,
   };
+}
+
+/**
+ * Maps network key to authenticated or public RPC endpoint.
+ */
+export function getNetworkRpcUrl(network: string): string {
+  const norm = network.toLowerCase().trim();
+  if (norm.includes("near")) {
+    return (
+      process.env.FLOW_NEAR_RPC_URL ||
+      (norm.includes("testnet")
+        ? "https://rpc.testnet.near.org"
+        : "https://rpc.mainnet.near.org")
+    );
+  }
+  if (norm.includes("base")) {
+    return (
+      process.env.FLOW_BASE_RPC_URL ||
+      (norm.includes("sepolia")
+        ? "https://sepolia.base.org"
+        : "https://mainnet.base.org")
+    );
+  }
+  if (norm.includes("solana")) {
+    return (
+      process.env.FLOW_SOLANA_RPC_URL ||
+      (norm.includes("devnet")
+        ? "https://api.devnet.solana.com"
+        : "https://api.mainnet-beta.solana.com")
+    );
+  }
+  if (norm.includes("ethereum") || norm.includes("eth")) {
+    return (
+      process.env.FLOW_ETH_RPC_URL ||
+      (norm.includes("sepolia")
+        ? "https://rpc.sepolia.org"
+        : "https://rpc.ankr.com/eth")
+    );
+  }
+  throw new FlowError(
+    "RPC_NETWORK_ERROR",
+    `Unsupported network for RPC verification: ${network}`,
+  );
+}
+
+export interface VerifyOnChainTransferParams {
+  readonly network: string;
+  readonly txHash: string;
+  readonly expectedRecipient: string;
+  readonly expectedAssetId: string;
+  readonly expectedTokenContract?: string | null;
+  readonly minimumAtomicAmount: bigint;
+  readonly expectedMemo?: string | null;
+  readonly senderAccountId?: string;
+  readonly requiredConfirmations?: number;
+  readonly customRpcUrl?: string;
+}
+
+/**
+ * Universal on-chain transfer verifier: delegates to network-specific verifiers
+ * and queries genuine blockchain transactions/receipts via RPC.
+ */
+export async function verifyOnChainTransfer(
+  params: VerifyOnChainTransferParams,
+  options?: JsonRpcOptions,
+): Promise<VerifiedTransferResult> {
+  const rpcUrl = params.customRpcUrl || getNetworkRpcUrl(params.network);
+  const net = params.network.toLowerCase();
+
+  if (net.includes("base") || net.includes("eth") || net.includes("ethereum")) {
+    return verifyEvmTransfer(
+      {
+        rpcUrl,
+        network: params.network,
+        txHash: params.txHash,
+        expectedRecipient: params.expectedRecipient,
+        expectedAssetId: params.expectedAssetId,
+        expectedTokenContract: params.expectedTokenContract,
+        minimumAtomicAmount: params.minimumAtomicAmount,
+        requiredConfirmations: params.requiredConfirmations,
+      },
+      options,
+    );
+  }
+
+  if (net.includes("solana")) {
+    return verifySolanaTransfer(
+      {
+        rpcUrl,
+        network: params.network,
+        txSignature: params.txHash,
+        expectedRecipient: params.expectedRecipient,
+        expectedAssetId: params.expectedAssetId,
+        expectedTokenMint: params.expectedTokenContract,
+        minimumAtomicAmount: params.minimumAtomicAmount,
+        expectedMemo: params.expectedMemo,
+      },
+      options,
+    );
+  }
+
+  if (net.includes("near")) {
+    return verifyNearTransfer(
+      {
+        rpcUrl,
+        network: params.network,
+        txHash: params.txHash,
+        senderAccountId: params.senderAccountId || params.expectedRecipient,
+        expectedRecipient: params.expectedRecipient,
+        expectedAssetId: params.expectedAssetId,
+        expectedTokenContract: params.expectedTokenContract,
+        minimumAtomicAmount: params.minimumAtomicAmount,
+      },
+      options,
+    );
+  }
+
+  throw new FlowError(
+    "RPC_NETWORK_ERROR",
+    `Unsupported network for on-chain verification: ${params.network}`,
+  );
 }
 
 /**
@@ -623,7 +798,8 @@ export async function recordVerificationInDatabase(
       ${verification.finality},
       ${verification.memo},
       ${verification.evidenceSource},
-      ${JSON.stringify(verification.rawEvidence)}::jsonb
+      ${JSON.stringify(verification.rawEvidence)}::jsonb,
+      ${verification.eventIndex ?? 0}
     )
   `;
 

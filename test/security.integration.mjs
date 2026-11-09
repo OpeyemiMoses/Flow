@@ -2088,6 +2088,29 @@ test("security: M5 Phase 4 deposit commitment, instruction issuance, polling, an
   assert.equal(createRes.status(), 201);
   const paymentReq = await createRes.json();
 
+  // Register merchant wallet & address on destination network (base-mainnet)
+  const ownerWalletId = randomUUID();
+  await workerDb.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, environment, provider_wallet_id,
+      near_account_id, encrypted_credential, key_id, key_digest, status
+    ) VALUES (
+      $1::uuid, $2::uuid, 'OUTLAYER', 'mainnet',
+      'pw_owner_dest', 'owner.near', 'enc_cred', 'v1', 'digest_1',
+      'ACTIVE'::flow.wallet_status
+    )`,
+    [ownerWalletId, owner.account.id],
+  );
+
+  await workerDb.query(
+    `INSERT INTO flow.wallet_addresses (
+      id, wallet_id, network, chain_id, address, public_key
+    ) VALUES (
+      gen_random_uuid(), $1::uuid, 'base-mainnet', '8453', '0xdest_wallet', 'pk_dest_1'
+    )`,
+    [ownerWalletId],
+  );
+
   // 2. Guest discovers a quote from Solana SOL
   const quoteRes = await unauth.post(`/api/pay/${paymentReq.publicId}/quote`, {
     data: {
@@ -2182,7 +2205,42 @@ test("security: M5 Phase 4 deposit commitment, instruction issuance, polling, an
     /UNVERIFIED_SOURCE_DEPOSIT/,
   );
 
-  // Record verified source deposit
+  // Adversarial Check: Premature finality (CONFIRMED) cannot satisfy settlement
+  const prematureTx =
+    "5VERv8NMvzbJMEdV8xnrLkEaWR436xQsGhmGLxrNdEd137KqD5N2wK1i4tGv3d8nZbG1mR6tWv2tB9gH8yK3mQpremature";
+  await workerDb.query(
+    `SELECT * FROM flow.record_payment_verification(
+      $1, 'SOURCE_DEPOSIT', 'solana-mainnet', $2,
+      'payer_solana_addr', '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin',
+      'solana-mainnet:SOL', NULL, (SELECT quoted_source_atomic_amount FROM flow.payment_attempts WHERE attempt_public_id = $1),
+      123455, 'slot_123455', 'CONFIRMED', NULL, 'CHAIN_RPC_DIRECT', '{"verified": true}'::jsonb
+    )`,
+    [attemptPublicId, prematureTx],
+  );
+
+  await assert.rejects(
+    workerDb.query(
+      `SELECT * FROM flow.worker_settle_payment_attempt($1, $2, $3)`,
+      [attemptPublicId, prematureTx, validBaseTx],
+    ),
+    /UNVERIFIED_SOURCE_DEPOSIT/,
+  );
+
+  // Adversarial Check: Mismatched recipient address rejected by destination settlement verification
+  await assert.rejects(
+    workerDb.query(
+      `SELECT * FROM flow.record_payment_verification(
+        $1, 'DESTINATION_SETTLEMENT', 'base-mainnet', $2,
+        '0xsolver_dest', '0xwrong_unregistered_recipient_address',
+        'base-mainnet:USDC', NULL, 50000000,
+        456788, '0xblock_dest_wrong', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{"verified": true}'::jsonb
+      )`,
+      [attemptPublicId, "0xwrong_dest_tx"],
+    ),
+    /RECIPIENT_ADDRESS_MISMATCH/,
+  );
+
+  // Record verified source deposit (FINALIZED)
   await workerDb.query(
     `SELECT * FROM flow.record_payment_verification(
       $1, 'SOURCE_DEPOSIT', 'solana-mainnet', $2,

@@ -56,6 +56,25 @@ describe("on-chain-verifier: genuine multi-chain transfer verification", () => {
               result: "0x20", // 32 (17 confirmations)
             }),
           );
+        } else if (json.method === "eth_getBlockByNumber") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: {
+                number: "0x10",
+                hash: "0xblockhash123",
+              },
+            }),
+          );
+        } else {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: null,
+            }),
+          );
         }
       });
     });
@@ -146,6 +165,25 @@ describe("on-chain-verifier: genuine multi-chain transfer verification", () => {
               jsonrpc: "2.0",
               id: json.id,
               result: "0x55",
+            }),
+          );
+        } else if (json.method === "eth_getBlockByNumber") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: {
+                number: "0x50",
+                hash: "0xblockhash456",
+              },
+            }),
+          );
+        } else {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: null,
             }),
           );
         }
@@ -247,6 +285,14 @@ describe("on-chain-verifier: genuine multi-chain transfer verification", () => {
               },
             }),
           );
+        } else {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: null,
+            }),
+          );
         }
       });
     });
@@ -331,6 +377,14 @@ describe("on-chain-verifier: genuine multi-chain transfer verification", () => {
               },
             }),
           );
+        } else {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: null,
+            }),
+          );
         }
       });
     });
@@ -357,6 +411,7 @@ describe("on-chain-verifier: genuine multi-chain transfer verification", () => {
 
       assert.equal(result.isSuccess, true);
       assert.equal(result.atomicAmount, 5000000000000000000000000n);
+      assert.equal(result.eventIndex, 0);
 
       // Wrong recipient
       await assert.rejects(
@@ -371,6 +426,97 @@ describe("on-chain-verifier: genuine multi-chain transfer verification", () => {
           minimumAtomicAmount: 5000000000000000000000000n,
         }),
         /RECIPIENT_ADDRESS_MISMATCH/,
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it("detects on-chain reorganizations when canonical block hash diverges", async () => {
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        const json = JSON.parse(body);
+        if (json.method === "eth_getTransactionByHash") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: {
+                hash: json.params[0],
+                from: "0x1111111111111111111111111111111111111111",
+                to: "0x2222222222222222222222222222222222222222",
+                value: "0xde0b6b3a7640000",
+                input: "0x",
+                blockNumber: "0x10", // 16
+                blockHash: "0xreorged_old_blockhash",
+              },
+            }),
+          );
+        } else if (json.method === "eth_getTransactionReceipt") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: {
+                status: "0x1",
+                blockNumber: "0x10",
+                blockHash: "0xreorged_old_blockhash",
+                logs: [],
+              },
+            }),
+          );
+        } else if (json.method === "eth_blockNumber") {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: "0x20",
+            }),
+          );
+        } else if (json.method === "eth_getBlockByNumber") {
+          // Canonical chain has diverged: different block hash at height 16
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: {
+                number: "0x10",
+                hash: "0xcanonical_new_diverged_blockhash",
+              },
+            }),
+          );
+        } else {
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: json.id,
+              result: null,
+            }),
+          );
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    const rpcUrl = `http://127.0.0.1:${port}`;
+
+    try {
+      await assert.rejects(
+        verifyEvmTransfer({
+          rpcUrl,
+          network: "base-mainnet",
+          txHash: "0x" + "b".repeat(64),
+          expectedRecipient: "0x2222222222222222222222222222222222222222",
+          expectedAssetId: "base-mainnet:ETH",
+          expectedTokenContract: null,
+          minimumAtomicAmount: 1000000000000000000n,
+        }),
+        /REORG_DETECTED/,
       );
     } finally {
       server.close();
