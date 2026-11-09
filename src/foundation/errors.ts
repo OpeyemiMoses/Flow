@@ -41,7 +41,14 @@ export type FlowErrorCode =
   | "UNSUPPORTED_TOKEN"
   | "RPC_RATE_LIMITED"
   | "RPC_TIMEOUT"
-  | "RPC_NETWORK_ERROR";
+  | "RPC_NETWORK_ERROR"
+  | "RECIPIENT_ADDRESS_MISMATCH"
+  | "ASSET_MISMATCH"
+  | "UNDERPAID_AMOUNT"
+  | "MEMO_MISMATCH"
+  | "NETWORK_MISMATCH"
+  | "UNVERIFIED_SOURCE_DEPOSIT"
+  | "UNVERIFIED_DESTINATION_DELIVERY";
 
 export class FlowError extends Error {
   readonly code: FlowErrorCode;

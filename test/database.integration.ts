@@ -8641,6 +8641,44 @@ test("database integration: M5 Phase 4 financial ledger double-entry, RLS isolat
       "0x1234567890123456789012345678901234567890",
     );
 
+    // Invariant check: attempting to settle without verified source deposit fails
+    await assert.rejects(
+      workerClient.query(
+        `SELECT * FROM flow.worker_settle_payment_attempt($1, '0xsource_tx_hash_1', '0xdest_tx_hash_1')`,
+        [attemptPublicId],
+      ),
+      /UNVERIFIED_SOURCE_DEPOSIT/,
+    );
+
+    // Record verified source deposit
+    await workerClient.query(
+      `SELECT * FROM flow.record_payment_verification(
+        $1, 'SOURCE_DEPOSIT', 'ethereum-mainnet', '0xsource_tx_hash_1',
+        '0xpayer_source_1', '0x1234567890123456789012345678901234567890',
+        'ethereum-mainnet:USDC', NULL, 25000000, 100, '0xhash_1', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{"test": true}'::jsonb
+      )`,
+      [attemptPublicId],
+    );
+
+    // Invariant check: cross-chain attempt without verified destination delivery fails
+    await assert.rejects(
+      workerClient.query(
+        `SELECT * FROM flow.worker_settle_payment_attempt($1, '0xsource_tx_hash_1', '0xdest_tx_hash_1')`,
+        [attemptPublicId],
+      ),
+      /UNVERIFIED_DESTINATION_DELIVERY/,
+    );
+
+    // Record verified destination delivery
+    await workerClient.query(
+      `SELECT * FROM flow.record_payment_verification(
+        $1, 'DESTINATION_SETTLEMENT', 'base-mainnet', '0xdest_tx_hash_1',
+        '0xsolver_dest_1', '0xdest_wallet',
+        'base-mainnet:USDC', NULL, 25000000, 200, '0xhash_2', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{"test": true}'::jsonb
+      )`,
+      [attemptPublicId],
+    );
+
     // Settle payment attempt via worker
     const settleResult = await workerClient.query<{
       status: string;
@@ -8654,6 +8692,19 @@ test("database integration: M5 Phase 4 financial ledger double-entry, RLS isolat
     assert.equal(settleResult.rows.length, 1);
     assert.equal(settleResult.rows[0]!.status, "SETTLED");
     assert.ok(settleResult.rows[0]!.journal_id);
+
+    // Invariant check: Duplicate attribution of the same on-chain transaction hash is rejected by unique index
+    await assert.rejects(
+      workerClient.query(
+        `SELECT * FROM flow.record_payment_verification(
+          $1, 'SOURCE_DEPOSIT', 'ethereum-mainnet', '0xsource_tx_hash_1',
+          '0xpayer_source_1', '0x1234567890123456789012345678901234567890',
+          'ethereum-mainnet:USDC', NULL, 25000000, 100, '0xhash_1', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{"test": true}'::jsonb
+        )`,
+        [attemptPublicId],
+      ),
+      /unique constraint|duplicate key|idx_payment_verifications_one_time_attribution/,
+    );
 
     // Verify invoice status marked COMPLETED
     const updatedPr = await workerClient.query<{ status: string }>(
@@ -8743,6 +8794,112 @@ test("database integration: M5 Phase 4 financial ledger double-entry, RLS isolat
         [synAttemptId],
       ),
       /INVALID_PROVIDER_DEPOSIT_ADDRESS/,
+    );
+
+    // e. Late deposit handling routes to EXCEPTION_REFUND_REQUIRED and preserves refund amount
+    const latePrPublicId = `pr_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+        account_id, public_id, title, destination_network, destination_asset_id,
+        destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount, status
+      ) VALUES (
+        $1, $2, 'Late Invoice', 'base-mainnet', 'base-mainnet:USDC', 'USDC', 6, 'FIXED', 5000000, 'ACTIVE'
+      )`,
+      [tenantAccountId, latePrPublicId],
+    );
+
+    const lateAttemptId = `pa_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
+    await workerClient.query(
+      `INSERT INTO flow.payment_attempts (
+        payment_request_id, attempt_public_id, payer_mode, source_network, source_asset_id,
+        source_asset_symbol, source_decimals, route_type, route_status, quoted_source_atomic_amount,
+        quoted_destination_atomic_amount, status, quote_expires_at, deposit_deadline, deposit_address,
+        verification_tier, is_provider_verified
+      ) VALUES (
+        (SELECT id FROM flow.payment_requests WHERE public_id = $1),
+        $2, 'WALLET', 'base-mainnet', 'base-mainnet:USDC', 'USDC', 6,
+        'DIRECT_TRANSFER', 'SUPPORTED_AND_QUOTABLE', 5000000, 5000000,
+        'DEPOSIT_COMMITTED', CURRENT_TIMESTAMP - INTERVAL '5 minutes', CURRENT_TIMESTAMP - INTERVAL '1 minute',
+        '0x1234567890123456789012345678901234567890',
+        'PROVIDER_VERIFIED', true
+      )`,
+      [latePrPublicId, lateAttemptId],
+    );
+
+    const lateRecordRes = await workerClient.query<{
+      status: string;
+      is_late_deposit: boolean;
+    }>(
+      `SELECT * FROM flow.record_payment_verification(
+        $1, 'SOURCE_DEPOSIT', 'base-mainnet', '0xlate_tx_hash_1',
+        '0xpayer_source_late', '0x1234567890123456789012345678901234567890',
+        'base-mainnet:USDC', NULL, 5000000, 300, '0xhash_late', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{"late": true}'::jsonb
+      )`,
+      [lateAttemptId],
+    );
+
+    assert.equal(lateRecordRes.rows.length, 1);
+    assert.equal(lateRecordRes.rows[0]!.is_late_deposit, true);
+    assert.equal(lateRecordRes.rows[0]!.status, "EXCEPTION_REFUND_REQUIRED");
+
+    const lateAttemptCheck = await workerClient.query<{
+      status: string;
+      exception_status: string;
+      refund_atomic_amount: string;
+    }>(
+      `SELECT status::text, exception_status::text, refund_atomic_amount::text FROM flow.payment_attempts WHERE attempt_public_id = $1`,
+      [lateAttemptId],
+    );
+    assert.equal(lateAttemptCheck.rows[0]!.status, "EXCEPTION_REFUND_REQUIRED");
+    assert.equal(
+      lateAttemptCheck.rows[0]!.exception_status,
+      "LATE_DEPOSIT_REFUND_REQUIRED",
+    );
+    assert.equal(lateAttemptCheck.rows[0]!.refund_atomic_amount, "5000000");
+
+    // f. Worker lease acquisition with SKIP LOCKED
+    const leaseRows = await workerClient.query<{
+      attempt_public_id: string;
+    }>(
+      `SELECT * FROM flow.acquire_payment_monitoring_lease('worker-test-1', 60, 10)`,
+    );
+    assert.ok(Array.isArray(leaseRows.rows));
+
+    // g. Adversarial verification constraints: Network mismatch, recipient mismatch, underpaid amount
+    await assert.rejects(
+      workerClient.query(
+        `SELECT * FROM flow.record_payment_verification(
+          $1, 'SOURCE_DEPOSIT', 'ethereum-mainnet', '0xforged_net_hash',
+          '0xpayer', '0x1234567890123456789012345678901234567890',
+          'base-mainnet:USDC', NULL, 5000000, 301, '0xhash', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{}'::jsonb
+        )`,
+        [lateAttemptId],
+      ),
+      /NETWORK_MISMATCH/,
+    );
+
+    await assert.rejects(
+      workerClient.query(
+        `SELECT * FROM flow.record_payment_verification(
+          $1, 'SOURCE_DEPOSIT', 'base-mainnet', '0xforged_rcpt_hash',
+          '0xpayer', '0xwrong_recipient_address_123',
+          'base-mainnet:USDC', NULL, 5000000, 302, '0xhash', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{}'::jsonb
+        )`,
+        [lateAttemptId],
+      ),
+      /RECIPIENT_ADDRESS_MISMATCH/,
+    );
+
+    await assert.rejects(
+      workerClient.query(
+        `SELECT * FROM flow.record_payment_verification(
+          $1, 'SOURCE_DEPOSIT', 'base-mainnet', '0xforged_amount_hash',
+          '0xpayer', '0x1234567890123456789012345678901234567890',
+          'base-mainnet:USDC', NULL, 1000, 303, '0xhash', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{}'::jsonb
+        )`,
+        [lateAttemptId],
+      ),
+      /UNDERPAID_AMOUNT/,
     );
   } finally {
     adminClient.release();

@@ -2162,18 +2162,60 @@ test("security: M5 Phase 4 deposit commitment, instruction issuance, polling, an
          is_provider_verified = true,
          verification_tier = 'PROVIDER_VERIFIED',
          deposit_address = '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin',
-         deposit_deadline = CURRENT_TIMESTAMP + interval '15 minutes'
+         deposit_deadline = CURRENT_TIMESTAMP + interval '15 minutes',
+         quote_expires_at = CURRENT_TIMESTAMP + interval '15 minutes'
      WHERE attempt_public_id = $1`,
     [attemptPublicId],
   );
 
-  const settleResult = await workerDb.query(
-    `SELECT * FROM flow.worker_settle_payment_attempt(
-      $1,
-      '0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d',
-      '0x8a9b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f708192a3b4c5d6e7f80'
+  const validSolanaTx =
+    "5VERv8NMvzbJMEdV8xnrLkEaWR436xQsGhmGLxrNdEd137KqD5N2wK1i4tGv3d8nZbG1mR6tWv2tB9gH8yK3mQp2";
+  const validBaseTx =
+    "0x8a9b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f708192a3b4c5d6e7f80";
+
+  // Invariant Check: Attempting settlement without verified on-chain deposit fails
+  await assert.rejects(
+    workerDb.query(
+      `SELECT * FROM flow.worker_settle_payment_attempt($1, $2, $3)`,
+      [attemptPublicId, validSolanaTx, validBaseTx],
+    ),
+    /UNVERIFIED_SOURCE_DEPOSIT/,
+  );
+
+  // Record verified source deposit
+  await workerDb.query(
+    `SELECT * FROM flow.record_payment_verification(
+      $1, 'SOURCE_DEPOSIT', 'solana-mainnet', $2,
+      'payer_solana_addr', '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin',
+      'solana-mainnet:SOL', NULL, (SELECT quoted_source_atomic_amount FROM flow.payment_attempts WHERE attempt_public_id = $1),
+      123456, 'slot_123456', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{"verified": true}'::jsonb
     )`,
-    [attemptPublicId],
+    [attemptPublicId, validSolanaTx],
+  );
+
+  // Invariant Check: Cross-chain attempt without verified destination delivery fails
+  await assert.rejects(
+    workerDb.query(
+      `SELECT * FROM flow.worker_settle_payment_attempt($1, $2, $3)`,
+      [attemptPublicId, validSolanaTx, validBaseTx],
+    ),
+    /UNVERIFIED_DESTINATION_DELIVERY/,
+  );
+
+  // Record verified destination delivery
+  await workerDb.query(
+    `SELECT * FROM flow.record_payment_verification(
+      $1, 'DESTINATION_SETTLEMENT', 'base-mainnet', $2,
+      '0xsolver_dest', '0xdest_wallet',
+      'base-mainnet:USDC', NULL, 50000000,
+      456789, '0xblock_dest', 'FINALIZED', NULL, 'CHAIN_RPC_DIRECT', '{"verified": true}'::jsonb
+    )`,
+    [attemptPublicId, validBaseTx],
+  );
+
+  const settleResult = await workerDb.query(
+    `SELECT * FROM flow.worker_settle_payment_attempt($1, $2, $3)`,
+    [attemptPublicId, validSolanaTx, validBaseTx],
   );
   assert.equal(settleResult.rows.length, 1);
   assert.equal(settleResult.rows[0].status, "SETTLED");

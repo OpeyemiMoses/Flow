@@ -1,6 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { isValidTransactionHash } from "../src/domain/ledger.ts";
+import { PaymentMonitoringWorker } from "../src/server/payments/payment-monitoring-worker.ts";
+import type { FlowDb } from "../src/foundation/prisma.ts";
 
 describe("payments: payment monitoring worker & hash validation", () => {
   it("validates EVM transaction hashes (0x + 64 hex characters)", () => {
@@ -48,5 +50,27 @@ describe("payments: payment monitoring worker & hash validation", () => {
     // Invalid NEAR hashes
     assert.equal(isValidTransactionHash("near-mainnet", "short"), false);
     assert.equal(isValidTransactionHash("near-mainnet", ""), false);
+  });
+
+  it("calculates exponential backoff intervals with jitter", () => {
+    const worker = new PaymentMonitoringWorker({
+      workerId: "test-worker-1",
+      workerDb: {} as unknown as FlowDb,
+    });
+
+    const b0 = worker.computeBackoffMs(0);
+    const b1 = worker.computeBackoffMs(1);
+    const b2 = worker.computeBackoffMs(2);
+    const b8 = worker.computeBackoffMs(8);
+
+    assert.ok(b0 >= 2000 && b0 <= 3000);
+    assert.ok(b1 >= 3000 && b1 <= 4000);
+    assert.ok(b2 >= 4500 && b2 <= 5500);
+    assert.ok(b8 <= 61000);
+
+    const health = worker.getHealthStatus();
+    assert.equal(health.workerId, "test-worker-1");
+    assert.equal(health.isRunning, false);
+    assert.equal(health.processedCount, 0);
   });
 });

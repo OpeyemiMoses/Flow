@@ -645,16 +645,51 @@ model PaymentAttempt {
   destinationTxHash             String?        @map("destination_tx_hash") @db.VarChar(128)
   settlementError               String?        @map("settlement_error") @db.Text
   settledAt                     DateTime?      @map("settled_at") @db.Timestamptz
+  monitoringLeaseWorkerId       String?        @map("monitoring_lease_worker_id") @db.VarChar(64)
+  monitoringLeaseExpiresAt      DateTime?      @map("monitoring_lease_expires_at") @db.Timestamptz
+  lastPolledAt                  DateTime?      @map("last_polled_at") @db.Timestamptz
+  pollCount                     Int            @default(0) @map("poll_count")
+  exceptionStatus               String?        @default("NONE") @map("exception_status") @db.VarChar(32)
+  refundAtomicAmount            Decimal?       @map("refund_atomic_amount") @db.Decimal(78, 0)
   createdAt                     DateTime       @default(now()) @map("created_at") @db.Timestamptz
   updatedAt                     DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
 
   paymentRequest                PaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade)
+  verifications                 PaymentVerification[]
 
   @@index([paymentRequestId, createdAt(sort: Desc)])
   @@index([attemptPublicId])
   @@index([paymentRequestId, status])
   @@index([status])
   @@map("payment_attempts")
+  @@schema("flow")
+}
+
+model PaymentVerification {
+  id               String         @id @default(uuid()) @db.Uuid
+  paymentAttemptId String         @map("payment_attempt_id") @db.Uuid
+  verificationType String         @map("verification_type") @db.VarChar(32)
+  network          String         @db.VarChar(64)
+  txHash           String         @map("tx_hash") @db.VarChar(128)
+  fromAddress      String         @map("from_address") @db.VarChar(256)
+  toAddress        String         @map("to_address") @db.VarChar(256)
+  assetId          String         @map("asset_id") @db.VarChar(128)
+  tokenContract    String?        @map("token_contract") @db.VarChar(256)
+  atomicAmount     Decimal        @map("atomic_amount") @db.Decimal(78, 0)
+  blockHeight      BigInt?        @map("block_height")
+  blockHash        String?        @map("block_hash") @db.VarChar(128)
+  finality         String         @db.VarChar(32)
+  memo             String?        @db.VarChar(128)
+  evidenceSource   String         @map("evidence_source") @db.VarChar(32)
+  rawEvidence      Json           @default("{}") @map("raw_evidence") @db.JsonB
+  verifiedAt       DateTime       @default(now()) @map("verified_at") @db.Timestamptz
+  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz
+
+  paymentAttempt   PaymentAttempt @relation(fields: [paymentAttemptId], references: [id], onDelete: Restrict)
+
+  @@unique([network, txHash, verificationType])
+  @@index([paymentAttemptId, verificationType])
+  @@map("payment_verifications")
   @@schema("flow")
 }
 

@@ -240,3 +240,148 @@ export async function fetchOneClickDryQuote(params: {
     };
   }
 }
+
+export type OneClickExecutionStage =
+  | "SOURCE_DEPOSIT_OBSERVED"
+  | "SOURCE_FINALIZED"
+  | "ROUTING_IN_PROGRESS"
+  | "DESTINATION_TRANSFER_OBSERVED"
+  | "DESTINATION_FINALIZED"
+  | "FAILED"
+  | "REFUNDED"
+  | "PENDING_DEPOSIT";
+
+export interface OneClickExecutionStatusResult {
+  readonly ok: boolean;
+  readonly stage: OneClickExecutionStage;
+  readonly sourceTxHash?: string;
+  readonly destinationTxHash?: string;
+  readonly refundTxHash?: string;
+  readonly failureReason?: string;
+  readonly rawResponse?: Record<string, unknown>;
+}
+
+export async function fetchOneClickExecutionStatus(params: {
+  readonly depositAddress: string;
+  readonly depositMemo?: string | null;
+  readonly correlationId?: string | null;
+  readonly apiBase?: string;
+}): Promise<OneClickExecutionStatusResult> {
+  const apiBase = params.apiBase ?? DEFAULT_ONE_CLICK_API_BASE;
+  const url = new URL(`${apiBase}/v0/status`);
+  url.searchParams.set("depositAddress", params.depositAddress);
+  if (params.depositMemo) {
+    url.searchParams.set("memo", params.depositMemo);
+  }
+  if (params.correlationId) {
+    url.searchParams.set("correlationId", params.correlationId);
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        return {
+          ok: true,
+          stage: "PENDING_DEPOSIT",
+        };
+      }
+      return {
+        ok: false,
+        stage: "FAILED",
+        failureReason: `Provider status error: HTTP ${response.status}`,
+      };
+    }
+
+    const data = (await response.json()) as Record<string, unknown>;
+    const rawStatus = String(data.status || "").toUpperCase();
+
+    let stage: OneClickExecutionStage = "PENDING_DEPOSIT";
+    if (
+      rawStatus === "DEPOSIT_DETECTED" ||
+      rawStatus === "DETECTED" ||
+      rawStatus === "PENDING"
+    ) {
+      stage = "SOURCE_DEPOSIT_OBSERVED";
+    } else if (
+      rawStatus === "SOURCE_FINALIZED" ||
+      rawStatus === "DEPOSIT_CONFIRMED"
+    ) {
+      stage = "SOURCE_FINALIZED";
+    } else if (
+      rawStatus === "PROCESSING" ||
+      rawStatus === "SWAPPING" ||
+      rawStatus === "ROUTING_IN_PROGRESS"
+    ) {
+      stage = "ROUTING_IN_PROGRESS";
+    } else if (
+      rawStatus === "DESTINATION_TRANSFER_OBSERVED" ||
+      rawStatus === "SUBMITTED"
+    ) {
+      stage = "DESTINATION_TRANSFER_OBSERVED";
+    } else if (
+      rawStatus === "COMPLETED" ||
+      rawStatus === "SUCCESS" ||
+      rawStatus === "SETTLED" ||
+      rawStatus === "DESTINATION_FINALIZED"
+    ) {
+      stage = "DESTINATION_FINALIZED";
+    } else if (rawStatus === "REFUNDED") {
+      stage = "REFUNDED";
+    } else if (rawStatus === "FAILED" || rawStatus === "ERROR") {
+      stage = "FAILED";
+    }
+
+    const sourceTx =
+      (data.sourceTxHash as string) ||
+      (data.depositTxHash as string) ||
+      (data.originTxHash as string) ||
+      undefined;
+
+    const destTx =
+      (data.destinationTxHash as string) ||
+      (data.payoutTxHash as string) ||
+      (data.targetTxHash as string) ||
+      undefined;
+
+    const refundTx = (data.refundTxHash as string) || undefined;
+    const failureReason =
+      (data.failureReason as string) ||
+      (data.error as string) ||
+      (data.message as string) ||
+      undefined;
+
+    return {
+      ok: true,
+      stage,
+      sourceTxHash: sourceTx,
+      destinationTxHash: destTx,
+      refundTxHash: refundTx,
+      failureReason,
+      rawResponse: data,
+    };
+  } catch (err: unknown) {
+    const isTimeout =
+      err instanceof Error &&
+      (err.name === "AbortError" || err.message.includes("abort"));
+    return {
+      ok: false,
+      stage: "FAILED",
+      failureReason: isTimeout
+        ? "Provider status request timed out."
+        : `Provider connection failure: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
