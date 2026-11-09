@@ -106,3 +106,86 @@ export interface EncryptedEnvelope {
 | **Ethereum** |      Yes       |  No (ETH RPC)  |       No        |   Yes (Raw)   | **FLOW Application**     |
 | **Solana**   |      Yes       |  No (SOL RPC)  |       No        |   Yes (Raw)   | **FLOW Application**     |
 | **Bitcoin**  |       No       |       No       |       No        |      No       | **Unsupported by v1**    |
+
+---
+
+## 5. Encrypted credential backup and key-rotation/recovery procedures
+
+### 5.1 Defense-in-depth credential storage
+
+1. **Encrypted at Rest:** Flow stores custody credentials (OutLayer API keys `wk_...` and NEAR private keys) inside an authenticated AES-256-GCM envelope (`flow.wallets.encrypted_credential`).
+2. **Column-Level Role Revocation:** The ordinary web application database role (`flow_app`) has column-level `SELECT` completely revoked on `encrypted_credential`, `key_id`, and `key_digest`. Only the privileged out-of-process worker role (`flow_worker`) has database read access.
+3. **Encrypted Backup Vault:** Automated database backups (pg_dump / WAL shipping) contain only ciphertext. Decryption requires the off-database master key (`FLOW_CUSTODY_ENVELOPE_KEY`), which is injected exclusively into worker container environments via secure secret managers (e.g. AWS Secrets Manager, GCP Secret Manager, Vault).
+
+### 5.2 Zero-downtime key rotation procedure
+
+1. **Multi-Key Configuration:** The application supports versioned keys (`v1`, `v2`, etc.). When rotating keys:
+   - Configure the new key under a new `keyId` (e.g., `v2`).
+   - Keep the old key configured as a secondary decryption key.
+2. **Re-encryption Migration Job:** An offline worker job reads rows from `flow.wallets` where `key_id != current_key_id`, decrypts using the envelope's stamped `key_id`, re-encrypts under the current `keyId`, and updates `encrypted_credential`, `key_id`, and `key_digest` in a single transaction.
+3. **Old Key Decommissioning:** Once all records in `flow.wallets` are stamped with the new `keyId`, the retired key is safely removed from runtime configuration.
+
+### 5.3 Recovery safety & duplicate prevention
+
+- **No Silent Re-Registration:** If credential recovery fails or an external request outcome is ambiguous, Flow transitions the provisioning job to `UNKNOWN` or `MANUAL_REVIEW`.
+- **Wallet Immutability:** Any attempt to reset a provisioning job to `PENDING` when a wallet record already exists for the account is rejected with `INVALID_STATE_TRANSITION` (`Cannot reset job to PENDING when a wallet record already exists for the account`). Funded wallets are never replaced or deleted automatically.
+
+---
+
+## 6. OutLayer transaction signing analysis (confirmed vs. assumed)
+
+| Blockchain Ecosystem      | Confirmed Capabilities (OutLayer OpenAPI 0.1.0-alpha.4)                                                                                                      | Assumed / Unverified (Flow Responsibilities)                                                                                                                                                               | Broadcast Mode                                |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| **NEAR Protocol**         | • Account creation in enclave<br>• Address derivation via Ed25519<br>• Native transfer and NEP-141 token transfers<br>• Direct enclave broadcast to NEAR RPC | • Assumed high-availability NEAR RPC<br>• Pre-flight balance sufficiency checking is handled by Flow<br>• Gas budgeting and receipt finality tracking                                                      | `provider_broadcast`<br>(OutLayer broadcasts) |
+| **EVM (Base & Ethereum)** | • Derives secp256k1 public keys & EIP-55 addresses<br>• Signs raw transaction payloads (`evm_sign`)<br>• Returns RLP/EIP-1559 signed transaction bytes       | • **Does NOT broadcast to EVM chains**<br>• Flow worker must manage nonces, base fee, priority fee, and submit `eth_sendRawTransaction`<br>• Flow must monitor confirmations, reorgs, and gas acceleration | `caller_broadcast`<br>(Flow broadcasts)       |
+| **Solana**                | • Derives Ed25519 addresses & public keys<br>• Signs compiled transaction payloads (`solana_sign`)<br>• Returns wire-format signed transaction               | • **Does NOT broadcast to Solana**<br>• Flow worker must obtain latest blockhash, simulate transaction, submit `sendTransaction`, and poll signature commitment                                            | `caller_broadcast`<br>(Flow broadcasts)       |
+| **Bitcoin**               | • **Unsupported in wallet v1**                                                                                                                               | • OutLayer documentation explicitly notes Bitcoin is not serviced                                                                                                                                          | `unsupported`                                 |
+
+---
+
+## 7. Outgoing financial authorization & signing pipeline
+
+Every outgoing transaction follows an authoritative, 8-step policy-controlled pipeline:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Account Owner / Operator
+    participant Web as Flow Web Application (flow_app)
+    participant DB as PostgreSQL (flow schema)
+    participant Worker as Privileged Worker (flow_worker)
+    participant OutLayer as OutLayer TEE Enclave
+    participant Chain as Blockchain Node (Base / Sol / NEAR)
+
+    User->>Web: Request Transfer (Amount, Recipient, Network)
+    Web->>Web: Step 1: Validate Recipient (EIP-55, Base58, NEAR)
+    Web->>Web: Step 2: Evaluate Spending Policy (Velocity, Limits)
+    User->>Web: Step 3: Explicit Step-Up MFA / Dual-Approval Confirmation
+    Web->>DB: Step 4: Post Double-Entry Ledger Reservation
+    Note over DB: LIABILITY_MERCHANT_PAYABLE (Debit)<br/>LIABILITY_PENDING_OUTGOING_SETTLEMENT (Credit)
+    Web->>DB: Step 5: Enqueue Leased Signing Job
+    Worker->>DB: Step 6: Claim Leased Signing Job
+    Note over Worker: Check FLOW_EXECUTION=disabled gate<br/>Verify Ticket & Ledger Reservation
+    Worker->>Chain: Step 7: Pre-Flight Simulation (eth_estimateGas / sim)
+    Worker->>OutLayer: Step 8: POST /wallet/v1/sign (or evm_sign / solana_sign)
+    OutLayer-->>Worker: Signed Raw Transaction Bytes
+    Worker->>Chain: Broadcast Transaction (sendRawTransaction)
+    Worker->>Chain: Monitor Finality & Block Ingestion
+    Worker->>DB: Step 9: Post Settlement Journal Entry
+    Note over DB: LIABILITY_PENDING_OUTGOING_SETTLEMENT (Debit)<br/>ASSET_PLATFORM_CUSTODY_IN_FLIGHT (Credit)<br/>REVENUE_PLATFORM_FEE (Credit)
+```
+
+---
+
+## 8. Separation of login authentication vs. financial authorization
+
+1. **Authentication Boundary (Identity):**
+   - Logging in via Google OAuth or Email OTP establishes an `AuthSession` cookie.
+   - This proves the caller's identity and account membership.
+   - **Crucial Rule:** An `AuthSession` grants read access to authorized tenant portfolios, but has zero capability to move money or read private keys.
+2. **Authorization Boundary (Money Movement):**
+   - Outgoing payments require an independent, explicit financial authorization ticket (`FinancialTransferIntent`).
+   - Financial authorization enforces spending policies, daily velocity counters, recipient checksums, dual-operator approval (for business accounts), and pre-ledger balance reservation.
+   - The signing worker asserts that caller role is strictly `flow_worker` and verifies cryptographic ticket possession before calling OutLayer.
+3. **Execution Guardrail:**
+   - All signing and money movement remains strictly blocked while `FLOW_EXECUTION=disabled`.

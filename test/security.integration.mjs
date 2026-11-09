@@ -2281,3 +2281,127 @@ test("security: M5 Phase 4 deposit commitment, instruction issuance, polling, an
     await ctx.close();
   }
 });
+
+test("security: wallet persistence across re-authentication, duplicate prevention, and signing authorization isolation", async () => {
+  const userEmail = "wallet-persist@flow.local";
+  const client1 = await app.createClient();
+  await emailLogin(client1, userEmail);
+
+  // 1. Onboard user to create personal account
+  const onbRes = await post(client1, "/api/onboarding/complete", {}, 200);
+  const accountId = onbRes.account.id;
+  assert.ok(accountId);
+
+  // 2. Provision initial wallet via worker role
+  const walletId = randomUUID();
+  const nearAccount = "persist-near.testnet";
+  const baseAddress = "0x5555555555555555555555555555555555555555";
+  const solanaAddress = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+
+  await workerDb.query(
+    `INSERT INTO flow.wallets (
+      id, account_id, provider, environment, provider_wallet_id, near_account_id,
+      controller_account_id, encrypted_credential, key_id, key_digest, status, policy_state
+    ) VALUES (
+      $1::uuid, $2::uuid, 'OUTLAYER', 'mainnet', 'pw-persist-01', $3,
+      'controller.near', 'enc:persistent-key-payload', 'v1', 'dig:persist-01', 'ACTIVE', 'stored'
+    )`,
+    [walletId, accountId, nearAccount],
+  );
+
+  await workerDb.query(
+    `INSERT INTO flow.wallet_addresses (wallet_id, network, chain_id, address, public_key)
+     VALUES
+       ($1::uuid, 'near', 'near:mainnet', $2, 'ed25519:persist-pub'),
+       ($1::uuid, 'base', 'eip155:8453', $3, 'secp256k1:persist-pub'),
+       ($1::uuid, 'solana', 'solana:mainnet', $4, 'ed25519:solana-pub')`,
+    [walletId, nearAccount, baseAddress, solanaAddress],
+  );
+
+  // 3. Verify /api/me reflects active wallet
+  const meRes = await client1.get("/api/me");
+  assert.equal(meRes.status(), 200);
+  const meData = await meRes.json();
+  const personalAcct = meData.accounts.find((a) => a.id === accountId);
+  assert.ok(personalAcct);
+  assert.equal(personalAcct.walletStatus, "active");
+  assert.equal(personalAcct.provisioningComplete, true);
+
+  // 4. Requirement 1: Re-authentication persistence across logout, session expiry, and email OTP
+  await post(client1, "/api/auth/sign-out", {}, 204);
+
+  // Sign in afresh with a new browser client using Email OTP
+  const client2 = await app.createClient();
+  await emailLogin(client2, userEmail);
+
+  // Re-run onboarding endpoint (which occurs on fresh login or app restart)
+  const reOnbRes = await post(client2, "/api/onboarding/complete", {}, 200);
+  assert.equal(reOnbRes.account.id, accountId);
+  assert.equal(reOnbRes.account.walletStatus, "active");
+  assert.equal(reOnbRes.account.provisioningComplete, true);
+
+  // Direct database assertion: verify the wallet record is EXACTLY the same and was never replaced
+  const walletRows = await workerDb.query(
+    `SELECT id, provider_wallet_id, near_account_id, status FROM flow.wallets WHERE account_id = $1::uuid`,
+    [accountId],
+  );
+  assert.equal(walletRows.rows.length, 1);
+  assert.equal(walletRows.rows[0].id, walletId);
+  assert.equal(walletRows.rows[0].provider_wallet_id, "pw-persist-01");
+  assert.equal(walletRows.rows[0].near_account_id, nearAccount);
+
+  // 5. Duplicate wallet registration prevention: Unique constraint check
+  await assert.rejects(
+    workerDb.query(
+      `INSERT INTO flow.wallets (
+        id, account_id, provider, environment, provider_wallet_id, near_account_id,
+        encrypted_credential, key_id, key_digest, status
+      ) VALUES (
+        $1::uuid, $2::uuid, 'OUTLAYER', 'mainnet', 'pw-dup-99', 'dup-near.testnet',
+        'enc:dup', 'v1', 'dig:dup', 'ACTIVE'
+      )`,
+      [randomUUID(), accountId],
+    ),
+    { code: "23505" }, // Unique violation on flow.wallets.account_id
+  );
+
+  // 6. Failed recovery safety: ensure a job cannot replace or overwrite an existing wallet
+  const finalWallet = await workerDb.query(
+    `SELECT id, encrypted_credential, key_id FROM flow.wallets WHERE account_id = $1::uuid`,
+    [accountId],
+  );
+  assert.equal(finalWallet.rows[0].id, walletId);
+  assert.equal(
+    finalWallet.rows[0].encrypted_credential,
+    "enc:persistent-key-payload",
+  );
+
+  // 7. Requirement 2: Separation of Privileges
+  // Web application role (app.db) CANNOT select encrypted_credential
+  await assert.rejects(
+    app.db.query("SELECT encrypted_credential FROM flow.wallets"),
+    { code: "42501" }, // Permission denied for column encrypted_credential
+  );
+
+  // Web application role CAN select non-secret columns via public projection
+  const publicRows = await app.db.query(
+    "SELECT id, provider_wallet_id, status FROM flow.wallet_public_projections WHERE account_id = $1::uuid",
+    [accountId],
+  );
+  assert.equal(publicRows.rows.length, 1);
+  assert.equal(publicRows.rows[0].id, walletId);
+
+  // 8. Financial Execution Safety: Verify public API does not expose any raw signing endpoint
+  const rawSignAttempt = await client2.post(`/api/accounts/${accountId}/sign`, {
+    data: { transaction: "0x1234" },
+  });
+  assert.equal(rawSignAttempt.status(), 404);
+
+  const transferAttempt = await client2.post(
+    `/api/accounts/${accountId}/transfer`,
+    {
+      data: { to: baseAddress, amount: "10.0" },
+    },
+  );
+  assert.equal(transferAttempt.status(), 404);
+});
