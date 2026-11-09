@@ -2065,3 +2065,136 @@ test("security: M5 Phase 3 quote integrity, precision overflow, token confusion,
   assert.equal(expiredQuoteRes.status(), 400);
   assert.equal((await expiredQuoteRes.json()).error, "PAYMENT_REQUEST_EXPIRED");
 });
+
+test("security: M5 Phase 4 deposit commitment, instruction issuance, polling, and settlement lifecycle", async () => {
+  const owner = await person("m5p4-merchant@flow.local");
+  const unauth = await app.createClient();
+
+  // 1. Recipient creates a fixed payment request for 50.00 USDC on Base
+  const createRes = await owner.client.post(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Web3 Software License",
+        description: "Enterprise Tier Annual",
+        destinationNetwork: "base-mainnet",
+        destinationAssetId: "base-mainnet:USDC",
+        amountMode: "FIXED",
+        requestedAmount: "50.0",
+        expiresInHours: 24,
+      },
+    },
+  );
+  assert.equal(createRes.status(), 201);
+  const paymentReq = await createRes.json();
+
+  // 2. Guest discovers a quote from Solana SOL
+  const quoteRes = await unauth.post(`/api/pay/${paymentReq.publicId}/quote`, {
+    data: {
+      sourceDeploymentId: "solana-mainnet:SOL",
+      payerMode: "WALLET",
+    },
+  });
+  assert.equal(quoteRes.status(), 200);
+  const quote = await quoteRes.json();
+  assert.equal(quote.routeStatus, "SUPPORTED_AND_QUOTABLE");
+  const attemptPublicId = quote.attemptPublicId;
+  assert.ok(attemptPublicId);
+
+  // 3. Guest commits to payment attempt via /api/pay/[id]/commit
+  const commitRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/commit`,
+    {
+      data: {
+        attemptPublicId,
+      },
+    },
+  );
+  assert.equal(commitRes.status(), 200);
+  const instructions = await commitRes.json();
+  assert.equal(instructions.attemptPublicId, attemptPublicId);
+  assert.equal(instructions.status, "DEPOSIT_COMMITTED");
+  assert.ok(instructions.depositAddress);
+  assert.ok(instructions.depositDeadline);
+  assert.ok(instructions.qrData);
+  assert.equal(instructions.sourceNetwork, "solana-mainnet");
+  assert.equal(instructions.destinationNetwork, "base-mainnet");
+  assert.equal(instructions.isExecutionDisabled, true);
+
+  // 4. Idempotent commit replay
+  const replayRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/commit`,
+    {
+      data: {
+        attemptPublicId,
+      },
+    },
+  );
+  assert.equal(replayRes.status(), 200);
+  const replayed = await replayRes.json();
+  assert.equal(replayed.status, "DEPOSIT_COMMITTED");
+  assert.equal(replayed.depositAddress, instructions.depositAddress);
+
+  // 5. Invalid attempt commit is rejected with 400 or 404
+  const invalidCommitRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/commit`,
+    {
+      data: {
+        attemptPublicId: "pa_invalid_nonexistent_0123456789abcdef",
+      },
+    },
+  );
+  assert.equal(invalidCommitRes.status(), 404);
+
+  // 6. Polling endpoint /api/pay/[id]/attempt/[attemptId] returns current instructions
+  const pollRes = await unauth.get(
+    `/api/pay/${paymentReq.publicId}/attempt/${attemptPublicId}`,
+  );
+  assert.equal(pollRes.status(), 200);
+  const polled = await pollRes.json();
+  assert.equal(polled.status, "DEPOSIT_COMMITTED");
+  assert.equal(polled.depositAddress, instructions.depositAddress);
+
+  // 7. Settlement simulation transitions attempt to SETTLED and updates ledger
+  const settleRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/simulate-settlement`,
+    {
+      data: {
+        attemptPublicId,
+      },
+    },
+  );
+  assert.equal(settleRes.status(), 200);
+  const settleResult = await settleRes.json();
+  assert.equal(settleResult.status, "SETTLED");
+  assert.ok(settleResult.journalId);
+  assert.ok(settleResult.journalPublicId);
+
+  // 8. Polling endpoint reflects SETTLED state and populated timestamps/hashes
+  const postSettlePollRes = await unauth.get(
+    `/api/pay/${paymentReq.publicId}/attempt/${attemptPublicId}`,
+  );
+  assert.equal(postSettlePollRes.status(), 200);
+  const settledAttempt = await postSettlePollRes.json();
+  assert.equal(settledAttempt.status, "SETTLED");
+  assert.ok(settledAttempt.settledAt);
+  assert.ok(settledAttempt.sourceTxHash);
+  assert.ok(settledAttempt.destinationTxHash);
+
+  // 9. Verify invoice is marked COMPLETED
+  const getPrRes = await owner.client.get(
+    `/api/accounts/${owner.account.id}/payment-requests/${paymentReq.id}`,
+  );
+  assert.equal(getPrRes.status(), 200);
+  const updatedReq = await getPrRes.json();
+  assert.equal(updatedReq.status, "COMPLETED");
+
+  // 10. Direct database verification: ledger account has settled balance
+  const ledgerAcctRes = await workerDb.query(
+    `SELECT balance_atomic FROM flow.ledger_accounts
+     WHERE account_id = $1 AND account_code = 'LIABILITY_MERCHANT_PAYABLE'`,
+    [owner.account.id],
+  );
+  assert.equal(ledgerAcctRes.rows.length, 1);
+  assert.equal(ledgerAcctRes.rows[0].balance_atomic, "50000000"); // 50 USDC with 6 decimals
+});

@@ -230,19 +230,19 @@ export function MarketingRoutePreview() {
         </div>
         <div className="flex items-center justify-between py-1 border-t border-[var(--border-subtle)]">
           <span className="text-[var(--text-muted)]">
-            Live Quote &amp; Fees
+            Settlement Foundation
           </span>
-          <span className="font-mono text-[11px] text-[var(--text-secondary)]">
-            Not quoted (Execution disabled in M3)
+          <span className="font-mono text-[11px] text-[#2563FF] font-semibold">
+            Double-entry ledger &amp; guest checkout
           </span>
         </div>
         <div className="flex items-center justify-between py-1 border-t border-[var(--border-subtle)]">
           <span className="text-[var(--text-muted)]">
-            Custody &amp; Balance Mode
+            Deposit Issuance &amp; Lifecycle
           </span>
           <span className="inline-flex items-center gap-1 font-semibold text-[#0B1F4B] dark:text-[#34D8B2]">
             <IconShield size={13} className="text-[#34D8B2]" />
-            Read-only RPC verified balances
+            Deterministic Staged Instructions
           </span>
         </div>
       </div>

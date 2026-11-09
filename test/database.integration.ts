@@ -8484,3 +8484,186 @@ test("database integration: M5 Phase 3 quote integrity, unprivileged caller boun
     appClient.release();
   }
 });
+
+test("database integration: M5 Phase 4 financial ledger double-entry, RLS isolation, and settlement lifecycle", async () => {
+  const adminClient = await pool.connect();
+  const workerClient = await workerPool.connect();
+  const appClient = await pool.connect();
+
+  try {
+    // 1. Provision Test Tenant Account and legitimate session token
+    const owner = await createTestAccount(
+      adminClient,
+      "PERSONAL",
+      "m5p4-db-owner",
+    );
+    const tenantAccountId = owner.accountId;
+    const sessionToken = await createTestSession(adminClient, owner.authUserId);
+
+    // 2. Double-Entry Invariant Test: Unbalanced journal must fail
+    const custodyAcctId = randomUUID();
+    const merchantAcctId = randomUUID();
+
+    await workerClient.query(
+      `INSERT INTO flow.ledger_accounts (id, account_id, account_type, account_code, asset_id, network, decimals, balance_atomic)
+       VALUES ($1, NULL, 'ASSET', 'ASSET_CUSTODY_IN_FLIGHT', 'usdc', 'base-mainnet', 6, 0)`,
+      [custodyAcctId],
+    );
+
+    await workerClient.query(
+      `INSERT INTO flow.ledger_accounts (id, account_id, account_type, account_code, asset_id, network, decimals, balance_atomic)
+       VALUES ($1, $2, 'LIABILITY', 'LIABILITY_MERCHANT_PAYABLE', 'usdc', 'base-mainnet', 6, 0)`,
+      [merchantAcctId, tenantAccountId],
+    );
+
+    const unbalancedEntries = JSON.stringify([
+      {
+        ledger_account_id: custodyAcctId,
+        entry_direction: "DEBIT",
+        amount_atomic: "10000000",
+      },
+      {
+        ledger_account_id: merchantAcctId,
+        entry_direction: "CREDIT",
+        amount_atomic: "9000000",
+      },
+    ]);
+
+    await assert.rejects(
+      workerClient.query(
+        `SELECT * FROM flow.post_balanced_ledger_journal('lj_test_unbalanced_01', 'PAYMENT_SETTLEMENT', 'ref_1', 'test unbalanced', $1::jsonb)`,
+        [unbalancedEntries],
+      ),
+      /UNBALANCED_JOURNAL_ENTRY/,
+    );
+
+    // 3. Balanced Journal Posting Test
+    const balancedEntries = JSON.stringify([
+      {
+        ledger_account_id: custodyAcctId,
+        entry_direction: "DEBIT",
+        amount_atomic: "10000000",
+      },
+      {
+        ledger_account_id: merchantAcctId,
+        entry_direction: "CREDIT",
+        amount_atomic: "10000000",
+      },
+    ]);
+
+    const postResult = await workerClient.query<{
+      journal_id: string;
+      journal_public_id: string;
+      entry_count: number;
+      total_atomic: string;
+    }>(
+      `SELECT * FROM flow.post_balanced_ledger_journal('lj_test_balanced_0001', 'PAYMENT_SETTLEMENT', 'ref_2', 'test balanced', $1::jsonb)`,
+      [balancedEntries],
+    );
+
+    assert.equal(postResult.rows.length, 1);
+    assert.equal(postResult.rows[0]!.entry_count, 2);
+    assert.equal(postResult.rows[0]!.total_atomic, "10000000");
+
+    // Verify balances updated correctly
+    const custodyBal = await workerClient.query<{ balance_atomic: string }>(
+      `SELECT balance_atomic FROM flow.ledger_accounts WHERE id = $1`,
+      [custodyAcctId],
+    );
+    assert.equal(custodyBal.rows[0]!.balance_atomic, "10000000");
+
+    const merchantBal = await workerClient.query<{ balance_atomic: string }>(
+      `SELECT balance_atomic FROM flow.ledger_accounts WHERE id = $1`,
+      [merchantAcctId],
+    );
+    assert.equal(merchantBal.rows[0]!.balance_atomic, "10000000");
+
+    // 4. Row-Level Security: App client can only see their own tenant accounts
+    await appClient.query(
+      `SELECT set_config('flow.current_session_token', $1, false)`,
+      [sessionToken],
+    );
+
+    const tenantVisibleAccounts = await appClient.query<{ id: string }>(
+      `SELECT id FROM flow.ledger_accounts`,
+    );
+    assert.equal(tenantVisibleAccounts.rows.length, 1);
+    assert.equal(tenantVisibleAccounts.rows[0]!.id, merchantAcctId);
+
+    // System account is invisible to tenant
+    const systemSearch = await appClient.query(
+      `SELECT * FROM flow.ledger_accounts WHERE id = $1`,
+      [custodyAcctId],
+    );
+    assert.equal(systemSearch.rows.length, 0);
+
+    // 5. Payment Attempt Commit and Full Settlement Lifecycle
+    const prPublicId = `pr_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+    const attemptPublicId = `pa_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
+
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+        account_id, public_id, title, destination_network, destination_asset_id,
+        destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount, status
+      ) VALUES (
+        $1, $2, 'M5P4 Invoice', 'base-mainnet', 'base-mainnet:USDC', 'USDC', 6, 'FIXED', 25000000, 'ACTIVE'
+      )`,
+      [tenantAccountId, prPublicId],
+    );
+
+    await workerClient.query(
+      `INSERT INTO flow.payment_attempts (
+        payment_request_id, attempt_public_id, payer_mode, source_network, source_asset_id,
+        source_asset_symbol, source_decimals, route_type, route_status, quoted_source_atomic_amount,
+        quoted_destination_atomic_amount, status, quote_expires_at, verification_tier, is_provider_verified
+      ) VALUES (
+        (SELECT id FROM flow.payment_requests WHERE public_id = $1),
+        $2, 'WALLET', 'ethereum-mainnet', 'ethereum-mainnet:USDC', 'USDC', 6,
+        'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 25000000, 25000000,
+        'QUOTE_OBSERVED', CURRENT_TIMESTAMP + INTERVAL '10 minutes', 'PROVIDER_VERIFIED', true
+      )`,
+      [prPublicId, attemptPublicId],
+    );
+
+    // Commit payment attempt via stored procedure (callable by app role)
+    const commitResult = await appClient.query<{
+      status: string;
+      deposit_address: string;
+    }>(
+      `SELECT * FROM flow.commit_payment_attempt($1, '0x1234567890123456789012345678901234567890', NULL, CURRENT_TIMESTAMP + INTERVAL '15 minutes', '{"qr": "eth"}'::jsonb)`,
+      [attemptPublicId],
+    );
+
+    assert.equal(commitResult.rows.length, 1);
+    assert.equal(commitResult.rows[0]!.status, "DEPOSIT_COMMITTED");
+    assert.equal(
+      commitResult.rows[0]!.deposit_address,
+      "0x1234567890123456789012345678901234567890",
+    );
+
+    // Settle payment attempt via worker
+    const settleResult = await workerClient.query<{
+      status: string;
+      journal_id: string;
+      journal_public_id: string;
+    }>(
+      `SELECT * FROM flow.worker_settle_payment_attempt($1, '0xsource_tx_hash_1', '0xdest_tx_hash_1')`,
+      [attemptPublicId],
+    );
+
+    assert.equal(settleResult.rows.length, 1);
+    assert.equal(settleResult.rows[0]!.status, "SETTLED");
+    assert.ok(settleResult.rows[0]!.journal_id);
+
+    // Verify invoice status marked COMPLETED
+    const updatedPr = await workerClient.query<{ status: string }>(
+      `SELECT status::text FROM flow.payment_requests WHERE public_id = $1`,
+      [prPublicId],
+    );
+    assert.equal(updatedPr.rows[0]!.status, "COMPLETED");
+  } finally {
+    adminClient.release();
+    workerClient.release();
+    appClient.release();
+  }
+});

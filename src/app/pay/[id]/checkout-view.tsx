@@ -5,9 +5,13 @@ import type {
   EligibleSourceRoute,
   PublicPaymentRequest,
 } from "../../../domain/payment-requests.ts";
-import type { IndicativeQuote } from "../../../domain/quote-discovery.ts";
+import type {
+  IndicativeQuote,
+  PaymentDepositInstructions,
+} from "../../../domain/quote-discovery.ts";
 import { FlowLogo } from "../../../components/flow-logo.tsx";
 import { ThemeToggle } from "../../../components/theme-toggle.tsx";
+import { QrCode } from "../../../components/qr-code.tsx";
 import {
   IconCheck,
   IconCopy,
@@ -40,6 +44,18 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   const [loadingQuote, setLoadingQuote] = useState<boolean>(false);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const [secondsRemaining, setSecondsRemaining] = useState<number>(60);
+
+  // M5 Phase 4 Deposit Instructions & Settlement Lifecycle State
+  const [instructions, setInstructions] =
+    useState<PaymentDepositInstructions | null>(null);
+  const [committing, setCommitting] = useState<boolean>(false);
+  const [commitError, setCommitError] = useState<string | null>(null);
+  const [copiedAddress, setCopiedAddress] = useState<boolean>(false);
+  const [copiedMemo, setCopiedMemo] = useState<boolean>(false);
+  const [simulatingSettlement, setSimulatingSettlement] =
+    useState<boolean>(false);
+  const [depositSecondsRemaining, setDepositSecondsRemaining] =
+    useState<number>(900);
 
   // Group eligible routes by ecosystem
   const ecosystemRoutes = useMemo(() => {
@@ -185,6 +201,133 @@ export function CheckoutView({ request }: CheckoutViewProps) {
     }, 1000);
     return () => clearInterval(interval);
   }, [quote]);
+
+  // Countdown timer for deposit deadline
+  useEffect(() => {
+    if (!instructions || !instructions.depositDeadline) return;
+    const deadlineMs = new Date(instructions.depositDeadline).getTime();
+
+    const updateTimer = () => {
+      const remaining = Math.max(
+        0,
+        Math.floor((deadlineMs - Date.now()) / 1000),
+      );
+      setDepositSecondsRemaining(remaining);
+    };
+
+    updateTimer();
+    const interval = setInterval(updateTimer, 1000);
+    return () => clearInterval(interval);
+  }, [instructions]);
+
+  // Status Polling when instructions are issued and not yet settled
+  useEffect(() => {
+    if (
+      !instructions ||
+      instructions.status === "SETTLED" ||
+      instructions.status === "FAILED"
+    ) {
+      return;
+    }
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(
+          `/api/pay/${request.publicId}/attempt/${instructions.attemptPublicId}`,
+        );
+        if (res.ok) {
+          const updated = (await res.json()) as PaymentDepositInstructions;
+          setInstructions(updated);
+        }
+      } catch {
+        // Handled silently
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [instructions, request.publicId]);
+
+  const handleProceedToPayment = async () => {
+    if (!quote || quote.routeStatus !== "SUPPORTED_AND_QUOTABLE") return;
+    setCommitting(true);
+    setCommitError(null);
+    try {
+      const res = await fetch(`/api/pay/${request.publicId}/commit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          attemptPublicId: quote.attemptPublicId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCommitError(
+          data.error?.message ?? "Failed to commit payment attempt",
+        );
+      } else {
+        setInstructions(data as PaymentDepositInstructions);
+      }
+    } catch {
+      setCommitError("Network error while generating deposit instructions");
+    } finally {
+      setCommitting(false);
+    }
+  };
+
+  const handleSimulateSettlement = async () => {
+    if (!instructions) return;
+    setSimulatingSettlement(true);
+    try {
+      const res = await fetch(
+        `/api/pay/${request.publicId}/simulate-settlement`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            attemptPublicId: instructions.attemptPublicId,
+          }),
+        },
+      );
+      if (res.ok) {
+        const statusRes = await fetch(
+          `/api/pay/${request.publicId}/attempt/${instructions.attemptPublicId}`,
+        );
+        if (statusRes.ok) {
+          const updated =
+            (await statusRes.json()) as PaymentDepositInstructions;
+          setInstructions(updated);
+        }
+      }
+    } catch {
+      // Ignored
+    } finally {
+      setSimulatingSettlement(false);
+    }
+  };
+
+  const handleCopyDepositAddress = () => {
+    if (
+      instructions &&
+      typeof navigator !== "undefined" &&
+      navigator.clipboard
+    ) {
+      void navigator.clipboard.writeText(instructions.depositAddress);
+      setCopiedAddress(true);
+      setTimeout(() => setCopiedAddress(false), 2000);
+    }
+  };
+
+  const handleCopyMemo = () => {
+    if (
+      instructions?.depositMemo &&
+      typeof navigator !== "undefined" &&
+      navigator.clipboard
+    ) {
+      void navigator.clipboard.writeText(instructions.depositMemo);
+      setCopiedMemo(true);
+      setTimeout(() => setCopiedMemo(false), 2000);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[var(--bg-app)] text-[var(--text-primary)] transition-colors">
@@ -558,165 +701,464 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                 </div>
               )}
 
-              {/* Indicative Quote Card (M5 Phase 2) */}
+              {/* Settlement Lifecycle & Deposit Card (M5 Phase 4) */}
               <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-app)] p-4 space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-bold text-[var(--text-primary)]">
-                    Indicative Route Quote
-                  </span>
-                  {/* Status Badge */}
-                  {loadingQuote ? (
-                    <span className="text-[11px] text-[var(--text-muted)] animate-pulse">
-                      Discovering solvers...
-                    </span>
-                  ) : quote ? (
-                    <span
-                      className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border ${
-                        quote.routeStatus === "SUPPORTED_AND_QUOTABLE"
-                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
-                          : quote.routeStatus === "UNSUPPORTED_PAIR"
-                            ? "bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/30"
-                            : quote.routeStatus ===
-                                "NOT_YET_ENABLED_FOR_PAYMENT"
-                              ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/30"
+                {instructions ? (
+                  <div className="space-y-4">
+                    {/* Header / Status Banner */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-[var(--text-primary)] uppercase tracking-wider">
+                        Deposit Instructions
+                      </span>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border flex items-center gap-1 ${
+                          instructions.status === "SETTLED"
+                            ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                            : instructions.status === "SETTLING"
+                              ? "bg-[#2563FF]/10 text-[#2563FF] border-[#2563FF]/30"
                               : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30"
-                      }`}
-                    >
-                      {quote.routeStatus.replace(/_/g, " ")}
-                    </span>
-                  ) : quoteError ? (
-                    <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-rose-500/10 text-rose-600 border border-rose-500/30">
-                      PROVIDER ERROR
-                    </span>
-                  ) : null}
-                </div>
-
-                {/* Quote Content */}
-                {loadingQuote ? (
-                  <div className="py-6 text-center text-xs text-[var(--text-muted)] animate-pulse">
-                    Querying read-only provider solvers for live cross-chain
-                    quote...
-                  </div>
-                ) : quote && quote.routeStatus === "SUPPORTED_AND_QUOTABLE" ? (
-                  <div className="space-y-3 text-xs">
-                    {/* Amounts breakdown */}
-                    <div className="p-3 rounded-lg bg-[var(--bg-card)] border border-[var(--border-subtle)] space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span className="text-[var(--text-secondary)]">
-                          You Pay:
-                        </span>
-                        <span className="font-bold text-sm text-[var(--text-primary)]">
-                          {quote.sourceDisplayAmount} {quote.sourceAssetSymbol}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-[var(--text-secondary)]">
-                          Recipient Gets:
-                        </span>
-                        <span className="font-bold text-sm text-[#2563FF] dark:text-[#3876FF]">
-                          {quote.destinationDisplayAmount}{" "}
-                          {quote.destinationAssetSymbol}
-                        </span>
-                      </div>
+                        }`}
+                      >
+                        {instructions.status === "SETTLED" ? (
+                          <>
+                            <IconCheck size={10} />
+                            SETTLED
+                          </>
+                        ) : instructions.status === "SETTLING" ? (
+                          <>
+                            <span className="h-1.5 w-1.5 rounded-full bg-[#2563FF] animate-ping" />
+                            SETTLING
+                          </>
+                        ) : (
+                          <>
+                            <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+                            AWAITING DEPOSIT
+                          </>
+                        )}
+                      </span>
                     </div>
 
-                    {/* Routing Details */}
-                    <div className="space-y-1.5 text-[var(--text-secondary)] text-[11px]">
-                      <div className="flex justify-between">
-                        <span>Exchange Rate:</span>
-                        <span className="font-medium text-[var(--text-primary)]">
-                          {quote.exchangeRateDescription}
-                        </span>
+                    {/* Settled Success State */}
+                    {instructions.status === "SETTLED" ? (
+                      <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-3">
+                        <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400">
+                          <div className="p-2 rounded-full bg-emerald-500/20">
+                            <IconCheck size={20} />
+                          </div>
+                          <div>
+                            <div className="font-bold text-sm">
+                              Payment Completed!
+                            </div>
+                            <div className="text-xs text-emerald-600 dark:text-emerald-500">
+                              Funds credited to recipient ledger.
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="p-3 rounded-lg bg-[var(--bg-card)] border border-[var(--border-subtle)] space-y-2 text-xs">
+                          <div className="flex justify-between">
+                            <span className="text-[var(--text-secondary)]">
+                              Settled Amount:
+                            </span>
+                            <span className="font-bold text-[var(--text-primary)]">
+                              {instructions.destinationDisplayAmount}{" "}
+                              {instructions.destinationAssetSymbol}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-[var(--text-secondary)]">
+                              Destination Network:
+                            </span>
+                            <span className="font-medium">
+                              {instructions.destinationNetwork}
+                            </span>
+                          </div>
+                          {instructions.sourceTxHash && (
+                            <div className="flex justify-between text-[11px] pt-1 border-t border-[var(--border-subtle)]">
+                              <span className="text-[var(--text-secondary)]">
+                                Source Tx:
+                              </span>
+                              <span className="font-mono text-[var(--text-primary)]">
+                                {instructions.sourceTxHash.slice(0, 10)}...
+                                {instructions.sourceTxHash.slice(-8)}
+                              </span>
+                            </div>
+                          )}
+                          {instructions.destinationTxHash && (
+                            <div className="flex justify-between text-[11px]">
+                              <span className="text-[var(--text-secondary)]">
+                                Settlement Tx:
+                              </span>
+                              <span className="font-mono text-[#2563FF]">
+                                {instructions.destinationTxHash.slice(0, 10)}...
+                                {instructions.destinationTxHash.slice(-8)}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInstructions(null);
+                            setRefreshTrigger((n) => n + 1);
+                          }}
+                          className="w-full rounded-xl bg-[var(--bg-card)] border border-[var(--border-subtle)] py-2.5 text-center text-xs font-semibold text-[var(--text-primary)] hover:border-[#2563FF] transition-colors"
+                        >
+                          Make Another Payment
+                        </button>
                       </div>
-                      <div className="flex justify-between">
-                        <span>Estimated Duration:</span>
-                        <span className="font-medium text-[var(--text-primary)]">
-                          {quote.estimatedDurationSeconds !== null
-                            ? `~${quote.estimatedDurationSeconds} seconds`
-                            : "Variable / Unknown"}
-                        </span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span>Fees & Slippage:</span>
-                        <span className="font-medium text-[var(--text-primary)]">
-                          {quote.fees.description}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center pt-1 border-t border-[var(--border-subtle)]">
-                        <span>Local Preview Expiry:</span>
-                        <div className="flex items-center gap-1.5">
+                    ) : (
+                      /* Pending Deposit State */
+                      <div className="space-y-3 text-xs">
+                        {/* QR Code */}
+                        <div className="flex flex-col items-center justify-center p-3 rounded-xl bg-[var(--bg-card)] border border-[var(--border-subtle)]">
+                          <QrCode
+                            value={
+                              instructions.qrData || instructions.depositAddress
+                            }
+                            size={130}
+                          />
+                          <span className="mt-2 text-[10px] text-[var(--text-muted)] font-mono">
+                            Scan to pay with any compatible wallet
+                          </span>
+                        </div>
+
+                        {/* Required Amount Card */}
+                        <div className="p-3 rounded-lg bg-[var(--bg-card)] border border-[var(--border-subtle)] space-y-1">
+                          <div className="text-[11px] text-[var(--text-secondary)]">
+                            Required Transfer:
+                          </div>
+                          <div className="text-base font-extrabold text-[var(--text-primary)]">
+                            {instructions.requiredDisplayAmount}{" "}
+                            <span className="text-[#2563FF]">
+                              {instructions.sourceAssetSymbol}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-[var(--text-muted)]">
+                            Network:{" "}
+                            <strong className="text-[var(--text-primary)]">
+                              {instructions.sourceNetwork}
+                            </strong>
+                          </div>
+                        </div>
+
+                        {/* Deposit Address Box */}
+                        <div className="space-y-1">
+                          <label className="text-[11px] font-medium text-[var(--text-secondary)]">
+                            Deposit Address:
+                          </label>
+                          <div className="flex items-center gap-1.5 p-2 rounded-lg bg-[var(--bg-card)] border border-[var(--border-subtle)] font-mono text-[11px]">
+                            <span className="flex-1 truncate select-all">
+                              {instructions.depositAddress}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleCopyDepositAddress}
+                              className="p-1 rounded hover:bg-[var(--border-subtle)] text-[var(--text-secondary)] transition-colors"
+                              title="Copy address"
+                            >
+                              {copiedAddress ? (
+                                <IconCheck
+                                  size={14}
+                                  className="text-emerald-500"
+                                />
+                              ) : (
+                                <IconCopy size={14} />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Memo / Tag Box if present */}
+                        {instructions.depositMemo && (
+                          <div className="space-y-1">
+                            <label className="text-[11px] font-medium text-amber-600 dark:text-amber-400">
+                              Required Memo / Tag (Do not forget):
+                            </label>
+                            <div className="flex items-center gap-1.5 p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 font-mono text-[11px]">
+                              <span className="flex-1 truncate select-all">
+                                {instructions.depositMemo}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={handleCopyMemo}
+                                className="p-1 rounded hover:bg-amber-500/20 text-amber-700 transition-colors"
+                                title="Copy memo"
+                              >
+                                {copiedMemo ? (
+                                  <IconCheck
+                                    size={14}
+                                    className="text-emerald-500"
+                                  />
+                                ) : (
+                                  <IconCopy size={14} />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Expiry Countdown */}
+                        <div className="flex justify-between items-center text-[11px] text-[var(--text-secondary)] px-1">
+                          <span>Deposit Deadline:</span>
                           <span
-                            className={`font-mono ${
-                              secondsRemaining < 15
-                                ? "text-amber-500 font-bold"
-                                : "text-[var(--text-muted)]"
+                            className={`font-mono font-bold ${
+                              depositSecondsRemaining < 120
+                                ? "text-rose-500"
+                                : "text-[var(--text-primary)]"
                             }`}
                           >
-                            {secondsRemaining > 0
-                              ? `Refresh in ${secondsRemaining}s`
-                              : "Expired"}
+                            {Math.floor(depositSecondsRemaining / 60)}:
+                            {(depositSecondsRemaining % 60)
+                              .toString()
+                              .padStart(2, "0")}{" "}
+                            remaining
                           </span>
+                        </div>
+
+                        {/* Staged Execution Notice */}
+                        <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-700 dark:text-amber-400">
+                          <strong>
+                            Staged Mode (FLOW_EXECUTION=disabled):
+                          </strong>{" "}
+                          Valid deposit instructions generated. Live chain funds
+                          are gated.
+                        </div>
+
+                        {/* Simulation Button for Local Demonstration */}
+                        <div className="pt-1 space-y-2">
                           <button
                             type="button"
-                            onClick={() => setRefreshTrigger((n) => n + 1)}
-                            className="text-[#2563FF] hover:underline font-semibold"
+                            onClick={handleSimulateSettlement}
+                            disabled={simulatingSettlement}
+                            className="w-full rounded-xl bg-[#2563FF] hover:bg-[#1D4ED8] py-2.5 text-center text-xs font-semibold text-white shadow-sm transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                           >
-                            Refresh
+                            {simulatingSettlement ? (
+                              <>
+                                <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                                Processing Settlement...
+                              </>
+                            ) : (
+                              <>
+                                <IconCheck size={14} />
+                                Simulate Payer Transfer & Settlement
+                              </>
+                            )}
                           </button>
+                          <div className="text-center">
+                            <button
+                              type="button"
+                              onClick={() => setInstructions(null)}
+                              className="text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] underline"
+                            >
+                              Back to Quote Preview
+                            </button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </div>
-                ) : quote &&
-                  quote.routeStatus === "NOT_YET_ENABLED_FOR_PAYMENT" ? (
-                  <div className="space-y-2 text-xs">
-                    <div className="p-3 rounded-lg bg-purple-500/10 border border-purple-500/20 text-purple-800 dark:text-purple-300">
-                      <strong>Direct Transfer:</strong> 1:1 direct on-chain
-                      transfer on {quote.destinationNetwork}. Live execution is
-                      disabled for safety.
-                    </div>
-                  </div>
-                ) : quote && quote.routeStatus === "UNSUPPORTED_PAIR" ? (
-                  <div className="p-3 rounded-lg bg-slate-500/10 border border-slate-500/20 text-xs text-[var(--text-secondary)] space-y-1">
-                    <div className="font-semibold text-[var(--text-primary)]">
-                      Unsupported Route Pair
-                    </div>
-                    <div>
-                      {quote.statusMessage ??
-                        "No automated solver routes currently support this token pair."}
-                    </div>
-                  </div>
-                ) : quoteError ? (
-                  <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-600 dark:text-rose-400">
-                    <strong>Quote Discovery Error:</strong> {quoteError}
+                    )}
                   </div>
                 ) : (
-                  <div className="py-3 text-center text-xs text-[var(--text-muted)]">
-                    Select a source asset to discover live solver quotes.
-                  </div>
+                  <>
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-bold text-[var(--text-primary)]">
+                        Indicative Route Quote
+                      </span>
+                      {/* Status Badge */}
+                      {loadingQuote ? (
+                        <span className="text-[11px] text-[var(--text-muted)] animate-pulse">
+                          Discovering solvers...
+                        </span>
+                      ) : quote ? (
+                        <span
+                          className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border ${
+                            quote.routeStatus === "SUPPORTED_AND_QUOTABLE"
+                              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                              : quote.routeStatus === "UNSUPPORTED_PAIR"
+                                ? "bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/30"
+                                : quote.routeStatus ===
+                                    "NOT_YET_ENABLED_FOR_PAYMENT"
+                                  ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/30"
+                                  : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                          }`}
+                        >
+                          {quote.routeStatus.replace(/_/g, " ")}
+                        </span>
+                      ) : quoteError ? (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-rose-500/10 text-rose-600 border border-rose-500/30">
+                          PROVIDER ERROR
+                        </span>
+                      ) : null}
+                    </div>
+
+                    {/* Quote Content */}
+                    {loadingQuote ? (
+                      <div className="py-6 text-center text-xs text-[var(--text-muted)] animate-pulse">
+                        Querying read-only provider solvers for live cross-chain
+                        quote...
+                      </div>
+                    ) : quote &&
+                      quote.routeStatus === "SUPPORTED_AND_QUOTABLE" ? (
+                      <div className="space-y-3 text-xs">
+                        {/* Amounts breakdown */}
+                        <div className="p-3 rounded-lg bg-[var(--bg-card)] border border-[var(--border-subtle)] space-y-2">
+                          <div className="flex justify-between items-center">
+                            <span className="text-[var(--text-secondary)]">
+                              You Pay:
+                            </span>
+                            <span className="font-bold text-sm text-[var(--text-primary)]">
+                              {quote.sourceDisplayAmount}{" "}
+                              {quote.sourceAssetSymbol}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-[var(--text-secondary)]">
+                              Recipient Gets:
+                            </span>
+                            <span className="font-bold text-sm text-[#2563FF] dark:text-[#3876FF]">
+                              {quote.destinationDisplayAmount}{" "}
+                              {quote.destinationAssetSymbol}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Routing Details */}
+                        <div className="space-y-1.5 text-[var(--text-secondary)] text-[11px]">
+                          <div className="flex justify-between">
+                            <span>Exchange Rate:</span>
+                            <span className="font-medium text-[var(--text-primary)]">
+                              {quote.exchangeRateDescription}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Estimated Duration:</span>
+                            <span className="font-medium text-[var(--text-primary)]">
+                              {quote.estimatedDurationSeconds !== null
+                                ? `~${quote.estimatedDurationSeconds} seconds`
+                                : "Variable / Unknown"}
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Fees & Slippage:</span>
+                            <span className="font-medium text-[var(--text-primary)]">
+                              {quote.fees.description}
+                            </span>
+                          </div>
+                          <div className="flex justify-between items-center pt-1 border-t border-[var(--border-subtle)]">
+                            <span>Local Preview Expiry:</span>
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={`font-mono ${
+                                  secondsRemaining < 15
+                                    ? "text-amber-500 font-bold"
+                                    : "text-[var(--text-muted)]"
+                                }`}
+                              >
+                                {secondsRemaining > 0
+                                  ? `Refresh in ${secondsRemaining}s`
+                                  : "Expired"}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setRefreshTrigger((n) => n + 1)}
+                                className="text-[#2563FF] hover:underline font-semibold"
+                              >
+                                Refresh
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : quote &&
+                      quote.routeStatus === "NOT_YET_ENABLED_FOR_PAYMENT" ? (
+                      <div className="space-y-2 text-xs">
+                        <div className="p-3 rounded-lg bg-purple-500/10 border border-purple-500/20 text-purple-800 dark:text-purple-300">
+                          <strong>Direct Transfer:</strong> 1:1 direct on-chain
+                          transfer on {quote.destinationNetwork}. Live execution
+                          is disabled for safety.
+                        </div>
+                      </div>
+                    ) : quote && quote.routeStatus === "UNSUPPORTED_PAIR" ? (
+                      <div className="p-3 rounded-lg bg-slate-500/10 border border-slate-500/20 text-xs text-[var(--text-secondary)] space-y-1">
+                        <div className="font-semibold text-[var(--text-primary)]">
+                          Unsupported Route Pair
+                        </div>
+                        <div>
+                          {quote.statusMessage ??
+                            "No automated solver routes currently support this token pair."}
+                        </div>
+                      </div>
+                    ) : quoteError ? (
+                      <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-600 dark:text-rose-400">
+                        <strong>Quote Discovery Error:</strong> {quoteError}
+                      </div>
+                    ) : (
+                      <div className="py-3 text-center text-xs text-[var(--text-muted)]">
+                        Select a source asset to discover live solver quotes.
+                      </div>
+                    )}
+
+                    {/* Staging & Execution Disabled Notice */}
+                    <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-700 dark:text-amber-400">
+                      <strong>Indicative Preview Only:</strong>{" "}
+                      {quote?.executionBlockedNotice ??
+                        "Live deposit address issuance and payment execution are disabled (FLOW_EXECUTION=disabled)."}
+                    </div>
+
+                    {commitError && (
+                      <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-600 dark:text-rose-400">
+                        <strong>Commit Error:</strong> {commitError}
+                      </div>
+                    )}
+
+                    {/* Action Button: Enabled when quote is quotable */}
+                    <div className="space-y-2 pt-2">
+                      <button
+                        type="button"
+                        onClick={handleProceedToPayment}
+                        disabled={
+                          !quote ||
+                          quote.routeStatus !== "SUPPORTED_AND_QUOTABLE" ||
+                          committing
+                        }
+                        className={`w-full rounded-xl py-3 px-4 text-center text-xs font-semibold shadow-sm transition-all ${
+                          quote &&
+                          quote.routeStatus === "SUPPORTED_AND_QUOTABLE" &&
+                          !committing
+                            ? "bg-[#2563FF] hover:bg-[#1D4ED8] text-white cursor-pointer"
+                            : "bg-[var(--border-subtle)] text-[var(--text-muted)] cursor-not-allowed"
+                        }`}
+                      >
+                        {committing ? (
+                          <span className="inline-flex items-center gap-2">
+                            <span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin" />
+                            Generating Deposit Instructions...
+                          </span>
+                        ) : quote &&
+                          quote.routeStatus === "SUPPORTED_AND_QUOTABLE" ? (
+                          "Proceed to Payment (Generate Deposit)"
+                        ) : (
+                          "Select Quotable Route to Continue"
+                        )}
+                      </button>
+
+                      {/* Safety Execution Guardrail */}
+                      <button
+                        type="button"
+                        disabled
+                        className="w-full rounded-xl py-2 px-4 text-center text-[11px] font-medium bg-[var(--bg-app)] border border-[var(--border-subtle)] text-[var(--text-muted)] cursor-not-allowed"
+                      >
+                        Pay Now (Payment Execution Disabled)
+                      </button>
+
+                      <p className="text-center text-[11px] text-[var(--text-muted)]">
+                        Deposit instructions are secured by Flow&apos;s
+                        settlement engine.
+                      </p>
+                    </div>
+                  </>
                 )}
-
-                {/* Staging & Execution Disabled Notice */}
-                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-700 dark:text-amber-400">
-                  <strong>Indicative Preview Only:</strong>{" "}
-                  {quote?.executionBlockedNotice ??
-                    "Live deposit address issuance and payment execution are disabled (FLOW_EXECUTION=disabled)."}
-                </div>
-              </div>
-
-              {/* Disabled Action Button with Clear Reason */}
-              <div className="space-y-2 pt-2">
-                <button
-                  type="button"
-                  disabled
-                  className="w-full cursor-not-allowed rounded-xl bg-[var(--border-subtle)] py-3 px-4 text-center text-xs font-semibold text-[var(--text-muted)]"
-                >
-                  Pay Now (Payment Execution Disabled)
-                </button>
-                <p className="text-center text-[11px] text-[var(--text-muted)]">
-                  Payment instruction and deposit address generation is disabled
-                  under FLOW_EXECUTION=disabled. No real funds are moved.
-                </p>
               </div>
             </div>
           </div>

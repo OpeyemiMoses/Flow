@@ -22,9 +22,33 @@ export type PaymentAttemptStatus =
   | "QUOTE_EXPIRED"
   | "QUOTE_CANCELLED"
   | "DEPOSIT_COMMITTED"
+  | "DETECTED"
   | "SETTLING"
   | "SETTLED"
   | "FAILED";
+
+export interface PaymentDepositInstructions {
+  readonly attemptPublicId: string;
+  readonly status: PaymentAttemptStatus;
+  readonly depositAddress: string;
+  readonly depositMemo: string | null;
+  readonly depositDeadline: string;
+  readonly sourceNetwork: string;
+  readonly sourceAssetId: string;
+  readonly sourceAssetSymbol: string;
+  readonly sourceDecimals: number;
+  readonly destinationNetwork: string;
+  readonly destinationAssetSymbol: string;
+  readonly requiredAtomicAmount: string;
+  readonly requiredDisplayAmount: string;
+  readonly destinationDisplayAmount: string;
+  readonly qrData: string;
+  readonly instructionsNotice: string;
+  readonly isExecutionDisabled: boolean;
+  readonly sourceTxHash: string | null;
+  readonly destinationTxHash: string | null;
+  readonly settledAt: string | null;
+}
 
 export type QuoteVerificationTier =
   "UNVERIFIED_OBSERVATION" | "PROVIDER_VERIFIED";

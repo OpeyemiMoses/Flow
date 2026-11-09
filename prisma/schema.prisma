@@ -192,6 +192,7 @@ model FlowAccount {
   refreshLease    PortfolioRefreshLease?
   activities      WalletActivity[]
   paymentRequests PaymentRequest[]
+  ledgerAccounts  LedgerAccount[]
 
   @@unique([id, kind])
   @@map("accounts")
@@ -636,6 +637,13 @@ model PaymentAttempt {
   status                        String         @default("QUOTE_OBSERVED") @db.VarChar(32)
   verificationTier              String         @default("UNVERIFIED_OBSERVATION") @map("verification_tier") @db.VarChar(32)
   isProviderVerified            Boolean        @default(false) @map("is_provider_verified")
+  depositAddress                String?        @map("deposit_address") @db.VarChar(256)
+  depositMemo                   String?        @map("deposit_memo") @db.VarChar(128)
+  depositDeadline               DateTime?      @map("deposit_deadline") @db.Timestamptz
+  depositInstructions           Json           @default("{}") @map("deposit_instructions") @db.JsonB
+  sourceTxHash                  String?        @map("source_tx_hash") @db.VarChar(128)
+  destinationTxHash             String?        @map("destination_tx_hash") @db.VarChar(128)
+  settlementError               String?        @map("settlement_error") @db.Text
   settledAt                     DateTime?      @map("settled_at") @db.Timestamptz
   createdAt                     DateTime       @default(now()) @map("created_at") @db.Timestamptz
   updatedAt                     DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
@@ -645,7 +653,63 @@ model PaymentAttempt {
   @@index([paymentRequestId, createdAt(sort: Desc)])
   @@index([attemptPublicId])
   @@index([paymentRequestId, status])
+  @@index([status])
   @@map("payment_attempts")
+  @@schema("flow")
+}
+
+model LedgerAccount {
+  id            String        @id @default(uuid()) @db.Uuid
+  accountId     String?       @map("account_id") @db.Uuid
+  accountType   String        @map("account_type") @db.VarChar(32)
+  accountCode   String        @map("account_code") @db.VarChar(64)
+  assetId       String        @map("asset_id") @db.VarChar(128)
+  network       String        @db.VarChar(64)
+  decimals      Int
+  balanceAtomic Decimal       @default(0) @map("balance_atomic") @db.Decimal(78, 0)
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt     DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  account       FlowAccount?  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  entries       LedgerEntry[]
+
+  @@index([accountId])
+  @@map("ledger_accounts")
+  @@schema("flow")
+}
+
+model LedgerJournal {
+  id              String        @id @default(uuid()) @db.Uuid
+  journalPublicId String        @unique @map("journal_public_id") @db.VarChar(64)
+  referenceType   String        @map("reference_type") @db.VarChar(32)
+  referenceId     String        @map("reference_id") @db.VarChar(128)
+  description     String        @db.Text
+  status          String        @default("POSTED") @db.VarChar(32)
+  postedAt        DateTime      @default(now()) @map("posted_at") @db.Timestamptz
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz
+
+  entries         LedgerEntry[]
+
+  @@index([referenceType, referenceId])
+  @@index([postedAt(sort: Desc)])
+  @@map("ledger_journals")
+  @@schema("flow")
+}
+
+model LedgerEntry {
+  id              String        @id @default(uuid()) @db.Uuid
+  journalId       String        @map("journal_id") @db.Uuid
+  ledgerAccountId String        @map("ledger_account_id") @db.Uuid
+  entryDirection  String        @map("entry_direction") @db.VarChar(16)
+  amountAtomic    Decimal       @map("amount_atomic") @db.Decimal(78, 0)
+  createdAt       DateTime      @default(now()) @map("created_at") @db.Timestamptz
+
+  journal         LedgerJournal @relation(fields: [journalId], references: [id], onDelete: Cascade)
+  ledgerAccount   LedgerAccount @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
+
+  @@index([journalId])
+  @@index([ledgerAccountId])
+  @@map("ledger_entries")
   @@schema("flow")
 }
 
