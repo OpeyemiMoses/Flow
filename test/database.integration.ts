@@ -171,7 +171,6 @@ async function createTestSession(
   const pgClient = client instanceof pg.Pool ? await client.connect() : client;
   const shouldRelease = client instanceof pg.Pool;
   try {
-    await pgClient.query("BEGIN");
     const userRes = await pgClient.query<{ email: string }>(
       `SELECT email FROM flow.auth_users WHERE id = $1`,
       [authUserId],
@@ -182,10 +181,11 @@ async function createTestSession(
        VALUES ($1, $2, 'sign-in-email', $3, $4, now(), now() + interval '5 minutes')`,
       [slot, nonceDigest, email, authUserId],
     );
-    const ticketRes = await pgClient.query<{ id: string }>(
+    const ticketRes = await workerPool.query<{ id: string }>(
       `SELECT flow.issue_email_auth_ticket($1, $2) AS id`,
       [slot, nonceDigest],
     );
+    await pgClient.query("BEGIN");
     await pgClient.query(
       `SELECT set_config('flow.active_auth_ticket_id', $1, true)`,
       [ticketRes.rows[0]!.id],
@@ -6122,7 +6122,7 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
       assert.equal(e.code, "42501");
       assert.match(
         e.message ?? "",
-        /Authentication intent invalid, expired, or non-matching/,
+        /(Authentication intent invalid, expired, or non-matching|Ticket issuance unauthorized)/,
       );
       return true;
     },
@@ -6141,7 +6141,7 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
       assert.equal(e.code, "42501");
       assert.match(
         e.message ?? "",
-        /Google subject binding not found for user/,
+        /(Google subject binding not found for user|Ticket issuance unauthorized)/,
       );
       return true;
     },
@@ -6310,7 +6310,7 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
     RETURNING fencing_token;
   `;
 
-  const w1Res = await pool.query<{ fencing_token: string }>(
+  const w1Res = await workerPool.query<{ fencing_token: string }>(
     leaseAcquisitionQuery,
     [victim.accountId, worker1Holder],
   );
@@ -6319,7 +6319,7 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
 
   // Test 2: Concurrent Worker 2 attempts to acquire lease while Worker 1 is in-flight -> 0 rows (fan-out blocked)
   const worker2Holder = `worker-node-2-${randomUUID().slice(0, 8)}`;
-  const w2Res = await pool.query<{ fencing_token: string }>(
+  const w2Res = await workerPool.query<{ fencing_token: string }>(
     leaseAcquisitionQuery,
     [victim.accountId, worker2Holder],
   );
@@ -6330,7 +6330,7 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
   );
 
   // Test 3: Worker 1 finishes successfully and commits refresh cooldown
-  await pool.query(
+  await workerPool.query(
     `UPDATE flow.portfolio_refresh_leases
      SET last_refreshed_at = CURRENT_TIMESTAMP,
          lease_expires_at = NULL,
@@ -6341,7 +6341,7 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
   );
 
   // Test 4: Subsequent request during 15s cooldown -> 0 rows (rate limited)
-  const cooldownRes = await pool.query<{ fencing_token: string }>(
+  const cooldownRes = await workerPool.query<{ fencing_token: string }>(
     leaseAcquisitionQuery,
     [victim.accountId, worker2Holder],
   );
@@ -6352,13 +6352,13 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
   );
 
   // Test 5: Expire the cooldown artificially and acquire lease 2 (fencing token increments)
-  await pool.query(
+  await workerPool.query(
     `UPDATE flow.portfolio_refresh_leases
      SET last_refreshed_at = CURRENT_TIMESTAMP - interval '16 seconds'
      WHERE account_id = $1::uuid`,
     [victim.accountId],
   );
-  const w2SuccessRes = await pool.query<{ fencing_token: string }>(
+  const w2SuccessRes = await workerPool.query<{ fencing_token: string }>(
     leaseAcquisitionQuery,
     [victim.accountId, worker2Holder],
   );
@@ -6370,7 +6370,7 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
   );
 
   // Test 6: Fail-closed release on RPC failure: lease cleared without false freshness
-  await pool.query(
+  await workerPool.query(
     `UPDATE flow.portfolio_refresh_leases
      SET lease_expires_at = NULL,
          lease_holder = NULL,
@@ -6378,7 +6378,7 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
      WHERE account_id = $1::uuid AND fencing_token = $2`,
     [victim.accountId, 2],
   );
-  const leaseState = await pool.query<{
+  const leaseState = await workerPool.query<{
     lease_expires_at: Date | null;
     lease_holder: string | null;
   }>(
@@ -6399,5 +6399,378 @@ test("m3 phase 3.1: adversarial security tests — session boundary hardening, e
     balanceCheck.rows[0]!.atomic_balance,
     "5000000000000000000000000",
     "Existing balance observation must remain intact on refresh failure",
+  );
+});
+
+test("m3 phase 3.2: authentication ticket and refresh lease privilege audit — adversarial trust boundary enforcement", async () => {
+  // 1. Setup victim and attacker isolated personal accounts with sessions
+  const victim = await createTestAccount(pool, "PERSONAL", "m3-p32-victim");
+  const attacker = await createTestAccount(pool, "PERSONAL", "m3-p32-attacker");
+
+  const victimToken = await createTestSession(pool, victim.authUserId, 86400);
+  const attackerToken = await createTestSession(
+    pool,
+    attacker.authUserId,
+    86400,
+  );
+
+  // -------------------------------------------------------------------------
+  // Part 1: Authentication Ticket Privilege Audit & Defenses
+  // -------------------------------------------------------------------------
+
+  // Exploit 1: Attacker connects as app_role and attempts to call issue_email_auth_ticket directly
+  await assert.rejects(
+    async () => {
+      await pool.query(
+        `SELECT flow.issue_email_auth_ticket('fake-slot', 'fake-digest')`,
+      );
+    },
+    (err: unknown) => {
+      const e = err as { code?: string; message?: string };
+      assert.equal(e.code, "42501");
+      assert.match(
+        e.message ?? "",
+        /permission denied for function issue_email_auth_ticket|Ticket issuance unauthorized/,
+      );
+      return true;
+    },
+    "app_role must be forbidden from calling issue_email_auth_ticket",
+  );
+
+  // Exploit 2: Attacker connects as app_role and attempts to call issue_google_auth_ticket directly
+  await assert.rejects(
+    async () => {
+      await pool.query(
+        `SELECT flow.issue_google_auth_ticket('fake-sub', $1, 0)`,
+        [victim.authUserId],
+      );
+    },
+    (err: unknown) => {
+      const e = err as { code?: string; message?: string };
+      assert.equal(e.code, "42501");
+      assert.match(
+        e.message ?? "",
+        /permission denied for function issue_google_auth_ticket|Ticket issuance unauthorized/,
+      );
+      return true;
+    },
+    "app_role must be forbidden from calling issue_google_auth_ticket",
+  );
+
+  // Exploit 3: Attacker creates a forged intent in flow.auth_intents and attempts ticket issuance
+  // Even if an intent exists in flow.auth_intents, app_role cannot issue a ticket with it
+  const forgedSlot = `forged-${randomUUID()}`;
+  await pool.query(
+    `INSERT INTO flow.auth_intents (slot, email, digest, issued_at, expires_at, purpose)
+     VALUES ($1, 'victim-p32@example.test', 'forged-digest-p32', NOW(), NOW() + INTERVAL '10 minutes', 'sign-in-email')`,
+    [forgedSlot],
+  );
+  await assert.rejects(
+    async () => {
+      await pool.query(
+        `SELECT flow.issue_email_auth_ticket($1, 'forged-digest-p32')`,
+        [forgedSlot],
+      );
+    },
+    (err: unknown) => {
+      const e = err as { code?: string };
+      assert.equal(e.code, "42501");
+      return true;
+    },
+    "Forged intent cannot be converted to ticket by app_role",
+  );
+  await pool.query(`DELETE FROM flow.auth_intents WHERE slot = $1`, [
+    forgedSlot,
+  ]);
+
+  // Exploit 4: Worker role CAN legitimately issue ticket for valid intent, and intent is atomically consumed
+  const legitimateSlot = `legit-${randomUUID()}`;
+  const legitimateDigest = `digest-${randomUUID()}`;
+  const victimEmail = `${victim.authUserId}@example.test`;
+  await pool.query(
+    `INSERT INTO flow.auth_intents (slot, email, digest, issued_at, expires_at, purpose)
+     VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '10 minutes', 'sign-in-email')`,
+    [legitimateSlot, victimEmail, legitimateDigest],
+  );
+
+  const ticketRows = await workerPool.query<{
+    issue_email_auth_ticket: string;
+  }>(`SELECT flow.issue_email_auth_ticket($1, $2)`, [
+    legitimateSlot,
+    legitimateDigest,
+  ]);
+  assert.equal(ticketRows.rows.length, 1);
+  const issuedTicketId = ticketRows.rows[0]!.issue_email_auth_ticket;
+  assert.ok(issuedTicketId);
+
+  // Verify the intent was atomically deleted (replay prevention)
+  const intentCheck = await pool.query(
+    `SELECT * FROM flow.auth_intents WHERE slot = $1`,
+    [legitimateSlot],
+  );
+  assert.equal(
+    intentCheck.rows.length,
+    0,
+    "Intent must be atomically consumed upon ticket issuance",
+  );
+
+  // Replay attempt by worker role must fail because intent is gone
+  await assert.rejects(
+    async () => {
+      await workerPool.query(`SELECT flow.issue_email_auth_ticket($1, $2)`, [
+        legitimateSlot,
+        legitimateDigest,
+      ]);
+    },
+    (err: unknown) => {
+      const e = err as { code?: string; message?: string };
+      assert.equal(e.code, "42501");
+      assert.match(
+        e.message ?? "",
+        /Authentication intent invalid, expired, or non-matching/,
+      );
+      return true;
+    },
+    "Replay of consumed intent must fail closed",
+  );
+
+  // -------------------------------------------------------------------------
+  // Part 2: Refresh Lease Privilege Audit & Guarded Function Defenses
+  // -------------------------------------------------------------------------
+
+  // Exploit 5: Attacker directly updates portfolio_refresh_leases (attempts to reset cooldown)
+  await assert.rejects(
+    async () => {
+      await pool.query(
+        `UPDATE flow.portfolio_refresh_leases SET last_refreshed_at = '2000-01-01' WHERE account_id = $1::uuid`,
+        [victim.accountId],
+      );
+    },
+    (err: unknown) => {
+      const e = err as { code?: string };
+      assert.equal(e.code, "42501");
+      return true;
+    },
+    "Direct UPDATE on portfolio_refresh_leases by app_role must be rejected with 42501",
+  );
+
+  // Exploit 6: Attacker directly inserts into portfolio_refresh_leases
+  await assert.rejects(
+    async () => {
+      await pool.query(
+        `INSERT INTO flow.portfolio_refresh_leases (account_id, fencing_token)
+         VALUES ($1::uuid, 999)`,
+        [victim.accountId],
+      );
+    },
+    (err: unknown) => {
+      const e = err as { code?: string };
+      assert.equal(e.code, "42501");
+      return true;
+    },
+    "Direct INSERT into portfolio_refresh_leases by app_role must be rejected with 42501",
+  );
+
+  // Exploit 7: Attacker directly deletes from portfolio_refresh_leases
+  await assert.rejects(
+    async () => {
+      await pool.query(
+        `DELETE FROM flow.portfolio_refresh_leases WHERE account_id = $1::uuid`,
+        [victim.accountId],
+      );
+    },
+    (err: unknown) => {
+      const e = err as { code?: string };
+      assert.equal(e.code, "42501");
+      return true;
+    },
+    "Direct DELETE on portfolio_refresh_leases by app_role must be rejected with 42501",
+  );
+
+  // Exploit 8: Cross-tenant lease acquisition attack via guarded function
+  // Attacker (session set to attackerToken) calls acquire_portfolio_refresh_lease for victim.accountId
+  const attackerClient = await pool.connect();
+  try {
+    await attackerClient.query("BEGIN");
+    await attackerClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [attackerToken],
+    );
+    await assert.rejects(
+      async () => {
+        await attackerClient.query(
+          `SELECT * FROM flow.acquire_portfolio_refresh_lease($1::uuid, 'attacker-node', 15, 10)`,
+          [victim.accountId],
+        );
+      },
+      (err: unknown) => {
+        const e = err as { code?: string; message?: string };
+        assert.equal(e.code, "42501");
+        assert.match(e.message ?? "", /Account access unauthorized/);
+        return true;
+      },
+      "Cross-tenant acquire_portfolio_refresh_lease must be rejected with 42501",
+    );
+    await attackerClient.query("ROLLBACK");
+  } finally {
+    attackerClient.release();
+  }
+
+  // Exploit 9: Cross-tenant lease release attack via guarded function
+  // Attacker attempts to release victim's lease
+  const attackerReleaseClient = await pool.connect();
+  try {
+    await attackerReleaseClient.query("BEGIN");
+    await attackerReleaseClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [attackerToken],
+    );
+    await assert.rejects(
+      async () => {
+        await attackerReleaseClient.query(
+          `SELECT flow.release_portfolio_refresh_lease($1::uuid, 1, true)`,
+          [victim.accountId],
+        );
+      },
+      (err: unknown) => {
+        const e = err as { code?: string; message?: string };
+        assert.equal(e.code, "42501");
+        assert.match(e.message ?? "", /Account access unauthorized/);
+        return true;
+      },
+      "Cross-tenant release_portfolio_refresh_lease must be rejected with 42501",
+    );
+    await attackerReleaseClient.query("ROLLBACK");
+  } finally {
+    attackerReleaseClient.release();
+  }
+
+  // Exploit 10: Row-Level Security on portfolio_refresh_leases
+  // Attacker cannot view victim's lease record via SELECT
+  const victimLeaseClient = await pool.connect();
+  try {
+    await victimLeaseClient.query("BEGIN");
+    await victimLeaseClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [victimToken],
+    );
+    // Legitimate lease acquisition by victim
+    const legitAcquire = await victimLeaseClient.query<{
+      acquired: boolean;
+      fencing_token: string;
+    }>(
+      `SELECT acquired, fencing_token FROM flow.acquire_portfolio_refresh_lease($1::uuid, 'victim-node', 15, 10)`,
+      [victim.accountId],
+    );
+    assert.equal(legitAcquire.rows[0]!.acquired, true);
+    await victimLeaseClient.query("COMMIT");
+  } finally {
+    victimLeaseClient.release();
+  }
+
+  const rlsReadClient = await pool.connect();
+  try {
+    await rlsReadClient.query("BEGIN");
+    await rlsReadClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [attackerToken],
+    );
+    const leakedLeases = await rlsReadClient.query(
+      `SELECT * FROM flow.portfolio_refresh_leases WHERE account_id = $1::uuid`,
+      [victim.accountId],
+    );
+    assert.equal(
+      leakedLeases.rows.length,
+      0,
+      "Attacker must not be able to select victim's refresh lease under RLS",
+    );
+    await rlsReadClient.query("COMMIT");
+  } finally {
+    rlsReadClient.release();
+  }
+
+  // Exploit 11: Cooldown enforcement via guarded function
+  // Victim completes refresh with success=true
+  const victimReleaseClient = await pool.connect();
+  try {
+    await victimReleaseClient.query("BEGIN");
+    await victimReleaseClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [victimToken],
+    );
+    const released = await victimReleaseClient.query<{
+      release_portfolio_refresh_lease: boolean;
+    }>(`SELECT flow.release_portfolio_refresh_lease($1::uuid, 1, true)`, [
+      victim.accountId,
+    ]);
+    assert.equal(released.rows[0]!.release_portfolio_refresh_lease, true);
+
+    // Immediate re-acquisition must be rejected with reason COOLDOWN
+    const cooldownAttempt = await victimReleaseClient.query<{
+      acquired: boolean;
+      reason: string;
+      remaining_seconds: number;
+    }>(
+      `SELECT acquired, reason, remaining_seconds FROM flow.acquire_portfolio_refresh_lease($1::uuid, 'victim-node-2', 15, 10)`,
+      [victim.accountId],
+    );
+    assert.equal(cooldownAttempt.rows[0]!.acquired, false);
+    assert.equal(cooldownAttempt.rows[0]!.reason, "COOLDOWN");
+    assert.ok(
+      cooldownAttempt.rows[0]!.remaining_seconds > 0 &&
+        cooldownAttempt.rows[0]!.remaining_seconds <= 15,
+    );
+    await victimReleaseClient.query("COMMIT");
+  } finally {
+    victimReleaseClient.release();
+  }
+
+  // Exploit 12: Failed RPC reconciliation cannot mark stale balances as fresh
+  // Fast forward cooldown using workerPool, acquire lease with fencing_token=2, then release with success=false
+  await workerPool.query(
+    `UPDATE flow.portfolio_refresh_leases
+     SET last_refreshed_at = '2020-01-01 00:00:00'
+     WHERE account_id = $1::uuid`,
+    [victim.accountId],
+  );
+
+  const failClient = await pool.connect();
+  try {
+    await failClient.query("BEGIN");
+    await failClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [victimToken],
+    );
+    const acquire2 = await failClient.query<{
+      acquired: boolean;
+      fencing_token: string;
+    }>(
+      `SELECT acquired, fencing_token FROM flow.acquire_portfolio_refresh_lease($1::uuid, 'victim-node-fail', 15, 10)`,
+      [victim.accountId],
+    );
+    assert.equal(acquire2.rows[0]!.acquired, true);
+    assert.equal(acquire2.rows[0]!.fencing_token, "2");
+
+    // Release with success = false (RPC failure simulation)
+    const failRelease = await failClient.query<{
+      release_portfolio_refresh_lease: boolean;
+    }>(`SELECT flow.release_portfolio_refresh_lease($1::uuid, 2, false)`, [
+      victim.accountId,
+    ]);
+    assert.equal(failRelease.rows[0]!.release_portfolio_refresh_lease, true);
+    await failClient.query("COMMIT");
+  } finally {
+    failClient.release();
+  }
+
+  // Verify that last_refreshed_at remained the old timestamp '2020-01-01', NOT CURRENT_TIMESTAMP
+  const staleCheck = await workerPool.query<{ last_refreshed_at: Date }>(
+    `SELECT last_refreshed_at FROM flow.portfolio_refresh_leases WHERE account_id = $1::uuid`,
+    [victim.accountId],
+  );
+  assert.equal(
+    new Date(staleCheck.rows[0]!.last_refreshed_at).getFullYear(),
+    2020,
+    "Failed refresh must not mark last_refreshed_at as fresh",
   );
 });

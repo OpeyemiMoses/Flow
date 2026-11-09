@@ -116,13 +116,23 @@ export async function requireSession(
   const session = await readSession(db, headers, refresh);
   if (!session) throw new ApiFailure(401, "AUTH_REQUIRED");
   if (lock) {
-    await lockAuthUser(db, session.userId);
-    await db.$executeRaw`SELECT set_config('flow.current_session_token', ${session.token}, true)`;
-    const current = await db.authSession.findUnique({
-      where: { id: session.id },
-    });
-    if (!current || current.expiresAt.getTime() <= Date.now())
-      throw new ApiFailure(401, "AUTH_REQUIRED");
+    const lockInContext = async (tx: FlowDb) => {
+      await lockAuthUser(tx, session.userId);
+      await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${session.token}, true)`;
+      const current = await tx.authSession.findUnique({
+        where: { id: session.id },
+      });
+      if (!current || current.expiresAt.getTime() <= Date.now())
+        throw new ApiFailure(401, "AUTH_REQUIRED");
+    };
+    const dbWithTx = db as {
+      $transaction?: <T>(fn: (tx: FlowDb) => Promise<T>) => Promise<T>;
+    };
+    if (typeof dbWithTx.$transaction === "function") {
+      await dbWithTx.$transaction(lockInContext);
+    } else {
+      await lockInContext(db);
+    }
   }
   return session;
 }

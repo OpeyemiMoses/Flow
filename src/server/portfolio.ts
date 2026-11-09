@@ -29,31 +29,44 @@ const BOUNDED_WAIT_STEP_MS = 300;
 async function getPortfolioCooldownRemainingSeconds(
   db: FlowDb,
   accountId: string,
+  sessionToken?: string,
 ): Promise<number | undefined> {
-  const rows = await db.$queryRaw<Array<{ last_refreshed_at: Date | null }>>`
-    SELECT last_refreshed_at
-    FROM flow.portfolio_refresh_leases
-    WHERE account_id = ${accountId}::uuid
-  `;
-  const lastRefreshedAt = rows[0]?.last_refreshed_at;
-  if (!lastRefreshedAt) return undefined;
-  const elapsedMs = Math.max(
-    0,
-    Date.now() - new Date(lastRefreshedAt).getTime(),
-  );
-  if (elapsedMs < REFRESH_COOLDOWN_MS) {
-    return Math.min(
-      15,
-      Math.max(1, Math.ceil((REFRESH_COOLDOWN_MS - elapsedMs) / 1000)),
+  const execute = async (tx: FlowDb) => {
+    if (sessionToken) {
+      await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${sessionToken}, true)`;
+    }
+    const rows = await tx.$queryRaw<Array<{ last_refreshed_at: Date | null }>>`
+      SELECT last_refreshed_at
+      FROM flow.portfolio_refresh_leases
+      WHERE account_id = ${accountId}::uuid
+    `;
+    const lastRefreshedAt = rows[0]?.last_refreshed_at;
+    if (!lastRefreshedAt) return undefined;
+    const elapsedMs = Math.max(
+      0,
+      Date.now() - new Date(lastRefreshedAt).getTime(),
     );
-  }
-  return undefined;
+    if (elapsedMs < REFRESH_COOLDOWN_MS) {
+      return Math.min(
+        15,
+        Math.max(1, Math.ceil((REFRESH_COOLDOWN_MS - elapsedMs) / 1000)),
+      );
+    }
+    return undefined;
+  };
+  const dbWithTx = db as {
+    $transaction?: <T>(fn: (tx: FlowDb) => Promise<T>) => Promise<T>;
+  };
+  return typeof dbWithTx.$transaction === "function"
+    ? await dbWithTx.$transaction(execute)
+    : await execute(db);
 }
 
 async function acquirePortfolioRefreshLease(
   db: FlowDb,
   accountId: string,
   leaseHolder: string,
+  sessionToken?: string,
 ): Promise<
   | { readonly acquired: true; readonly fencingToken: bigint }
   | {
@@ -63,83 +76,51 @@ async function acquirePortfolioRefreshLease(
     }
 > {
   const cooldownSeconds = Math.ceil(REFRESH_COOLDOWN_MS / 1000);
-
-  // Check cooldown first
-  const current = await db.$queryRaw<
-    Array<{ last_refreshed_at: Date | null; lease_expires_at: Date | null }>
-  >`
-    SELECT last_refreshed_at, lease_expires_at
-    FROM flow.portfolio_refresh_leases
-    WHERE account_id = ${accountId}::uuid
-  `;
-  if (current.length > 0 && current[0]?.last_refreshed_at) {
-    const elapsedMs = Math.max(
-      0,
-      Date.now() - new Date(current[0].last_refreshed_at).getTime(),
-    );
-    if (elapsedMs < REFRESH_COOLDOWN_MS) {
-      return {
-        acquired: false,
-        reason: "COOLDOWN",
-        remainingSeconds: Math.min(
-          15,
-          Math.max(1, Math.ceil((REFRESH_COOLDOWN_MS - elapsedMs) / 1000)),
-        ),
-      };
+  const execute = async (tx: FlowDb) => {
+    if (sessionToken) {
+      await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${sessionToken}, true)`;
     }
+    const rows = await tx.$queryRaw<
+      Array<{
+        acquired: boolean;
+        reason: string;
+        fencing_token: bigint;
+        remaining_seconds: number;
+      }>
+    >`
+      SELECT acquired, reason, fencing_token, remaining_seconds
+      FROM flow.acquire_portfolio_refresh_lease(
+        ${accountId}::uuid,
+        ${leaseHolder},
+        ${cooldownSeconds},
+        ${LEASE_DURATION_SECONDS}
+      )
+    `;
+    return rows[0];
+  };
+
+  const dbWithTx = db as {
+    $transaction?: <T>(fn: (tx: FlowDb) => Promise<T>) => Promise<T>;
+  };
+  const row =
+    typeof dbWithTx.$transaction === "function"
+      ? await dbWithTx.$transaction(execute)
+      : await execute(db);
+
+  if (!row) {
+    return { acquired: false, reason: "IN_FLIGHT" };
   }
 
-  // Atomic lease acquisition with fencing token increment
-  const acquiredRows = await db.$queryRaw<Array<{ fencing_token: bigint }>>`
-    INSERT INTO flow.portfolio_refresh_leases (
-      account_id, last_refreshed_at, lease_expires_at, lease_holder, fencing_token, updated_at
-    ) VALUES (
-      ${accountId}::uuid,
-      NULL,
-      CURRENT_TIMESTAMP + (${LEASE_DURATION_SECONDS} || ' seconds')::interval,
-      ${leaseHolder},
-      1,
-      CURRENT_TIMESTAMP
-    )
-    ON CONFLICT (account_id) DO UPDATE
-    SET lease_expires_at = CURRENT_TIMESTAMP + (${LEASE_DURATION_SECONDS} || ' seconds')::interval,
-        lease_holder = EXCLUDED.lease_holder,
-        fencing_token = flow.portfolio_refresh_leases.fencing_token + 1,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE (flow.portfolio_refresh_leases.last_refreshed_at IS NULL
-           OR flow.portfolio_refresh_leases.last_refreshed_at <= CURRENT_TIMESTAMP - (${cooldownSeconds} || ' seconds')::interval)
-      AND (flow.portfolio_refresh_leases.lease_expires_at IS NULL
-           OR flow.portfolio_refresh_leases.lease_expires_at <= CURRENT_TIMESTAMP)
-    RETURNING fencing_token
-  `;
-
-  if (acquiredRows.length > 0 && acquiredRows[0]) {
-    return { acquired: true, fencingToken: acquiredRows[0].fencing_token };
+  if (row.acquired) {
+    return { acquired: true, fencingToken: row.fencing_token };
   }
 
-  // Determine failure reason
-  const latest = await db.$queryRaw<
-    Array<{ last_refreshed_at: Date | null; lease_expires_at: Date | null }>
-  >`
-    SELECT last_refreshed_at, lease_expires_at
-    FROM flow.portfolio_refresh_leases
-    WHERE account_id = ${accountId}::uuid
-  `;
-  if (latest.length > 0 && latest[0]?.last_refreshed_at) {
-    const elapsedMs = Math.max(
-      0,
-      Date.now() - new Date(latest[0].last_refreshed_at).getTime(),
-    );
-    if (elapsedMs < REFRESH_COOLDOWN_MS) {
-      return {
-        acquired: false,
-        reason: "COOLDOWN",
-        remainingSeconds: Math.min(
-          15,
-          Math.max(1, Math.ceil((REFRESH_COOLDOWN_MS - elapsedMs) / 1000)),
-        ),
-      };
-    }
+  if (row.reason === "COOLDOWN") {
+    return {
+      acquired: false,
+      reason: "COOLDOWN",
+      remainingSeconds: Math.min(15, Math.max(1, row.remaining_seconds)),
+    };
   }
 
   return { acquired: false, reason: "IN_FLIGHT" };
@@ -150,25 +131,27 @@ async function releasePortfolioRefreshLease(
   accountId: string,
   fencingToken: bigint,
   success: boolean,
+  sessionToken?: string,
 ): Promise<void> {
-  if (success) {
-    await db.$executeRaw`
-      UPDATE flow.portfolio_refresh_leases
-      SET last_refreshed_at = CURRENT_TIMESTAMP,
-          lease_expires_at = NULL,
-          lease_holder = NULL,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE account_id = ${accountId}::uuid AND fencing_token = ${fencingToken}
+  const execute = async (tx: FlowDb) => {
+    if (sessionToken) {
+      await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${sessionToken}, true)`;
+    }
+    await tx.$executeRaw`
+      SELECT flow.release_portfolio_refresh_lease(
+        ${accountId}::uuid,
+        ${fencingToken},
+        ${success}
+      )
     `;
+  };
+  const dbWithTx = db as {
+    $transaction?: <T>(fn: (tx: FlowDb) => Promise<T>) => Promise<T>;
+  };
+  if (typeof dbWithTx.$transaction === "function") {
+    await dbWithTx.$transaction(execute);
   } else {
-    // Fail-closed: release lease holder without updating last_refreshed_at to avoid false freshness
-    await db.$executeRaw`
-      UPDATE flow.portfolio_refresh_leases
-      SET lease_expires_at = NULL,
-          lease_holder = NULL,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE account_id = ${accountId}::uuid AND fencing_token = ${fencingToken}
-    `;
+    await execute(db);
   }
 }
 
@@ -189,7 +172,11 @@ export async function readPortfolio(
   });
 
   const serialized = serializePortfolio(projection);
-  const remaining = await getPortfolioCooldownRemainingSeconds(db, accountId);
+  const remaining = await getPortfolioCooldownRemainingSeconds(
+    db,
+    accountId,
+    actor.session.token,
+  );
   if (remaining !== undefined) {
     return reply(200, {
       ...serialized,
@@ -217,6 +204,7 @@ export async function refreshPortfolio(
     db,
     accountId,
     leaseHolder,
+    actor.session.token,
   );
 
   if (!leaseResult.acquired) {
@@ -230,16 +218,27 @@ export async function refreshPortfolio(
       await new Promise((resolve) => setTimeout(resolve, BOUNDED_WAIT_STEP_MS));
       waitedMs += BOUNDED_WAIT_STEP_MS;
 
-      const check = await db.$queryRaw<
-        Array<{
-          last_refreshed_at: Date | null;
-          lease_expires_at: Date | null;
-        }>
-      >`
-        SELECT last_refreshed_at, lease_expires_at
-        FROM flow.portfolio_refresh_leases
-        WHERE account_id = ${accountId}::uuid
-      `;
+      const check = await (async () => {
+        const execute = async (tx: FlowDb) => {
+          await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${actor.session.token}, true)`;
+          return tx.$queryRaw<
+            Array<{
+              last_refreshed_at: Date | null;
+              lease_expires_at: Date | null;
+            }>
+          >`
+            SELECT last_refreshed_at, lease_expires_at
+            FROM flow.portfolio_refresh_leases
+            WHERE account_id = ${accountId}::uuid
+          `;
+        };
+        const dbWithTx = db as {
+          $transaction?: <T>(fn: (tx: FlowDb) => Promise<T>) => Promise<T>;
+        };
+        return typeof dbWithTx.$transaction === "function"
+          ? await dbWithTx.$transaction(execute)
+          : await execute(db);
+      })();
       const currentLease = check[0];
       if (
         !currentLease?.lease_expires_at ||
@@ -271,6 +270,7 @@ export async function refreshPortfolio(
         accountId,
         leaseResult.fencingToken,
         success,
+        actor.session.token,
       );
     }
   }

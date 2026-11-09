@@ -6,7 +6,7 @@ import { emailOTP } from "better-auth/plugins/email-otp";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { z } from "zod";
 import type { AuthConfig } from "../../foundation/auth-environment.ts";
-import type { FlowDb } from "../../foundation/prisma.ts";
+import { getPrismaClient, type FlowDb } from "../../foundation/prisma.ts";
 import { ApiFailure } from "../http.ts";
 
 export const emailAddress = z
@@ -106,13 +106,82 @@ export function provider(
     }
   }
 
+  const sessionDb = new Proxy(db, {
+    get(target, prop, receiver) {
+      if (
+        prop === "authSession" ||
+        prop === "AuthSession" ||
+        (typeof prop === "string" && prop.toLowerCase() === "authsession")
+      ) {
+        const authSession =
+          (target as Record<string, unknown>).authSession ??
+          (target as Record<string, unknown>).AuthSession;
+        if (authSession && typeof authSession === "object") {
+          return new Proxy(authSession as Record<string, unknown>, {
+            get(sTarget, sProp) {
+              if (sProp === "create") {
+                return async (args: {
+                  data?: { userId?: string; user_id?: string };
+                }) => {
+                  if (google && verifiedGoogle?.identity) {
+                    const dbWithTx = target as {
+                      $transaction?: <T>(
+                        fn: (tx: FlowDb) => Promise<T>,
+                      ) => Promise<T>;
+                    };
+                    if (typeof dbWithTx.$transaction === "function") {
+                      const userId =
+                        args?.data?.userId ??
+                        args?.data?.user_id ??
+                        verifiedGoogle!.identity!.userId;
+                      const workerDb = getPrismaClient("worker");
+                      const [ticket] = await workerDb.$queryRaw<
+                        { id: string }[]
+                      >`
+                        SELECT flow.issue_google_auth_ticket(${verifiedGoogle!.subject}, ${userId}, ${google!.startOrder}) AS id
+                      `;
+                      return await dbWithTx.$transaction(async (tx) => {
+                        await lockAuthUser(tx, userId);
+                        if (google) await requireCurrentGoogleBinding(userId);
+                        if (ticket?.id) {
+                          await tx.$executeRaw`
+                            SELECT set_config('flow.active_auth_ticket_id', ${ticket.id}, true)
+                          `;
+                        }
+                        return await tx.authSession.create(
+                          args as Parameters<typeof tx.authSession.create>[0],
+                        );
+                      });
+                    }
+                  }
+                  const createDelegate = (
+                    sTarget as { create?: (a: unknown) => Promise<unknown> }
+                  ).create;
+                  if (typeof createDelegate === "function") {
+                    return await createDelegate(args);
+                  }
+                  return undefined;
+                };
+              }
+              return Reflect.get(sTarget, sProp);
+            },
+          });
+        }
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+
   return betterAuth({
     appName: "FLOW",
     baseURL: config.origin,
     secret: config.secret,
     trustedOrigins: [config.origin],
     // The FLOW transaction is shared by its checks and the library's writes.
-    database: prismaAdapter(db, { provider: "postgresql", transaction: false }),
+    database: prismaAdapter(sessionDb, {
+      provider: "postgresql",
+      transaction: false,
+    }),
     logger: { disabled: true },
     rateLimit: { enabled: false },
     session: {
@@ -280,6 +349,16 @@ export function provider(
       session: {
         create: {
           async before(session) {
+            if (google && verifiedGoogle?.identity) {
+              const dbWithTx = db as {
+                $transaction?: <T>(
+                  fn: (tx: FlowDb) => Promise<T>,
+                ) => Promise<T>;
+              };
+              if (typeof dbWithTx.$transaction === "function") {
+                return;
+              }
+            }
             await lockAuthUser(db, session.userId);
             if (google) await requireCurrentGoogleBinding(session.userId);
             if (context.emailLogin) {
@@ -294,7 +373,8 @@ export function provider(
                 throw new ApiFailure(401, "INVALID_PROOF");
               }
               if (context.emailSlot && context.emailDigest) {
-                const [ticket] = await db.$queryRaw<{ id: string }[]>`
+                const workerDb = getPrismaClient("worker");
+                const [ticket] = await workerDb.$queryRaw<{ id: string }[]>`
                   SELECT flow.issue_email_auth_ticket(${context.emailSlot}, ${context.emailDigest}) AS id
                 `;
                 if (ticket?.id) {
@@ -304,7 +384,8 @@ export function provider(
                 }
               }
             } else if (google && verifiedGoogle) {
-              const [ticket] = await db.$queryRaw<{ id: string }[]>`
+              const workerDb = getPrismaClient("worker");
+              const [ticket] = await workerDb.$queryRaw<{ id: string }[]>`
                 SELECT flow.issue_google_auth_ticket(${verifiedGoogle.subject}, ${session.userId}, ${google.startOrder}) AS id
               `;
               if (ticket?.id) {

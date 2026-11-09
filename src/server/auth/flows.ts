@@ -180,103 +180,122 @@ async function verifyCode(
   security: boolean,
 ): Promise<Response> {
   const { code } = await input(request, codeBody);
-  const { auth } = runtime();
+  const { auth, db } = runtime();
   const key = security ? auth.cookies.security : auth.cookies.email;
   const secret = readNonce(request.headers, key);
-  if (!secret || !(await clientBudget(request, "verify")))
+  if (!secret || !(await clientBudget(request, "verify"))) {
     throw new ApiFailure(401, "INVALID_PROOF");
+  }
   const headers = privateHeaders();
-  const accepted = await transaction(async (tx) => {
-    const session = security
-      ? await requireSession(tx, request.headers, true)
-      : undefined;
-    const changed = await tx.authIntent.updateMany({
-      where: {
-        digest: digest(secret),
-        expiresAt: { gt: new Date() },
-        attempts: { lt: otpAttempts },
-        verified: false,
-        sessionId: session?.id ?? null,
-        purpose: {
-          in: security
-            ? securityPurpose.options
-            : ["sign-in-email", "recover-email"],
+
+  if (security) {
+    await transaction(async (tx) => {
+      const session = await requireSession(tx, request.headers, true);
+      const changed = await tx.authIntent.updateMany({
+        where: {
+          digest: digest(secret),
+          expiresAt: { gt: new Date() },
+          attempts: { lt: otpAttempts },
+          verified: false,
+          sessionId: session.id,
+          purpose: { in: securityPurpose.options },
         },
-      },
-      data: { attempts: { increment: 1 } },
-    });
-    if (!changed.count) return false;
-    const intent = await tx.authIntent.findUniqueOrThrow({
-      where: { digest: digest(secret) },
-    });
-    if (!intent.email) return false;
-    const user = await tx.authUser.findUnique({
-      where: { email: intent.email },
-    });
-    if (security) {
+        data: { attempts: { increment: 1 } },
+      });
+      if (!changed.count) throw new ApiFailure(401, "INVALID_PROOF");
+      const intent = await tx.authIntent.findUniqueOrThrow({
+        where: { digest: digest(secret) },
+      });
+      if (!intent.email) throw new ApiFailure(401, "INVALID_PROOF");
+      const user = await tx.authUser.findUnique({
+        where: { email: intent.email },
+      });
       if (
-        user?.id !== session?.userId ||
+        user?.id !== session.userId ||
         !user?.emailVerified ||
         user.mailboxPaused
-      )
-        return false;
+      ) {
+        throw new ApiFailure(401, "INVALID_PROOF");
+      }
       try {
         await provider(tx, auth).api.verifyEmailOTP({
           body: { email: intent.email, otp: code },
         });
       } catch (error) {
-        if (rejectedCode(error)) return false;
+        if (rejectedCode(error)) throw new ApiFailure(401, "INVALID_PROOF");
         throw error;
       }
       await tx.authIntent.update({
         where: { slot: intent.slot },
         data: { verified: true, expiresAt: expiry() },
       });
-      return true;
-    }
+    });
+    return reply(204, undefined, headers);
+  }
 
-    if (user && (!user.emailEnrolled || user.mailboxPaused)) return false;
-    if (intent.purpose === "recover-email" && !user) return false;
-    const previous = await readSession(tx, request.headers);
-    try {
-      const result = await provider(tx, auth, {
-        emailLogin: intent.email,
-        emailSlot: intent.slot,
-        emailDigest: intent.digest,
-      }).api.signInEmailOTP({
-        body: { email: intent.email, otp: code },
-        headers: authHeaders(request.headers),
-        returnHeaders: true,
-      });
-      await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${result.response.token}, true)`;
-      const created = await tx.authSession.findUniqueOrThrow({
-        where: { token: result.response.token },
-      });
-      if (intent.purpose === "recover-email") {
-        await tx.authSession.deleteMany({
-          where: { userId: created.userId, id: { not: created.id } },
-        });
-      }
-      if (previous && previous.id !== created.id)
-        await tx.authSession.deleteMany({ where: { id: previous.id } });
-      await tx.authIntent.deleteMany({ where: { slot: intent.slot } });
-      await audit(
-        tx,
-        intent.purpose === "recover-email" ? "recovery" : "sign-in",
-        created.userId,
-        undefined,
-        created.id,
-      );
-      forwardCookies(headers, result.headers, auth.cookies.session);
-      headers.append("set-cookie", cookie(auth, auth.cookies.email, "", 0));
-      return true;
-    } catch (error) {
-      if (rejectedCode(error)) return false;
-      throw error;
-    }
+  const changed = await db.authIntent.updateMany({
+    where: {
+      digest: digest(secret),
+      expiresAt: { gt: new Date() },
+      attempts: { lt: otpAttempts },
+      verified: false,
+      purpose: { in: ["sign-in-email", "recover-email"] },
+    },
+    data: { attempts: { increment: 1 } },
   });
-  if (!accepted) throw new ApiFailure(401, "INVALID_PROOF");
-  return reply(204, undefined, headers);
+  if (!changed.count) {
+    throw new ApiFailure(401, "INVALID_PROOF");
+  }
+  const intent = await db.authIntent.findUniqueOrThrow({
+    where: { digest: digest(secret) },
+  });
+  if (!intent.email) {
+    throw new ApiFailure(401, "INVALID_PROOF");
+  }
+  const user = await db.authUser.findUnique({
+    where: { email: intent.email },
+  });
+  if (user && (!user.emailEnrolled || user.mailboxPaused))
+    throw new ApiFailure(401, "INVALID_PROOF");
+  if (intent.purpose === "recover-email" && !user)
+    throw new ApiFailure(401, "INVALID_PROOF");
+  const previous = await readSession(db, request.headers);
+  try {
+    const result = await provider(db, auth, {
+      emailLogin: intent.email,
+      emailSlot: intent.slot,
+      emailDigest: intent.digest,
+    }).api.signInEmailOTP({
+      body: { email: intent.email, otp: code },
+      headers: authHeaders(request.headers),
+      returnHeaders: true,
+    });
+    await db.$executeRaw`SELECT set_config('flow.current_session_token', ${result.response.token}, false)`;
+    const created = await db.authSession.findUniqueOrThrow({
+      where: { token: result.response.token },
+    });
+    if (intent.purpose === "recover-email") {
+      await db.authSession.deleteMany({
+        where: { userId: created.userId, id: { not: created.id } },
+      });
+    }
+    if (previous && previous.id !== created.id)
+      await db.authSession.deleteMany({ where: { id: previous.id } });
+    await db.authIntent.deleteMany({ where: { slot: intent.slot } });
+    await audit(
+      db,
+      intent.purpose === "recover-email" ? "recovery" : "sign-in",
+      created.userId,
+      undefined,
+      created.id,
+    );
+    forwardCookies(headers, result.headers, auth.cookies.session);
+    headers.append("set-cookie", cookie(auth, auth.cookies.email, "", 0));
+    return reply(204, undefined, headers);
+  } catch (error) {
+    if (rejectedCode(error)) throw new ApiFailure(401, "INVALID_PROOF");
+    throw error;
+  }
 }
 
 export async function requireProof(
@@ -424,72 +443,69 @@ async function finishGoogle(request: Request): Promise<Response> {
   const link = intent.purpose === "link-google-callback";
   const binding = intent.nonceHash;
   try {
-    const accepted = await transaction(async (tx) => {
-      const current = link
-        ? await requireSession(tx, request.headers, true)
-        : await readSession(tx, request.headers);
-      if (
-        link &&
-        (!current ||
-          current.id !== intent.sessionId ||
-          current.userId !== intent.userId)
-      ) {
-        throw new ApiFailure(401, "INVALID_PROOF");
+    const current = link
+      ? await requireSession(db, request.headers, true)
+      : await readSession(db, request.headers);
+    if (
+      link &&
+      (!current ||
+        current.id !== intent.sessionId ||
+        current.userId !== intent.userId)
+    ) {
+      throw new ApiFailure(401, "INVALID_PROOF");
+    }
+    const callback = new URL("/api/auth/callback/google", auth.origin);
+    callback.searchParams.set("state", state);
+    callback.searchParams.set("code", code);
+    const response = await provider(db, auth, {
+      google: {
+        nonceHash: binding,
+        startOrder,
+        linkUserId: link ? current?.userId : undefined,
+      },
+    }).handler(
+      new Request(callback, { headers: authHeaders(request.headers) }),
+    );
+    if (
+      response.status < 300 ||
+      response.status >= 400 ||
+      response.headers.get("location") !==
+        new URL(providerRedirect, auth.origin).href
+    ) {
+      throw new ApiFailure(401, "INVALID_PROOF");
+    }
+    if (link && current) {
+      await db.authSession.deleteMany({ where: { userId: current.userId } });
+      await audit(db, "google-linked", current.userId);
+    } else {
+      const nextCookie = response.headers
+        .getSetCookie()
+        .find((value) => value.startsWith(`${auth.cookies.session}=`));
+      const session = nextCookie
+        ? await readSession(
+            db,
+            new Headers({ cookie: nextCookie.split(";")[0]! }),
+          )
+        : null;
+      if (!session) throw new ApiFailure(401, "INVALID_PROOF");
+      if (intent.purpose === "recover-google") {
+        await db.authSession.deleteMany({
+          where: { userId: session.userId, id: { not: session.id } },
+        });
       }
-      const callback = new URL("/api/auth/callback/google", auth.origin);
-      callback.searchParams.set("state", state);
-      callback.searchParams.set("code", code);
-      const response = await provider(tx, auth, {
-        google: {
-          nonceHash: binding,
-          startOrder,
-          linkUserId: link ? current?.userId : undefined,
-        },
-      }).handler(
-        new Request(callback, { headers: authHeaders(request.headers) }),
+      if (current && current.id !== session.id)
+        await db.authSession.deleteMany({ where: { id: current.id } });
+      await audit(
+        db,
+        intent.purpose === "recover-google" ? "recovery" : "sign-in",
+        session.userId,
+        undefined,
+        session.id,
       );
-      if (
-        response.status < 300 ||
-        response.status >= 400 ||
-        response.headers.get("location") !==
-          new URL(providerRedirect, auth.origin).href
-      ) {
-        throw new ApiFailure(401, "INVALID_PROOF");
-      }
-      if (link && current) {
-        await tx.authSession.deleteMany({ where: { userId: current.userId } });
-        await audit(tx, "google-linked", current.userId);
-      } else {
-        const nextCookie = response.headers
-          .getSetCookie()
-          .find((value) => value.startsWith(`${auth.cookies.session}=`));
-        const session = nextCookie
-          ? await readSession(
-              tx,
-              new Headers({ cookie: nextCookie.split(";")[0]! }),
-            )
-          : null;
-        if (!session) throw new ApiFailure(401, "INVALID_PROOF");
-        if (intent.purpose === "recover-google") {
-          await tx.authSession.deleteMany({
-            where: { userId: session.userId, id: { not: session.id } },
-          });
-        }
-        if (current && current.id !== session.id)
-          await tx.authSession.deleteMany({ where: { id: current.id } });
-        await audit(
-          tx,
-          intent.purpose === "recover-google" ? "recovery" : "sign-in",
-          session.userId,
-          undefined,
-          session.id,
-        );
-      }
-      return response.headers;
-    });
+    }
     forwardCookies(
       headers,
-      accepted,
+      response.headers,
       auth.cookies.state,
       ...(link ? [] : [auth.cookies.session]),
     );
