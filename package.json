@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@better-auth/prisma-adapter": "1.7.18",
+    "@defuse-protocol/one-click-sdk-typescript": "0.1.26",
     "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1",
     "better-auth": "1.7.18",

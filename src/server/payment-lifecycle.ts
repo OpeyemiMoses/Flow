@@ -3,11 +3,14 @@ import {
   type PaymentAttemptStatus,
   type PaymentDepositInstructions,
   isValidPaymentAttemptPublicId,
+  resolveOneClickAssetId,
+  PROBE_ADDRESSES,
 } from "../domain/quote-discovery.ts";
 import { formatAtomicToDisplay } from "../domain/atomic-amounts.ts";
 import { isValidPublicPaymentId } from "../domain/payment-requests.ts";
 import { isFinancialExecutionDisabled } from "../domain/custody.ts";
 import { getPrismaClient, runtime } from "../foundation/prisma.ts";
+import { fetchOneClickCommittedQuote } from "./providers/one-click-adapter.ts";
 import { clientBudget } from "./auth/limits.ts";
 import { ApiFailure, reply } from "./http.ts";
 
@@ -126,19 +129,116 @@ export async function commitPaymentAttempt(
     throw new ApiFailure(400, "QUOTE_EXPIRED");
   }
 
-  // Requirement 9 & 10: Deposit destination must come from an authenticated, validated provider quote
+  // Requirement 9, 10 & M6: Genuine provider and recipient address authorization
+  let depositAddress = attempt.deposit_address;
+  let depositMemo = attempt.deposit_memo;
+  let deadline = attempt.deposit_deadline
+    ? new Date(attempt.deposit_deadline)
+    : new Date(Date.now() + 15 * 60 * 1000);
+
+  if (!depositAddress) {
+    const isDirect = attempt.source_network === attempt.destination_network;
+    if (isDirect) {
+      // Direct same-chain transfer path (Requirement 4)
+      const recipientRows = await db.$queryRaw<Array<{ address: string }>>`
+        SELECT wa.address
+        FROM flow.wallet_addresses wa
+        JOIN flow.wallets w ON w.id = wa.wallet_id
+        JOIN flow.payment_requests pr ON pr.account_id = w.account_id
+        JOIN flow.payment_attempts pa ON pa.payment_request_id = pr.id
+        WHERE pa.attempt_public_id = ${attemptPublicId}
+          AND wa.network = ${attempt.destination_network}
+        LIMIT 1
+      `;
+      if (recipientRows.length === 0 || !recipientRows[0]?.address) {
+        throw new ApiFailure(
+          400,
+          "RECIPIENT_WALLET_UNAVAILABLE: Recipient account has no registered wallet address for destination network.",
+        );
+      }
+      depositAddress = recipientRows[0].address;
+    } else {
+      // Cross-chain 1Click committed quote path (Requirements 1, 2, 3)
+      const attemptDetails = await db.$queryRaw<
+        Array<{
+          recipient_address: string;
+          payer_refund_address: string | null;
+          source_asset_id: string;
+          destination_asset_id: string;
+        }>
+      >`
+        SELECT
+          wa.address AS recipient_address,
+          pa.payer_refund_address,
+          pa.source_asset_id,
+          pr.destination_asset_id
+        FROM flow.wallet_addresses wa
+        JOIN flow.wallets w ON w.id = wa.wallet_id
+        JOIN flow.payment_requests pr ON pr.account_id = w.account_id
+        JOIN flow.payment_attempts pa ON pa.payment_request_id = pr.id
+        WHERE pa.attempt_public_id = ${attemptPublicId}
+          AND wa.network = ${attempt.destination_network}
+        LIMIT 1
+      `;
+
+      if (
+        attemptDetails.length === 0 ||
+        !attemptDetails[0]?.recipient_address
+      ) {
+        throw new ApiFailure(
+          400,
+          "RECIPIENT_WALLET_UNAVAILABLE: Recipient account has no registered wallet address for destination network.",
+        );
+      }
+
+      const row = attemptDetails[0]!;
+      const sourceOneClickId = resolveOneClickAssetId(row.source_asset_id);
+      const destOneClickId = resolveOneClickAssetId(row.destination_asset_id);
+      if (!sourceOneClickId || !destOneClickId) {
+        throw new ApiFailure(400, "UNSUPPORTED_ONE_CLICK_ASSET_PAIR");
+      }
+
+      const eco = attempt.source_network.startsWith("solana")
+        ? "solana"
+        : attempt.source_network.startsWith("near")
+          ? "near"
+          : "evm";
+      const refundTo = row.payer_refund_address ?? PROBE_ADDRESSES[eco];
+
+      const committedRes = await fetchOneClickCommittedQuote({
+        originAsset: sourceOneClickId,
+        destinationAsset: destOneClickId,
+        swapType: "EXACT_OUTPUT",
+        amountAtomic:
+          attempt.quoted_destination_atomic_amount ??
+          attempt.quoted_source_atomic_amount ??
+          "0",
+        refundTo,
+        recipient: row.recipient_address,
+      });
+
+      if (!committedRes.ok || !committedRes.depositAddress) {
+        throw new ApiFailure(
+          400,
+          committedRes.errorMessage ?? "PROVIDER_COMMITTED_QUOTE_FAILED",
+        );
+      }
+
+      depositAddress = committedRes.depositAddress;
+      depositMemo = committedRes.depositMemo ?? null;
+      if (committedRes.depositDeadline) {
+        deadline = new Date(committedRes.depositDeadline);
+      }
+    }
+  }
+
   // Synthetic address fabrication is strictly prohibited.
-  if (!attempt.deposit_address) {
+  if (!depositAddress || depositAddress.startsWith("flow-")) {
     throw new ApiFailure(
       400,
       "PROVIDER_DEPOSIT_DESTINATION_UNAVAILABLE: Real provider deposit destination has not been authorized.",
     );
   }
-
-  // 15-minute deposit deadline from now or provider deadline
-  const deadline = attempt.deposit_deadline
-    ? new Date(attempt.deposit_deadline)
-    : new Date(Date.now() + 15 * 60 * 1000);
 
   const depositInstructionsPayload = attempt.deposit_instructions ?? {
     network: attempt.source_network,
@@ -146,8 +246,8 @@ export async function commitPaymentAttempt(
     decimals: attempt.source_decimals,
     expectedAtomicAmount: attempt.quoted_source_atomic_amount,
     deadlineIso: deadline.toISOString(),
-    memo: attempt.deposit_memo,
-    depositAddress: attempt.deposit_address,
+    memo: depositMemo,
+    depositAddress,
   };
 
   // Commit via stored procedure
@@ -166,8 +266,8 @@ export async function commitPaymentAttempt(
     SELECT *
     FROM flow.commit_payment_attempt(
       ${attemptPublicId},
-      ${attempt.deposit_address},
-      ${attempt.deposit_memo},
+      ${depositAddress},
+      ${depositMemo},
       ${deadline},
       ${JSON.stringify(depositInstructionsPayload)}::jsonb
     )

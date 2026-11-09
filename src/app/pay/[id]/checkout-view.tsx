@@ -1117,15 +1117,24 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                             committing ||
                             !quote ||
                             quote.routeStatus !== "SUPPORTED_AND_QUOTABLE" ||
-                            true
+                            (quote.isExecutionDisabled ?? true)
                           }
-                          className="w-full rounded-xl py-3 px-4 text-center text-xs font-semibold bg-[var(--border-subtle)] text-[var(--text-muted)] cursor-not-allowed transition-all"
+                          className={`w-full rounded-xl py-3 px-4 text-center text-xs font-semibold transition-all ${
+                            !committing &&
+                            quote &&
+                            quote.routeStatus === "SUPPORTED_AND_QUOTABLE" &&
+                            !quote.isExecutionDisabled
+                              ? "bg-[#2563FF] hover:bg-[#1D4ED8] text-white cursor-pointer shadow-sm"
+                              : "bg-[var(--border-subtle)] text-[var(--text-muted)] cursor-not-allowed"
+                          }`}
                         >
                           {committing
                             ? "Securing Deposit Address..."
                             : quote &&
                                 quote.routeStatus === "SUPPORTED_AND_QUOTABLE"
-                              ? "Pay Now (Payment Execution Disabled)"
+                              ? quote.isExecutionDisabled
+                                ? "Pay Now (Payment Execution Disabled)"
+                                : "Pay Now & Get Deposit Address"
                               : "Select Quotable Route to Continue"}
                         </button>
 

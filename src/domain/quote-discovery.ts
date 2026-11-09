@@ -199,6 +199,7 @@ export interface IndicativeQuote {
 
   // Safety boundaries & guardrails
   readonly isIndicativeOnly: true;
+  readonly isExecutionDisabled?: boolean;
   readonly executionBlockedNotice: string;
   readonly statusMessage?: string;
 }

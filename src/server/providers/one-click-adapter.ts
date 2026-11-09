@@ -1,4 +1,8 @@
 import {
+  verifyQuoteSignature,
+  type OneClickQuoteResponse,
+} from "@defuse-protocol/one-click-sdk-typescript";
+import {
   type IndicativeQuoteFeeBreakdown,
   type QuoteSwapType,
   type RouteAvailabilityStatus,
@@ -6,7 +10,7 @@ import {
 } from "../../domain/quote-discovery.ts";
 
 export interface OneClickQuoteRequest {
-  dry: true;
+  dry: boolean;
   swapType: QuoteSwapType;
   slippageTolerance: number;
   originAsset: string;
@@ -61,6 +65,26 @@ export interface OneClickDryQuoteResult {
 const DEFAULT_ONE_CLICK_API_BASE = "https://1click.chaindefuser.com";
 const TIMEOUT_MS = 8000;
 
+/**
+ * Returns sanitized server-side partner authentication headers.
+ * Never exposed to the browser or client bundle.
+ */
+export function getOneClickHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  const apiKey = process.env.FLOW_ONE_CLICK_API_KEY;
+  if (apiKey && apiKey.trim().length > 0) {
+    headers["Authorization"] = `Bearer ${apiKey.trim()}`;
+  }
+  const partnerId = process.env.FLOW_ONE_CLICK_PARTNER_ID;
+  if (partnerId && partnerId.trim().length > 0) {
+    headers["x-partner-id"] = partnerId.trim();
+  }
+  return headers;
+}
+
 export async function fetchOneClickDryQuote(params: {
   originAsset: string;
   destinationAsset: string;
@@ -70,6 +94,8 @@ export async function fetchOneClickDryQuote(params: {
   recipient: string;
   deadlineSeconds?: number;
   apiBase?: string;
+  managerPublicKey?: string;
+  skipSignatureVerification?: boolean;
 }): Promise<OneClickDryQuoteResult> {
   const apiBase = params.apiBase ?? DEFAULT_ONE_CLICK_API_BASE;
   const deadlineDate = new Date(
@@ -97,10 +123,7 @@ export async function fetchOneClickDryQuote(params: {
 
     const response = await fetch(`${apiBase}/v0/quote`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
+      headers: getOneClickHeaders(),
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
@@ -147,6 +170,27 @@ export async function fetchOneClickDryQuote(params: {
         routeStatus: "PROVIDER_ERROR",
         errorMessage: "Malformed quote payload received from provider.",
       };
+    }
+
+    // Cryptographic quote signature verification (Requirement 1)
+    if (
+      data.signature &&
+      data.quoteRequest &&
+      data.timestamp &&
+      !params.skipSignatureVerification
+    ) {
+      const isSigValid = verifyQuoteSignature(
+        data as unknown as OneClickQuoteResponse,
+        params.managerPublicKey,
+      );
+      if (!isSigValid) {
+        return {
+          ok: false,
+          routeStatus: "PROVIDER_ERROR",
+          errorMessage:
+            "INVALID_QUOTE_SIGNATURE: Provider quote cryptographic signature verification failed.",
+        };
+      }
     }
 
     // Validate atomic integer amount format and positive bounds (Requirement 6)
@@ -258,6 +302,7 @@ export interface OneClickCommittedQuoteResult {
 /**
  * Requests an authentic committed execution quote from 1Click with dry: false.
  * Returns genuine provider deposit instructions when execution is authorized.
+ * Enforces cryptographic signature verification and strict schema matching.
  */
 export async function fetchOneClickCommittedQuote(params: {
   originAsset: string;
@@ -268,24 +313,26 @@ export async function fetchOneClickCommittedQuote(params: {
   recipient: string;
   deadlineSeconds?: number;
   apiBase?: string;
+  managerPublicKey?: string;
+  skipSignatureVerification?: boolean;
 }): Promise<OneClickCommittedQuoteResult> {
   const apiBase = params.apiBase ?? DEFAULT_ONE_CLICK_API_BASE;
   const deadlineDate = new Date(
     Date.now() + (params.deadlineSeconds ?? 900) * 1000,
   );
 
-  const payload = {
+  const payload: OneClickQuoteRequest = {
     dry: false,
     swapType: params.swapType,
     slippageTolerance: 100, // 1%
     originAsset: params.originAsset,
-    depositType: "ORIGIN_CHAIN" as const,
+    depositType: "ORIGIN_CHAIN",
     destinationAsset: params.destinationAsset,
     amount: params.amountAtomic,
     refundTo: params.refundTo,
-    refundType: "ORIGIN_CHAIN" as const,
+    refundType: "ORIGIN_CHAIN",
     recipient: params.recipient,
-    recipientType: "DESTINATION_CHAIN" as const,
+    recipientType: "DESTINATION_CHAIN",
     deadline: deadlineDate.toISOString(),
   };
 
@@ -295,10 +342,7 @@ export async function fetchOneClickCommittedQuote(params: {
 
     const response = await fetch(`${apiBase}/v0/quote`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
+      headers: getOneClickHeaders(),
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
@@ -329,27 +373,135 @@ export async function fetchOneClickCommittedQuote(params: {
       };
     }
 
-    const depositAddress = data.depositAddress ?? data.quote?.depositAddress;
-    if (!depositAddress) {
+    // 1. Enforce Cryptographic Signature Verification on Committed Quote (Requirement 1)
+    if (!data.signature && !params.skipSignatureVerification) {
       return {
         ok: false,
-        errorMessage: "Provider response did not contain a deposit address.",
+        errorMessage:
+          "PROVIDER_ERROR: Missing cryptographic signature on provider committed quote.",
+      };
+    }
+
+    if (data.signature && !params.skipSignatureVerification) {
+      const isSigValid = verifyQuoteSignature(
+        data as unknown as OneClickQuoteResponse,
+        params.managerPublicKey,
+      );
+      if (!isSigValid) {
+        return {
+          ok: false,
+          errorMessage:
+            "INVALID_QUOTE_SIGNATURE: Provider quote cryptographic signature verification failed.",
+        };
+      }
+    }
+
+    // 2. Enforce Schema Invariant Verification (Requirement 3)
+    if (data.quoteRequest) {
+      if (data.quoteRequest.originAsset !== params.originAsset) {
+        return {
+          ok: false,
+          errorMessage: `PROVIDER_SCHEMA_MISMATCH: Origin asset mismatch (expected ${params.originAsset}, received ${data.quoteRequest.originAsset}).`,
+        };
+      }
+      if (data.quoteRequest.destinationAsset !== params.destinationAsset) {
+        return {
+          ok: false,
+          errorMessage: `PROVIDER_SCHEMA_MISMATCH: Destination asset mismatch (expected ${params.destinationAsset}, received ${data.quoteRequest.destinationAsset}).`,
+        };
+      }
+      if (data.quoteRequest.amount !== params.amountAtomic) {
+        return {
+          ok: false,
+          errorMessage: `PROVIDER_SCHEMA_MISMATCH: Quoted atomic amount mismatch (expected ${params.amountAtomic}, received ${data.quoteRequest.amount}).`,
+        };
+      }
+      if (
+        data.quoteRequest.refundTo.toLowerCase() !==
+        params.refundTo.toLowerCase()
+      ) {
+        return {
+          ok: false,
+          errorMessage: `PROVIDER_SCHEMA_MISMATCH: Refund destination mismatch (expected ${params.refundTo}, received ${data.quoteRequest.refundTo}).`,
+        };
+      }
+      if (
+        data.quoteRequest.recipient.toLowerCase() !==
+        params.recipient.toLowerCase()
+      ) {
+        return {
+          ok: false,
+          errorMessage: `PROVIDER_SCHEMA_MISMATCH: Recipient address mismatch (expected ${params.recipient}, received ${data.quoteRequest.recipient}).`,
+        };
+      }
+    }
+
+    // 3. Validate Atomic Amounts and Positive uint256 Bounds
+    if (!data.quote || !data.quote.amountIn || !data.quote.amountOut) {
+      return {
+        ok: false,
+        errorMessage: "Malformed quote payload received from provider.",
+      };
+    }
+
+    if (
+      !validateProviderAtomicAmount(data.quote.amountIn) ||
+      !validateProviderAtomicAmount(data.quote.amountOut)
+    ) {
+      return {
+        ok: false,
+        errorMessage: "Malformed or out-of-range provider atomic amounts.",
+      };
+    }
+
+    if (params.swapType === "EXACT_OUTPUT") {
+      const expectedRequested = BigInt(params.amountAtomic);
+      const returnedOut = BigInt(data.quote.amountOut);
+      if (returnedOut < expectedRequested) {
+        return {
+          ok: false,
+          errorMessage: `Provider returned destination amount (${data.quote.amountOut}) is less than requested invoice amount (${params.amountAtomic}).`,
+        };
+      }
+    }
+
+    // 4. Validate Deposit Address (Strict non-synthetic check)
+    const depositAddress = data.depositAddress ?? data.quote?.depositAddress;
+    if (
+      !depositAddress ||
+      depositAddress.trim().length === 0 ||
+      depositAddress.startsWith("flow-")
+    ) {
+      return {
+        ok: false,
+        errorMessage:
+          "Provider response did not contain a valid non-synthetic deposit address.",
+      };
+    }
+
+    // 5. Validate Deadline
+    const deadline =
+      data.quote?.deadline ?? data.quoteRequest?.deadline ?? payload.deadline;
+    const deadlineMs = new Date(deadline).getTime();
+    if (isNaN(deadlineMs) || deadlineMs <= Date.now()) {
+      return {
+        ok: false,
+        errorMessage:
+          "Committed quote deadline has already expired or is malformed.",
       };
     }
 
     const memo =
       data.depositMemo ?? data.quote?.depositMemo ?? data.quote?.memo ?? null;
-    const deadline =
-      data.quote?.deadline ?? data.quoteRequest?.deadline ?? payload.deadline;
 
     return {
       ok: true,
-      depositAddress,
-      depositMemo: memo,
+      depositAddress: depositAddress.trim(),
+      depositMemo: memo ? memo.trim() : null,
       depositDeadline: deadline,
-      amountInAtomic: data.quote?.amountIn,
-      amountOutAtomic: data.quote?.amountOut,
-      timeEstimateSeconds: data.quote?.timeEstimate ?? null,
+      amountInAtomic: data.quote.amountIn,
+      amountOutAtomic: data.quote.amountOut,
+      timeEstimateSeconds: data.quote.timeEstimate ?? null,
       correlationId: data.correlationId,
       signature: data.signature,
       quoteTimestamp: data.timestamp ?? null,

@@ -14,6 +14,7 @@ import {
   parseDisplayToAtomic,
 } from "../domain/atomic-amounts.ts";
 import { isValidPublicPaymentId } from "../domain/payment-requests.ts";
+import { isFinancialExecutionDisabled } from "../domain/custody.ts";
 import { CURATED_SUPPORTED_DEPLOYMENTS } from "../domain/supported-assets-catalog.ts";
 import { clientBudget } from "./auth/limits.ts";
 import { ApiFailure, reply } from "./http.ts";
@@ -279,6 +280,7 @@ export async function requestPaymentQuote(
       isProviderVerified: false,
       isExchangeCompatible: isExchangeCompat,
       isIndicativeOnly: true,
+      isExecutionDisabled: isFinancialExecutionDisabled(),
       executionBlockedNotice:
         "Direct transfer preview only. Live payment execution is disabled (FLOW_EXECUTION=disabled).",
       statusMessage:
@@ -333,6 +335,7 @@ export async function requestPaymentQuote(
       isProviderVerified: false,
       isExchangeCompatible: isExchangeCompat,
       isIndicativeOnly: true,
+      isExecutionDisabled: isFinancialExecutionDisabled(),
       executionBlockedNotice:
         "Route is unsupported by solver network. Live payment execution is disabled (FLOW_EXECUTION=disabled).",
       statusMessage:
@@ -415,6 +418,7 @@ export async function requestPaymentQuote(
       isProviderVerified: false,
       isExchangeCompatible: isExchangeCompat,
       isIndicativeOnly: true,
+      isExecutionDisabled: isFinancialExecutionDisabled(),
       executionBlockedNotice:
         "Quote discovery failed or route liquidity is temporarily unavailable. Live payment execution is disabled (FLOW_EXECUTION=disabled).",
       statusMessage: dryResult.errorMessage,
@@ -501,6 +505,7 @@ export async function requestPaymentQuote(
     isProviderVerified: false,
     isExchangeCompatible: isExchangeCompat,
     isIndicativeOnly: true,
+    isExecutionDisabled: isFinancialExecutionDisabled(),
     executionBlockedNotice:
       "Indicative quote only. Live deposit address issuance and payment execution are disabled (FLOW_EXECUTION=disabled).",
   };
