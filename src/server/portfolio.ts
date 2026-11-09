@@ -22,7 +22,6 @@ export {
   serializePortfolio,
 } from "../domain/portfolio.ts";
 
-const LEASE_DURATION_SECONDS = 10;
 const BOUNDED_WAIT_MAX_MS = 3_000;
 const BOUNDED_WAIT_STEP_MS = 300;
 
@@ -68,14 +67,17 @@ async function acquirePortfolioRefreshLease(
   leaseHolder: string,
   sessionToken?: string,
 ): Promise<
-  | { readonly acquired: true; readonly fencingToken: bigint }
+  | {
+      readonly acquired: true;
+      readonly fencingToken: bigint;
+      readonly leaseToken: string;
+    }
   | {
       readonly acquired: false;
       readonly reason: "COOLDOWN" | "IN_FLIGHT";
       readonly remainingSeconds?: number;
     }
 > {
-  const cooldownSeconds = Math.ceil(REFRESH_COOLDOWN_MS / 1000);
   const execute = async (tx: FlowDb) => {
     if (sessionToken) {
       await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${sessionToken}, true)`;
@@ -85,15 +87,14 @@ async function acquirePortfolioRefreshLease(
         acquired: boolean;
         reason: string;
         fencing_token: bigint;
+        lease_token: string | null;
         remaining_seconds: number;
       }>
     >`
-      SELECT acquired, reason, fencing_token, remaining_seconds
+      SELECT acquired, reason, fencing_token, lease_token, remaining_seconds
       FROM flow.acquire_portfolio_refresh_lease(
         ${accountId}::uuid,
-        ${leaseHolder},
-        ${cooldownSeconds},
-        ${LEASE_DURATION_SECONDS}
+        ${leaseHolder}
       )
     `;
     return rows[0];
@@ -111,8 +112,12 @@ async function acquirePortfolioRefreshLease(
     return { acquired: false, reason: "IN_FLIGHT" };
   }
 
-  if (row.acquired) {
-    return { acquired: true, fencingToken: row.fencing_token };
+  if (row.acquired && row.lease_token) {
+    return {
+      acquired: true,
+      fencingToken: row.fencing_token,
+      leaseToken: row.lease_token,
+    };
   }
 
   if (row.reason === "COOLDOWN") {
@@ -130,17 +135,15 @@ async function releasePortfolioRefreshLease(
   db: FlowDb,
   accountId: string,
   fencingToken: bigint,
+  leaseToken: string,
   success: boolean,
-  sessionToken?: string,
 ): Promise<void> {
   const execute = async (tx: FlowDb) => {
-    if (sessionToken) {
-      await tx.$executeRaw`SELECT set_config('flow.current_session_token', ${sessionToken}, true)`;
-    }
     await tx.$executeRaw`
       SELECT flow.release_portfolio_refresh_lease(
         ${accountId}::uuid,
         ${fencingToken},
+        ${leaseToken}::uuid,
         ${success}
       )
     `;
@@ -265,12 +268,13 @@ export async function refreshPortfolio(
       }
       success = true;
     } finally {
+      const workerDb = getPrismaClient("worker");
       await releasePortfolioRefreshLease(
-        db,
+        workerDb,
         accountId,
         leaseResult.fencingToken,
+        leaseResult.leaseToken,
         success,
-        actor.session.token,
       );
     }
   }

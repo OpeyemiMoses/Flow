@@ -79,6 +79,7 @@ export function provider(
 ) {
   const google = context.google;
   let verifiedGoogle: VerifiedGoogle | undefined;
+  let activeTicketId: string | undefined;
 
   // The caller holds the same auth-user lock as Google unlink and relink.
   async function requireCurrentGoogleBinding(userId: string) {
@@ -123,36 +124,50 @@ export function provider(
                 return async (args: {
                   data?: { userId?: string; user_id?: string };
                 }) => {
-                  if (google && verifiedGoogle?.identity) {
-                    const dbWithTx = target as {
-                      $transaction?: <T>(
-                        fn: (tx: FlowDb) => Promise<T>,
-                      ) => Promise<T>;
-                    };
-                    if (typeof dbWithTx.$transaction === "function") {
-                      const userId =
-                        args?.data?.userId ??
-                        args?.data?.user_id ??
-                        verifiedGoogle!.identity!.userId;
-                      const workerDb = getPrismaClient("worker");
-                      const [ticket] = await workerDb.$queryRaw<
-                        { id: string }[]
-                      >`
-                        SELECT flow.issue_google_auth_ticket(${verifiedGoogle!.subject}, ${userId}, ${google!.startOrder}) AS id
-                      `;
-                      return await dbWithTx.$transaction(async (tx) => {
+                  let ticketIdToUse = activeTicketId;
+                  activeTicketId = undefined;
+
+                  const userId =
+                    args?.data?.userId ??
+                    args?.data?.user_id ??
+                    (google && verifiedGoogle?.identity
+                      ? verifiedGoogle.identity.userId
+                      : undefined);
+
+                  if (
+                    google &&
+                    verifiedGoogle?.identity &&
+                    !ticketIdToUse &&
+                    userId
+                  ) {
+                    const workerDb = getPrismaClient("worker");
+                    const [ticket] = await workerDb.$queryRaw<{ id: string }[]>`
+                      SELECT flow.issue_google_auth_ticket(${verifiedGoogle.subject}, ${userId}, ${google.startOrder}) AS id
+                    `;
+                    ticketIdToUse = ticket?.id;
+                  }
+
+                  const dbWithTx = target as {
+                    $transaction?: <T>(
+                      fn: (tx: FlowDb) => Promise<T>,
+                    ) => Promise<T>;
+                  };
+                  if (
+                    typeof dbWithTx.$transaction === "function" &&
+                    ticketIdToUse
+                  ) {
+                    return await dbWithTx.$transaction(async (tx) => {
+                      if (google && verifiedGoogle?.identity && userId) {
                         await lockAuthUser(tx, userId);
                         if (google) await requireCurrentGoogleBinding(userId);
-                        if (ticket?.id) {
-                          await tx.$executeRaw`
-                            SELECT set_config('flow.active_auth_ticket_id', ${ticket.id}, true)
-                          `;
-                        }
-                        return await tx.authSession.create(
-                          args as Parameters<typeof tx.authSession.create>[0],
-                        );
-                      });
-                    }
+                      }
+                      await tx.$executeRaw`
+                        SELECT set_config('flow.active_auth_ticket_id', ${ticketIdToUse}, true)
+                      `;
+                      return await tx.authSession.create(
+                        args as Parameters<typeof tx.authSession.create>[0],
+                      );
+                    });
                   }
                   const createDelegate = (
                     sTarget as { create?: (a: unknown) => Promise<unknown> }
@@ -378,9 +393,7 @@ export function provider(
                   SELECT flow.issue_email_auth_ticket(${context.emailSlot}, ${context.emailDigest}) AS id
                 `;
                 if (ticket?.id) {
-                  await db.$executeRaw`
-                    SELECT set_config('flow.active_auth_ticket_id', ${ticket.id}, true)
-                  `;
+                  activeTicketId = ticket.id;
                 }
               }
             } else if (google && verifiedGoogle) {
@@ -389,9 +402,7 @@ export function provider(
                 SELECT flow.issue_google_auth_ticket(${verifiedGoogle.subject}, ${session.userId}, ${google.startOrder}) AS id
               `;
               if (ticket?.id) {
-                await db.$executeRaw`
-                  SELECT set_config('flow.active_auth_ticket_id', ${ticket.id}, true)
-                `;
+                activeTicketId = ticket.id;
               }
             }
           },
