@@ -31,11 +31,16 @@ export function AcceptInvitation() {
     }
   }
   return (
-    <>
-      <button type="button" disabled={busy} onClick={accept}>
+    <div className="space-y-4">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={accept}
+        className="flow-btn-primary w-full px-4 py-3 text-sm"
+      >
         Accept invitation
       </button>
       <Feedback text={message} />
-    </>
+    </div>
   );
 }

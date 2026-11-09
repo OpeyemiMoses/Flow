@@ -1,21 +1,37 @@
-import Link from "next/link";
 import { runtime } from "../../../../foundation/prisma.ts";
-import { access, accountId } from "../../../../server/accounts.ts";
+import {
+  access,
+  accessibleAccounts,
+  accountId,
+} from "../../../../server/accounts.ts";
 import { getAccountBalances } from "../../../../server/assets/asset-service.ts";
 import { pageData, pagePrincipal } from "../../../../server/pages.ts";
 import { serializePortfolio } from "../../../../server/portfolio.ts";
-import { AccountNameForm } from "../forms.tsx";
-import { PortfolioView } from "./portfolio-view.tsx";
+import { PortfolioView, type WorkspaceTab } from "./portfolio-view.tsx";
+
+const VALID_VIEWS: ReadonlySet<WorkspaceTab> = new Set([
+  "dashboard",
+  "assets",
+  "send",
+  "receive",
+  "activity",
+]);
 
 export default async function AccountPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ view?: string }>;
 }) {
   const actor = await pagePrincipal();
   const { id } = await params;
+  const query = await searchParams;
   const account = await pageData(() =>
     access(runtime().db, actor, accountId(id)),
+  );
+  const allAccounts = await pageData(() =>
+    accessibleAccounts(runtime().db, actor),
   );
   const initialPortfolio = await pageData(async () => {
     if (!actor.session.token) {
@@ -26,48 +42,21 @@ export default async function AccountPage({
     });
     return serializePortfolio(projection);
   });
-  return (
-    <main className="flow-main flow-stack">
-      <Link prefetch={false} href="/accounts">
-        All accounts
-      </Link>
-      <section className="flow-panel flow-stack">
-        <h1>{account.name}</h1>
-        <p>
-          {account.kind === "PERSONAL"
-            ? "Personal account"
-            : "Business account"}{" "}
-          · {account.role.toLowerCase()}
-        </p>
-        <p className="flow-tag">
-          {account.walletStatus === "active"
-            ? "Wallet provisioned (execution disabled)"
-            : account.walletStatus === "provisioning"
-              ? "Wallet provisioning in progress"
-              : account.walletStatus === "setup_failed"
-                ? "Wallet setup failed"
-                : "Wallet setup pending"}
-        </p>
-        {account.kind === "BUSINESS" && account.role !== "MEMBER" && (
-          <div>
-            <Link prefetch={false} href={`/accounts/${account.id}/team`}>
-              Manage team
-            </Link>
-          </div>
-        )}
-      </section>
 
+  const initialView: WorkspaceTab =
+    query.view && VALID_VIEWS.has(query.view as WorkspaceTab)
+      ? (query.view as WorkspaceTab)
+      : "dashboard";
+
+  return (
+    <main>
       <PortfolioView
         accountId={account.id}
         initialPortfolio={initialPortfolio}
+        account={account}
+        allAccounts={allAccounts}
+        initialView={initialView}
       />
-
-      {account.role === "OWNER" && (
-        <section className="flow-panel flow-stack">
-          <h2>Account settings</h2>
-          <AccountNameForm account={account} />
-        </section>
-      )}
     </main>
   );
 }

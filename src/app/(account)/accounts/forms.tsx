@@ -51,18 +51,23 @@ export function AccountNameForm({
   }
 
   return (
-    <form className="flow-stack" onSubmit={submit}>
-      <label>
+    <form className="space-y-4" onSubmit={submit}>
+      <label className="block text-sm font-semibold text-[var(--text-primary)]">
         {account ? "Account name" : "Business name"}
         <input
           value={name}
           onChange={(event) => setName(event.target.value)}
           maxLength={80}
           required
+          placeholder={account ? "Workspace name" : "Acme Treasury LLC"}
+          className="flow-input mt-1.5 w-full px-3.5 py-2.5 text-sm font-normal"
         />
       </label>
       <div>
-        <button disabled={busy}>
+        <button
+          disabled={busy}
+          className="flow-btn-primary px-4 py-2 text-xs sm:text-sm"
+        >
           {account ? "Save name" : "Create business"}
         </button>
       </div>

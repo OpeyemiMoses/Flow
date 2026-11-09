@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { IconShield } from "../components/icons.tsx";
 
 const messages: Record<string, string> = {
   AUTH_REQUIRED: "Sign in again to continue.",
@@ -31,15 +32,15 @@ export async function send<T>(
     body: JSON.stringify(data),
   });
   const text = await response.text();
-  let result;
+  let result: { error?: string } | undefined;
   try {
-    result = text ? JSON.parse(text) : undefined;
+    result = text ? (JSON.parse(text) as { error?: string }) : undefined;
   } catch {
     throw new Error("FLOW returned an unexpected response. Try again.");
   }
   if (!response.ok) {
     throw new Error(
-      messages[result?.error] ??
+      (result?.error ? messages[result.error] : undefined) ??
         "FLOW could not complete the request. Try again.",
     );
   }
@@ -65,7 +66,10 @@ export function googleNavigate(url: string) {
 
 export function Feedback({ text }: { text: string }) {
   return text ? (
-    <p className="flow-feedback" role="status">
+    <p
+      className="rounded-[8px] border border-[#2563FF]/30 bg-[#2563FF]/5 px-4 py-2.5 text-xs font-semibold text-[var(--text-primary)]"
+      role="status"
+    >
       {text}
     </p>
   ) : null;
@@ -99,9 +103,9 @@ export function SignOutButton() {
     }
   }
   return (
-    <div>
+    <div className="inline-flex items-center gap-2">
       <button
-        className="flow-secondary"
+        className="flow-btn-secondary px-3 py-1.5 text-xs font-semibold"
         type="button"
         disabled={busy}
         onClick={signOut}
@@ -113,7 +117,7 @@ export function SignOutButton() {
   );
 }
 
-type ProofPurpose =
+export type ProofPurpose =
   | "enroll-email"
   | "link-google"
   | "unlink-google"
@@ -153,65 +157,99 @@ export function FreshProof({
       setBusy(false);
     }
   }
-  async function confirm(event: FormEvent<HTMLFormElement>) {
+
+  async function verify(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
     setMessage("");
     try {
-      await send("/api/security/code/verify", { code });
+      await send("/api/security/code/verify", { purpose, target, code });
       await onConfirm();
     } catch (error) {
       setMessage(describe(error));
-    } finally {
       setBusy(false);
     }
   }
 
   return (
-    <section className="flow-panel flow-stack">
-      <h2>Confirm this change</h2>
-      <p>{children}</p>
+    <section
+      className="flow-card p-6 space-y-4 border-l-4 border-l-[#2563FF]"
+      aria-label="Security confirmation"
+    >
+      <div className="flex items-start gap-3">
+        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] bg-[#2563FF]/10 text-[#2563FF]">
+          <IconShield size={18} />
+        </span>
+        <div>
+          <h2 className="font-display text-base font-bold text-[var(--text-primary)]">
+            Confirm with a fresh email code
+          </h2>
+          <p className="mt-0.5 text-xs text-[var(--text-secondary)]">
+            {children}
+          </p>
+        </div>
+      </div>
+
       {stage === "start" ? (
-        <button type="button" onClick={requestCode} disabled={busy}>
-          Send security code
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={requestCode}
+            className="flow-btn-primary px-4 py-2 text-xs"
+          >
+            Send security code
+          </button>
+          <button
+            type="button"
+            className="flow-btn-secondary px-4 py-2 text-xs"
+            disabled={busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+        </div>
       ) : (
-        <form className="flow-stack" onSubmit={confirm}>
-          <label>
+        <form className="space-y-3" onSubmit={verify}>
+          <label className="block text-xs font-semibold text-[var(--text-primary)]">
             Security code
             <input
               value={code}
               onChange={(event) => setCode(event.target.value)}
               required
-              inputMode="numeric"
               autoComplete="one-time-code"
+              inputMode="numeric"
               pattern="[0-9]{8}"
               maxLength={8}
+              className="flow-input mt-1.5 w-full max-w-xs px-3.5 py-2 font-mono text-sm tracking-widest block"
             />
           </label>
-          <div className="flow-actions">
-            <button disabled={busy}>Confirm change</button>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <button
+              disabled={busy}
+              className="flow-btn-primary px-4 py-2 text-xs"
+            >
+              Confirm change
+            </button>
             <button
               type="button"
-              className="flow-secondary"
-              onClick={requestCode}
+              className="flow-btn-secondary px-3.5 py-2 text-xs"
               disabled={busy || seconds > 0}
+              onClick={requestCode}
             >
               {seconds ? `Resend in ${seconds}s` : "Resend code"}
+            </button>
+            <button
+              type="button"
+              className="flow-btn-secondary px-3.5 py-2 text-xs"
+              disabled={busy}
+              onClick={onCancel}
+            >
+              Cancel
             </button>
           </div>
         </form>
       )}
-      <div>
-        <button
-          type="button"
-          className="flow-secondary"
-          onClick={onCancel}
-          disabled={busy}
-        >
-          Cancel
-        </button>
-      </div>
       <Feedback text={message} />
     </section>
   );

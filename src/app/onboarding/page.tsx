@@ -1,5 +1,6 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { FlowLogo, FlowWaveGraphic } from "../../components/flow-logo.tsx";
 import { runtime } from "../../foundation/prisma.ts";
 import { readSession } from "../../server/auth/session.ts";
 import { pageData } from "../../server/pages.ts";
@@ -13,10 +14,24 @@ export default async function Onboarding() {
   );
   if (!session) redirect("/sign-in");
   return (
-    <main className="flow-main flow-narrow">
-      <section className="flow-panel flow-stack">
-        <h1>Setting up your FLOW account</h1>
-        <CompleteOnboarding />
+    <main className="mx-auto flex min-h-screen max-w-xl flex-col justify-center px-6 py-16">
+      <section className="flow-card overflow-hidden">
+        <div className="flow-navy-banner relative overflow-hidden p-8">
+          <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-36 w-full opacity-80" />
+          <div className="relative z-10">
+            <FlowLogo size={30} variant="inverse" />
+            <h1 className="mt-5 font-display text-2xl font-extrabold text-white">
+              Setting up your FLOW account
+            </h1>
+            <p className="mt-2 text-sm text-slate-200">
+              Provisioning your isolated personal account and initializing
+              multi-chain custody status.
+            </p>
+          </div>
+        </div>
+        <div className="p-8">
+          <CompleteOnboarding />
+        </div>
       </section>
     </main>
   );

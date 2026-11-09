@@ -7,8 +7,7 @@ export default async function SecurityPage() {
   await pagePrincipal();
   const status = await pageData(async () => securitySnapshot(await headers()));
   return (
-    <main className="flow-main flow-stack">
-      <h1>Security</h1>
+    <main>
       <SecurityPanel {...status} />
     </main>
   );

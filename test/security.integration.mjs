@@ -1198,3 +1198,164 @@ test("m3 phase 3: authenticated portfolio API — authorization, cross-tenant is
   assert.ok(cooldownData.cooldownRemainingSeconds > 0);
   assert.ok(cooldownData.cooldownRemainingSeconds <= 15);
 });
+
+test("FLOW desktop brand UI: multi-chain routing, curated asset registry, workspace navigation, and truthfulness gates", async () => {
+  const ctx = await app.browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 1440, height: 900 },
+  });
+  const screenshotDir = process.env.FLOW_CAPTURE_SCREENSHOTS_DIR;
+  const snap = async (page, filename) => {
+    if (!screenshotDir) return;
+    await page.waitForTimeout(250);
+    await page.screenshot({
+      path: `${screenshotDir}/${filename}`,
+      fullPage: true,
+    });
+  };
+
+  try {
+    const page = await ctx.newPage();
+
+    // 1. Marketing Landing Page (/)
+    await page.goto(`${app.origin}/`);
+    await page
+      .getByRole("heading", {
+        name: /Pay with one asset\.\s*Receive another/i,
+      })
+      .waitFor();
+    const landingBody = await page.locator("body").innerText();
+    assert.ok(!/non-custodial/i.test(landingBody));
+    assert.ok(!/SOC 2/i.test(landingBody));
+    assert.ok(!/99\.99%/i.test(landingBody));
+    assert.ok(!/pay\.flow\.com/i.test(landingBody));
+    await snap(page, "01-marketing-landing.png");
+
+    // 2. Sign-In & Email OTP (/sign-in)
+    await page.goto(`${app.origin}/sign-in`);
+    await page.getByRole("heading", { name: "Sign in to FLOW" }).waitFor();
+    await snap(page, "02-sign-in.png");
+
+    const uiEmail = "flow-ui-brand@example.test";
+    await page.getByLabel("Email address").fill(uiEmail);
+    const otpCode = await codeFor(uiEmail, () =>
+      page.getByRole("button", { name: "Send email code" }).click(),
+    );
+    await page.getByLabel("Email code").waitFor();
+    await snap(page, "03-sign-in-otp.png");
+    await page.getByLabel("Email code").fill(otpCode);
+    await page.getByRole("button", { name: "Verify and sign in" }).click();
+
+    // 3. Personal Dashboard (/accounts/[id])
+    await page
+      .getByRole("heading", { name: "Personal", exact: true })
+      .waitFor();
+    assert.ok(await page.getByText("Wallet setup pending").isVisible());
+    await snap(page, "04-personal-dashboard.png");
+
+    // 4. Wallets & Supported Assets view
+    await page.getByRole("button", { name: "Wallets & Assets" }).click();
+    await page
+      .getByRole("heading", {
+        name: "Curated Multi-Chain Asset & Token Registry",
+      })
+      .waitFor();
+    const registryText = await page.locator("table").innerText();
+    for (const token of [
+      "ETH",
+      "USDC",
+      "cbETH",
+      "SOL",
+      "mSOL",
+      "JUP",
+      "NEAR",
+      "wNEAR",
+    ]) {
+      assert.ok(
+        registryText.includes(token),
+        `Expected curated registry to include ${token}`,
+      );
+    }
+    await snap(page, "05-wallets-and-assets.png");
+
+    // 5. Send & Convert view (Sender Source vs Recipient Settlement + Address Validation)
+    await page.getByRole("button", { name: "Send & Convert" }).click();
+    await page.getByRole("heading", { name: "Cross-Chain Send" }).waitFor();
+    const addrInput = page.getByLabel(/Recipient Destination Address/i);
+    await addrInput.fill("invalid-solana-address!");
+    assert.ok(
+      await page
+        .getByText(/Solana requires a valid Base58 public key/i)
+        .isVisible(),
+    );
+    await addrInput.fill("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+    assert.ok(await page.getByText(/address format verified/i).isVisible());
+    assert.ok(
+      await page
+        .getByRole("button", {
+          name: /Execution Disabled in Milestone 3/i,
+        })
+        .isDisabled(),
+    );
+    await snap(page, "06-send-and-convert.png");
+
+    // 6. Receive & Payment Links view
+    await page.getByRole("button", { name: "Receive & Links" }).click();
+    await page
+      .getByRole("heading", { name: "Choose How You Want to Settle" })
+      .waitFor();
+    assert.ok(
+      await page
+        .getByText(
+          /Custody Safeguard — Wallets Not Yet Eligible for Live Deposits/i,
+        )
+        .isVisible(),
+    );
+    await snap(page, "07-receive-and-links.png");
+
+    // 7. Activity & Audit view
+    await page.getByRole("button", { name: "Activity & Audit" }).click();
+    await page
+      .getByRole("heading", {
+        name: "Transaction History & Custody Observation Log",
+      })
+      .waitFor();
+    await snap(page, "08-activity-and-audit.png");
+
+    // 8. Accounts Directory & Business Creation (/accounts)
+    await page.getByRole("link", { name: "Accounts", exact: true }).click();
+    await page.getByRole("heading", { name: "Your FLOW accounts" }).waitFor();
+    await snap(page, "09-accounts-directory.png");
+
+    const bizName = "Acme Global Treasury";
+    await page.getByLabel("Business name").fill(bizName);
+    await page.getByRole("button", { name: "Create business" }).click();
+
+    // 9. Business Dashboard & Treasury (/accounts/[id])
+    await page.getByRole("heading", { name: bizName }).waitFor();
+    assert.ok(
+      await page.getByText("Organization Multi-Chain Treasury").isVisible(),
+    );
+    await snap(page, "10-business-treasury-dashboard.png");
+
+    // 10. Business Team Management (/accounts/[id]/team)
+    await page.getByRole("link", { name: "Manage team" }).click();
+    await page.getByRole("heading", { name: `${bizName} team` }).waitFor();
+    await snap(page, "11-business-team-management.png");
+
+    // 11. Security, Profile & Preferences (/security) + Dark Theme Toggle
+    await page.getByRole("link", { name: "Security", exact: true }).click();
+    await page
+      .getByRole("heading", { name: "Security", exact: true })
+      .waitFor();
+    await snap(page, "12-security-and-settings.png");
+
+    await page
+      .getByRole("button", { name: "Switch to dark theme" })
+      .first()
+      .click();
+    await snap(page, "13-security-dark-theme.png");
+  } finally {
+    await ctx.close();
+  }
+});
