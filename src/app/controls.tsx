@@ -26,10 +26,14 @@ export async function send<T>(
   method = "POST",
   headers: Record<string, string> = {},
 ): Promise<T> {
+  const isGetOrHead = method === "GET" || method === "HEAD";
   const response = await fetch(path, {
     method,
-    headers: { "Content-Type": "application/json", ...headers },
-    body: JSON.stringify(data),
+    headers: {
+      ...(isGetOrHead ? {} : { "Content-Type": "application/json" }),
+      ...headers,
+    },
+    body: isGetOrHead ? undefined : JSON.stringify(data),
   });
   const text = await response.text();
   let result: { error?: string } | undefined;

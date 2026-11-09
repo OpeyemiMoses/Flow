@@ -4,6 +4,10 @@ import {
   readAccounts,
   renameAccount,
 } from "../../../../server/accounts.ts";
+import {
+  readActivities,
+  syncActivities,
+} from "../../../../server/activities.ts";
 import { api, reply } from "../../../../server/http.ts";
 import {
   readPortfolio,
@@ -46,6 +50,12 @@ export async function GET(
         if (request.method === "POST")
           return refreshPortfolio(request, accountId(id));
       }
+      if (section === "activities") {
+        if (request.method === "GET")
+          return readActivities(request, accountId(id));
+        if (request.method === "POST")
+          return syncActivities(request, accountId(id));
+      }
     }
     if (id && child && parts.length === 3) {
       if (
@@ -54,6 +64,13 @@ export async function GET(
         request.method === "POST"
       ) {
         return refreshPortfolio(request, accountId(id));
+      }
+      if (
+        section === "activities" &&
+        child === "sync" &&
+        request.method === "POST"
+      ) {
+        return syncActivities(request, accountId(id));
       }
       if (
         section === "members" &&

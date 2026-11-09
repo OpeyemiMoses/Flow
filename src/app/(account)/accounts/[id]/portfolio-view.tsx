@@ -33,6 +33,11 @@ import {
   validateEcosystemAddress,
 } from "../../../../domain/supported-assets-catalog.ts";
 import type {
+  ActivityFeedResponse,
+  SerializedWalletActivityRecord,
+} from "../../../../domain/activities.ts";
+import { getExplorerUrl } from "../../../../domain/activities.ts";
+import type {
   SerializedAccountPortfolio,
   SerializedWalletBalanceRecord,
 } from "../../../../server/portfolio.ts";
@@ -119,6 +124,54 @@ export function PortfolioView({
   // Receive preferences state
   const [receiveDeploymentId, setReceiveDeploymentId] =
     useState<string>("base-sepolia:USDC");
+
+  // Multi-chain activity feed state
+  const [activities, setActivities] = useState<
+    SerializedWalletActivityRecord[]
+  >([]);
+  const [activityTotal, setActivityTotal] = useState<number>(0);
+  const [activityLoading, setActivityLoading] = useState<boolean>(false);
+
+  const handleSyncActivities = useCallback(async () => {
+    setActivityLoading(true);
+    setMessage("");
+    try {
+      const res = await send<ActivityFeedResponse>(
+        `/api/accounts/${accountId}/activities/sync`,
+        {},
+        "POST",
+      );
+      setActivities(res.activities);
+      setActivityTotal(res.total);
+      setMessage("On-chain activity synchronized.");
+    } catch (error) {
+      setMessage(describe(error));
+    } finally {
+      setActivityLoading(false);
+    }
+  }, [accountId]);
+
+  useEffect(() => {
+    if (activeTab !== "activity") return;
+    let active = true;
+    send<ActivityFeedResponse>(
+      `/api/accounts/${accountId}/activities?limit=50`,
+      {},
+      "GET",
+    )
+      .then((res) => {
+        if (active) {
+          setActivities(res.activities);
+          setActivityTotal(res.total);
+        }
+      })
+      .catch(() => {
+        // Graceful empty state on unauth or network error
+      });
+    return () => {
+      active = false;
+    };
+  }, [accountId, activeTab]);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -1615,10 +1668,12 @@ export function PortfolioView({
                   Settled Transfers
                 </span>
                 <p className="mt-1 font-display text-2xl font-extrabold text-[var(--text-primary)]">
-                  0
+                  {activityTotal}
                 </p>
                 <span className="text-[11px] text-[var(--text-muted)]">
-                  Execution disabled
+                  {activityTotal > 0
+                    ? "Verified on-chain"
+                    : "No activity recorded"}
                 </span>
               </div>
               <div className="flow-card p-4">
@@ -1656,7 +1711,7 @@ export function PortfolioView({
               </div>
             </div>
 
-            {/* Activity & Observation Ledger */}
+            {/* Verified On-Chain Activity Feed */}
             <section className="flow-card p-6 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
                 <div>
@@ -1668,18 +1723,164 @@ export function PortfolioView({
                     balance observations for this workspace.
                   </p>
                 </div>
+                <div className="flex items-center gap-2">
+                  <span className="rounded-[4px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2.5 py-1 text-xs font-semibold text-[var(--text-secondary)]">
+                    {activityTotal} Indexed Event(s)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleSyncActivities}
+                    disabled={activityLoading}
+                    className="flex items-center gap-1.5 rounded-[6px] border border-[var(--border-subtle)] bg-white px-3 py-1 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-subtle)] disabled:opacity-50 transition-colors shadow-xs"
+                  >
+                    <IconRefresh
+                      size={13}
+                      className={activityLoading ? "animate-spin" : ""}
+                    />
+                    <span>
+                      {activityLoading ? "Syncing..." : "Sync Activity"}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              {activities.length === 0 ? (
+                <div className="rounded-[12px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-subtle)]/50 p-8 text-center">
+                  <p className="text-sm font-semibold text-[var(--text-primary)]">
+                    No on-chain transaction activity discovered yet
+                  </p>
+                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                    Zero transactions have been recorded on registered wallet
+                    addresses for this workspace. Activity will automatically
+                    appear here once incoming or outgoing transactions occur on
+                    Near, Base, or Solana.
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-[var(--border-subtle)] text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
+                        <th className="py-2.5 pr-3">Direction &amp; Type</th>
+                        <th className="py-2.5 px-3">Network &amp; Asset</th>
+                        <th className="py-2.5 px-3 text-right">Amount</th>
+                        <th className="py-2.5 px-3">Transaction Hash</th>
+                        <th className="py-2.5 px-3 text-right">Block / Slot</th>
+                        <th className="py-2.5 px-3 text-right">Timestamp</th>
+                        <th className="py-2.5 pl-3 text-right">Finality</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[var(--border-subtle)] text-xs">
+                      {activities.map((act) => {
+                        const explorer =
+                          act.explorerUrl ??
+                          getExplorerUrl(act.network, act.chainId, act.txHash);
+                        const isCredit = act.direction === "INCOMING";
+                        return (
+                          <tr key={`tx:${act.id}`}>
+                            <td className="py-3 pr-3">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`rounded-[4px] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                                    isCredit
+                                      ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                                      : act.direction === "OUTGOING"
+                                        ? "bg-rose-50 text-rose-800 border border-rose-200"
+                                        : "bg-blue-50 text-blue-800 border border-blue-200"
+                                  }`}
+                                >
+                                  {act.direction}
+                                </span>
+                                <span className="text-[11px] font-medium text-[var(--text-muted)]">
+                                  {act.activityType === "ON_CHAIN_TRANSFER"
+                                    ? "Transfer"
+                                    : "Interaction"}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-3 px-3">
+                              <span className="inline-flex items-center gap-1.5 font-medium text-[var(--text-secondary)]">
+                                <ChainBadge chainKey={act.network} size={15} />
+                                {act.network} · {act.assetSymbol}
+                              </span>
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono font-semibold">
+                              <span
+                                className={
+                                  isCredit
+                                    ? "text-emerald-700"
+                                    : "text-[var(--text-primary)]"
+                                }
+                              >
+                                {isCredit
+                                  ? "+"
+                                  : act.direction === "OUTGOING"
+                                    ? "-"
+                                    : ""}
+                                {act.displayAmount} {act.assetSymbol}
+                              </span>
+                            </td>
+                            <td className="py-3 px-3 font-mono text-[11px]">
+                              {explorer ? (
+                                <a
+                                  href={explorer}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-[#2563FF] hover:underline"
+                                >
+                                  {truncateMiddle(act.txHash, 6, 4)} ↗
+                                </a>
+                              ) : (
+                                <span>{truncateMiddle(act.txHash, 6, 4)}</span>
+                              )}
+                            </td>
+                            <td className="py-3 px-3 text-right font-mono text-[11px] text-[var(--text-muted)]">
+                              {act.blockHeight ? `#${act.blockHeight}` : "—"}
+                            </td>
+                            <td className="py-3 px-3 text-right text-[var(--text-muted)]">
+                              {act.blockTimestamp
+                                ? formatTimestamp(act.blockTimestamp)
+                                : formatTimestamp(act.observedAt)}
+                            </td>
+                            <td className="py-3 pl-3 text-right">
+                              <span className="rounded-[4px] bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                                {act.finality}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            {/* Custody RPC Observation Ledger */}
+            <section className="flow-card p-6 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
+                <div>
+                  <h2 className="font-display text-base font-bold text-[var(--text-primary)]">
+                    Custody RPC Observation Log
+                  </h2>
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    Audited ledger of read-only RPC balance observations for
+                    this workspace.
+                  </p>
+                </div>
                 <span className="rounded-[4px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2.5 py-1 text-xs font-semibold text-[var(--text-secondary)]">
-                  0 Settled Transfers · {balances.length} Balance Observation(s)
+                  {balances.length} Balance Observation(s)
                 </span>
               </div>
 
               {balances.length === 0 ? (
                 <div className="rounded-[12px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-subtle)]/50 p-8 text-center">
                   <p className="text-sm font-semibold text-[var(--text-primary)]">
-                    No transaction or balance observation events recorded yet
+                    No balance observation events recorded yet
                   </p>
                   <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                    Zero on-chain transfers have been executed on this account.
+                    Zero balance observations have been recorded for this
+                    account.
                   </p>
                 </div>
               ) : (

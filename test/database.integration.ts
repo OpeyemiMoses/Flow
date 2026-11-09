@@ -7423,6 +7423,110 @@ test("m3 phase 3.3: final ticket possession and refresh-lease integrity correcti
   }
 
   // --------------------------------------------------------------------------
+  // Part 2.1: Lease Expiration Recovery & Stale Worker Rejection
+  // --------------------------------------------------------------------------
+  // Fast-forward cooldown so lease is eligible again
+  await workerPool.query(
+    `UPDATE flow.portfolio_refresh_leases
+     SET last_refreshed_at = '2020-01-01 00:00:00',
+         lease_expires_at = NULL,
+         lease_holder = NULL
+     WHERE account_id = $1::uuid`,
+    [victim.accountId],
+  );
+
+  // Holder A acquires lease
+  let holderAFencing = "";
+  let holderALeaseToken = "";
+  const acquireAClient = await pool.connect();
+  try {
+    await acquireAClient.query("BEGIN");
+    await acquireAClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [victimToken],
+    );
+    const resA = await acquireAClient.query<{
+      acquired: boolean;
+      fencing_token: string;
+      lease_token: string;
+    }>(
+      `SELECT acquired, fencing_token, lease_token
+       FROM flow.acquire_portfolio_refresh_lease($1::uuid, 'holder-a')`,
+      [victim.accountId],
+    );
+    assert.equal(resA.rows[0]!.acquired, true);
+    holderAFencing = resA.rows[0]!.fencing_token;
+    holderALeaseToken = resA.rows[0]!.lease_token;
+    await acquireAClient.query("COMMIT");
+  } finally {
+    acquireAClient.release();
+  }
+
+  // Simulate worker crash / lease expiry without release (lease_expires_at passes)
+  await workerPool.query(
+    `UPDATE flow.portfolio_refresh_leases
+     SET lease_expires_at = now() - interval '1 second'
+     WHERE account_id = $1::uuid`,
+    [victim.accountId],
+  );
+
+  // Holder B acquires lease after expiry -> must succeed with incremented fencing token
+  let holderBFencing = "";
+  let holderBLeaseToken = "";
+  const acquireBClient = await pool.connect();
+  try {
+    await acquireBClient.query("BEGIN");
+    await acquireBClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [victimToken],
+    );
+    const resB = await acquireBClient.query<{
+      acquired: boolean;
+      fencing_token: string;
+      lease_token: string;
+    }>(
+      `SELECT acquired, fencing_token, lease_token
+       FROM flow.acquire_portfolio_refresh_lease($1::uuid, 'holder-b')`,
+      [victim.accountId],
+    );
+    assert.equal(resB.rows[0]!.acquired, true);
+    assert.ok(BigInt(resB.rows[0]!.fencing_token) > BigInt(holderAFencing));
+    holderBFencing = resB.rows[0]!.fencing_token;
+    holderBLeaseToken = resB.rows[0]!.lease_token;
+    assert.notEqual(holderBLeaseToken, holderALeaseToken);
+    await acquireBClient.query("COMMIT");
+  } finally {
+    acquireBClient.release();
+  }
+
+  // Stale worker A tries to release its expired lease -> must fail with 42501
+  await assert.rejects(
+    workerPool.query(
+      `SELECT flow.release_portfolio_refresh_lease($1::uuid, $2::bigint, $3::uuid, true)`,
+      [victim.accountId, holderAFencing, holderALeaseToken],
+    ),
+    (err: unknown) => {
+      const e = err as { code?: string; message?: string };
+      assert.equal(e.code, "42501");
+      assert.ok(
+        e.message?.includes(
+          "Invalid, expired, or non-matching lease capability",
+        ),
+      );
+      return true;
+    },
+  );
+
+  // Active worker B releases lease successfully
+  const releaseB = await workerPool.query<{
+    release_portfolio_refresh_lease: boolean;
+  }>(
+    `SELECT flow.release_portfolio_refresh_lease($1::uuid, $2::bigint, $3::uuid, true)`,
+    [victim.accountId, holderBFencing, holderBLeaseToken],
+  );
+  assert.equal(releaseB.rows[0]!.release_portfolio_refresh_lease, true);
+
+  // --------------------------------------------------------------------------
   // Part 3: Additional Privilege Audit & Role Boundaries
   // --------------------------------------------------------------------------
 
@@ -7511,5 +7615,308 @@ test("m3 phase 3.3: final ticket possession and refresh-lease integrity correcti
       secCheck.rows[0]!.proconfig?.includes("search_path=flow, pg_temp"),
       `${fnName} must have search_path=flow, pg_temp`,
     );
+  }
+});
+
+test("M3 Phase 4: flow.wallet_activities row-level security, adversarial isolation, consistency triggers, and idempotent deduplication", async () => {
+  const adminClient = await pool.connect();
+  const workerClient = await workerPool.connect();
+  const appClient = await pool.connect();
+
+  try {
+    // 1. Setup Tenant A (Victim) and Tenant B (Attacker)
+    const victim = await createTestAccount(
+      adminClient,
+      "PERSONAL",
+      "m3p4-victim",
+    );
+    const victimSessionToken = await createTestSession(
+      adminClient,
+      victim.authUserId,
+    );
+
+    const attacker = await createTestAccount(
+      adminClient,
+      "PERSONAL",
+      "m3p4-attacker",
+    );
+    const attackerSessionToken = await createTestSession(
+      adminClient,
+      attacker.authUserId,
+    );
+
+    // Create testnet wallets and addresses for both tenants
+    const victimWalletId = randomUUID();
+    const attackerWalletId = randomUUID();
+    const victimBaseAddr = "0xaa6bA2Ae7F20748B46A3DB221a418137ec54A5a2";
+    const attackerBaseAddr = "0xbbbbA2Ae7F20748B46A3DB221a418137ec54A5b2";
+
+    await workerClient.query(
+      `INSERT INTO flow.wallets (id, account_id, provider, provider_wallet_id, near_account_id, encrypted_credential, key_id, key_digest, status, environment)
+       VALUES ($1, $2, 'outlayer', $3, $4, 'v1:dummy', 'v1', 'digest1', 'ACTIVE', 'testnet'),
+              ($5, $6, 'outlayer', $7, $8, 'v1:dummy', 'v1', 'digest2', 'ACTIVE', 'testnet')`,
+      [
+        victimWalletId,
+        victim.accountId,
+        `prov-${victimWalletId}`,
+        `victim-${victimWalletId.slice(0, 8)}.testnet`,
+        attackerWalletId,
+        attacker.accountId,
+        `prov-${attackerWalletId}`,
+        `attacker-${attackerWalletId.slice(0, 8)}.testnet`,
+      ],
+    );
+
+    await workerClient.query(
+      `INSERT INTO flow.wallet_addresses (id, wallet_id, network, chain_id, address, public_key)
+       VALUES ($1, $2, 'base', '84532', $3, 'secp256k1:03victim'),
+              ($4, $5, 'base', '84532', $6, 'secp256k1:03attacker')`,
+      [
+        randomUUID(),
+        victimWalletId,
+        victimBaseAddr,
+        randomUUID(),
+        attackerWalletId,
+        attackerBaseAddr,
+      ],
+    );
+
+    // 2. Consistency Trigger Verification:
+    // Test A: Wallet-account ownership mismatch must fail
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.wallet_activities (
+           account_id, wallet_id, network, chain_id, ecosystem,
+           activity_type, direction, tx_hash, event_index,
+           from_address, to_address, asset_symbol, atomic_amount, decimals,
+           finality, reorg_status
+         ) VALUES (
+           $1, $2, 'base', '84532', 'evm',
+           'ON_CHAIN_TRANSFER', 'INCOMING', '0xtx1', 0,
+           '0xexternal', $3, 'ETH', 1000000000000000000, 18,
+           'CONFIRMED', 'CANONICAL'
+         )`,
+        [attacker.accountId, victimWalletId, victimBaseAddr], // attacker account + victim wallet
+      ),
+      (err: unknown) => {
+        const e = err as { code?: string; message?: string };
+        assert.equal(e.code, "42501");
+        assert.ok(e.message?.includes("Account mismatch"));
+        return true;
+      },
+    );
+
+    // Test B: Network environment mismatch (testnet wallet with mainnet chain) must fail
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.wallet_activities (
+           account_id, wallet_id, network, chain_id, ecosystem,
+           activity_type, direction, tx_hash, event_index,
+           from_address, to_address, asset_symbol, atomic_amount, decimals,
+           finality, reorg_status
+         ) VALUES (
+           $1, $2, 'base', '8453', 'evm', -- 8453 is Base Mainnet!
+           'ON_CHAIN_TRANSFER', 'INCOMING', '0xtx2', 0,
+           '0xexternal', $3, 'ETH', 1000000000000000000, 18,
+           'CONFIRMED', 'CANONICAL'
+         )`,
+        [victim.accountId, victimWalletId, victimBaseAddr],
+      ),
+      (err: unknown) => {
+        const e = err as { code?: string; message?: string };
+        assert.equal(e.code, "23514");
+        assert.ok(e.message?.includes("Environment mismatch"));
+        return true;
+      },
+    );
+
+    // Test C: Unregistered address mismatch must fail
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.wallet_activities (
+           account_id, wallet_id, network, chain_id, ecosystem,
+           activity_type, direction, tx_hash, event_index,
+           from_address, to_address, asset_symbol, atomic_amount, decimals,
+           finality, reorg_status
+         ) VALUES (
+           $1, $2, 'base', '84532', 'evm',
+           'ON_CHAIN_TRANSFER', 'INCOMING', '0xtx3', 0,
+           '0xexternal1', '0xexternal2', 'ETH', 1000000000000000000, 18, -- neither matches victimBaseAddr!
+           'CONFIRMED', 'CANONICAL'
+         )`,
+        [victim.accountId, victimWalletId],
+      ),
+      (err: unknown) => {
+        const e = err as { code?: string; message?: string };
+        assert.equal(e.code, "23514");
+        assert.ok(e.message?.includes("Address mismatch"));
+        return true;
+      },
+    );
+
+    // 3. Insert valid activities for Victim and Attacker
+    const victimTxHash =
+      "0xvictim_tx_1111111111111111111111111111111111111111111111111111111111111111";
+    const attackerTxHash =
+      "0xattacker_tx_2222222222222222222222222222222222222222222222222222222222222222";
+
+    await workerClient.query(
+      `INSERT INTO flow.wallet_activities (
+         account_id, wallet_id, network, chain_id, ecosystem,
+         activity_type, direction, tx_hash, event_index,
+         from_address, to_address, asset_symbol, atomic_amount, decimals,
+         block_height, block_hash, finality, reorg_status, metadata
+       ) VALUES
+       ($1, $2, 'base', '84532', 'evm', 'ON_CHAIN_TRANSFER', 'INCOMING', $3, 0, '0xsender', $4, 'USDC', 100000000, 6, 100, '0xblock100', 'CONFIRMED', 'CANONICAL', '{"tag":"victim"}'),
+       ($5, $6, 'base', '84532', 'evm', 'ON_CHAIN_TRANSFER', 'INCOMING', $7, 0, '0xsender', $8, 'USDC', 50000000, 6, 101, '0xblock101', 'CONFIRMED', 'CANONICAL', '{"tag":"attacker"}')`,
+      [
+        victim.accountId,
+        victimWalletId,
+        victimTxHash,
+        victimBaseAddr,
+        attacker.accountId,
+        attackerWalletId,
+        attackerTxHash,
+        attackerBaseAddr,
+      ],
+    );
+
+    // 4. Adversarial RLS Isolation:
+    // Attacker sets session to their own valid session token
+    await appClient.query("BEGIN");
+    await appClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [attackerSessionToken],
+    );
+
+    // Attacker queries their own activities: sees exactly 1 (attackerTxHash)
+    const myActs = await appClient.query(
+      `SELECT tx_hash, account_id FROM flow.wallet_activities`,
+    );
+    assert.equal(myActs.rows.length, 1);
+    assert.equal(myActs.rows[0]!.tx_hash, attackerTxHash);
+    assert.equal(myActs.rows[0]!.account_id, attacker.accountId);
+
+    // Attacker tries to query victim's account directly: 0 rows returned
+    const victimActs = await appClient.query(
+      `SELECT * FROM flow.wallet_activities WHERE account_id = $1::uuid`,
+      [victim.accountId],
+    );
+    assert.equal(victimActs.rows.length, 0);
+
+    // Attacker tries arbitrary session token spoofing: 0 rows returned
+    await appClient.query(
+      `SELECT set_config('flow.current_session_token', 'forged_fake_token', true)`,
+    );
+    const spoofedActs = await appClient.query(
+      `SELECT * FROM flow.wallet_activities`,
+    );
+    assert.equal(spoofedActs.rows.length, 0);
+
+    // Attacker tries custom GUC manipulation: 0 rows returned
+    await appClient.query(
+      `SELECT set_config('flow.current_account_id', $1, true)`,
+      [victim.accountId],
+    );
+    const gucSpoofed = await appClient.query(
+      `SELECT * FROM flow.wallet_activities`,
+    );
+    assert.equal(gucSpoofed.rows.length, 0);
+
+    // Attacker tries to insert, update, or delete: rejected at table privilege level
+    await assert.rejects(
+      appClient.query(`DELETE FROM flow.wallet_activities WHERE tx_hash = $1`, [
+        victimTxHash,
+      ]),
+      (err: unknown) => {
+        const e = err as { code?: string };
+        assert.equal(e.code, "42501");
+        return true;
+      },
+    );
+
+    await appClient.query("ROLLBACK");
+
+    // Legitimate Tenant (Victim) queries their own activities: sees exactly 1 (victimTxHash)
+    await appClient.query("BEGIN");
+    await appClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [victimSessionToken],
+    );
+    const victimRead = await appClient.query(
+      `SELECT tx_hash, account_id FROM flow.wallet_activities`,
+    );
+    assert.equal(victimRead.rows.length, 1);
+    assert.equal(victimRead.rows[0]!.tx_hash, victimTxHash);
+    assert.equal(victimRead.rows[0]!.account_id, victim.accountId);
+    await appClient.query("ROLLBACK");
+
+    // 5. Idempotent Upsert & Deduplication:
+    // Upserting the same (network, tx_hash, event_index) updates finality without duplicating
+    const upsertRes = await workerClient.query(
+      `INSERT INTO flow.wallet_activities (
+         account_id, wallet_id, network, chain_id, ecosystem,
+         activity_type, direction, tx_hash, event_index,
+         from_address, to_address, asset_symbol, atomic_amount, decimals,
+         block_height, block_hash, finality, reorg_status, metadata
+       ) VALUES (
+         $1, $2, 'base', '84532', 'evm', 'ON_CHAIN_TRANSFER', 'INCOMING', $3, 0,
+         '0xsender', $4, 'USDC', 100000000, 6, 100, '0xblock100', 'FINALIZED', 'CANONICAL', '{"updated":true}'
+       )
+       ON CONFLICT (network, tx_hash, event_index)
+       DO UPDATE SET
+         finality = EXCLUDED.finality,
+         metadata = flow.wallet_activities.metadata || EXCLUDED.metadata,
+         updated_at = now()
+       RETURNING id, finality, metadata`,
+      [victim.accountId, victimWalletId, victimTxHash, victimBaseAddr],
+    );
+
+    assert.equal(upsertRes.rows.length, 1);
+    assert.equal(upsertRes.rows[0]!.finality, "FINALIZED");
+    assert.equal(
+      (upsertRes.rows[0]!.metadata as Record<string, unknown>).updated,
+      true,
+    );
+
+    // Total rows for victim remains 1
+    const totalCount = await workerClient.query<{ count: string }>(
+      `SELECT count(*)::text as count FROM flow.wallet_activities WHERE account_id = $1::uuid`,
+      [victim.accountId],
+    );
+    assert.equal(totalCount.rows[0]!.count, "1");
+
+    // 6. Reorg Handling: Conflicting block hash updates reorg_status to REORG_DETECTED
+    await workerClient.query(
+      `INSERT INTO flow.wallet_activities (
+         account_id, wallet_id, network, chain_id, ecosystem,
+         activity_type, direction, tx_hash, event_index,
+         from_address, to_address, asset_symbol, atomic_amount, decimals,
+         block_height, block_hash, finality, reorg_status
+       ) VALUES (
+         $1, $2, 'base', '84532', 'evm', 'ON_CHAIN_TRANSFER', 'INCOMING', $3, 0,
+         '0xsender', $4, 'USDC', 100000000, 6, 100, '0xreorged_block_hash', 'CONFIRMED', 'CANONICAL'
+       )
+       ON CONFLICT (network, tx_hash, event_index)
+       DO UPDATE SET
+         reorg_status = CASE
+           WHEN flow.wallet_activities.block_hash IS NOT NULL
+             AND EXCLUDED.block_hash IS NOT NULL
+             AND flow.wallet_activities.block_hash <> EXCLUDED.block_hash
+           THEN 'REORGED'
+           ELSE flow.wallet_activities.reorg_status
+         END`,
+      [victim.accountId, victimWalletId, victimTxHash, victimBaseAddr],
+    );
+
+    const reorgCheck = await workerClient.query<{ reorg_status: string }>(
+      `SELECT reorg_status FROM flow.wallet_activities WHERE tx_hash = $1`,
+      [victimTxHash],
+    );
+    assert.equal(reorgCheck.rows[0]!.reorg_status, "REORGED");
+  } finally {
+    adminClient.release();
+    workerClient.release();
+    appClient.release();
   }
 });

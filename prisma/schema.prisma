@@ -190,6 +190,7 @@ model FlowAccount {
   compatibilityAuthorizations ProviderCompatibilityAuthorization[]
   recoveryApprovals CustodyRecoveryApproval[]
   refreshLease    PortfolioRefreshLease?
+  activities      WalletActivity[]
 
   @@unique([id, kind])
   @@map("accounts")
@@ -301,6 +302,7 @@ model FlowWallet {
   addresses           WalletAddress[]
   capabilities        WalletCapability[]
   balances            WalletBalance[]
+  activities          WalletActivity[]
 
   @@index([providerWalletId])
   @@map("wallets")
@@ -439,6 +441,7 @@ model FlowAsset {
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @default(now()) @updatedAt @map("updated_at")
   networkAssets NetworkAsset[]
+  activities    WalletActivity[]
 
   @@index([symbol])
   @@map("assets")
@@ -462,6 +465,7 @@ model NetworkAsset {
   updatedAt         DateTime        @default(now()) @updatedAt @map("updated_at")
   asset             FlowAsset       @relation(fields: [assetId], references: [id], onDelete: Restrict)
   balances          WalletBalance[]
+  activities        WalletActivity[]
 
   @@index([network, chainId])
   @@index([contractAddress])
@@ -520,3 +524,45 @@ model AuthIssuanceTicket {
   @@map("auth_issuance_tickets")
   @@schema("flow")
 }
+
+model WalletActivity {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  accountId        String        @map("account_id") @db.Uuid
+  walletId         String        @map("wallet_id") @db.Uuid
+  network          String
+  chainId          String        @map("chain_id")
+  ecosystem        String
+  activityType     String        @default("ON_CHAIN_TRANSFER") @map("activity_type")
+  direction        String
+  txHash           String        @map("tx_hash")
+  eventIndex       Int           @default(0) @map("event_index")
+  fromAddress      String        @map("from_address")
+  toAddress        String        @map("to_address")
+  assetId          String?       @map("asset_id") @db.Uuid
+  networkAssetId   String?       @map("network_asset_id") @db.Uuid
+  assetSymbol      String        @map("asset_symbol")
+  atomicAmount     Decimal       @default(0) @map("atomic_amount") @db.Decimal(78, 0)
+  decimals         Int           @default(18)
+  blockHeight      BigInt?       @map("block_height")
+  blockHash        String?       @map("block_hash")
+  blockTimestamp   DateTime?     @default(now()) @map("block_timestamp")
+  finality         String        @default("FINALIZED")
+  reorgStatus      String        @default("CANONICAL") @map("reorg_status")
+  feeAtomicAmount  Decimal?      @map("fee_atomic_amount") @db.Decimal(78, 0)
+  metadata         Json          @default("{}")
+  observedAt       DateTime      @default(now()) @map("observed_at")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @default(now()) @updatedAt @map("updated_at")
+  account          FlowAccount   @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  wallet           FlowWallet    @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  asset            FlowAsset?    @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  networkAsset     NetworkAsset? @relation(fields: [networkAssetId], references: [id], onDelete: Restrict)
+
+  @@unique([network, txHash, eventIndex])
+  @@index([accountId, blockTimestamp(sort: Desc), id(sort: Desc)])
+  @@index([walletId, network])
+  @@index([txHash])
+  @@map("wallet_activities")
+  @@schema("flow")
+}
+

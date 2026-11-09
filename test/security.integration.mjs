@@ -2,16 +2,27 @@ import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import pg from "pg";
 import { securityServer } from "./support/security-server.mjs";
 
 let app;
+let workerDb;
 const sessionCookie = "__Host-flow-test-session";
 
 before(async () => {
   app = await securityServer();
+  if (process.env.FLOW_WORKER_DATABASE_URL) {
+    workerDb = new pg.Pool({
+      connectionString: process.env.FLOW_WORKER_DATABASE_URL,
+      max: 2,
+    });
+  }
 });
 
 after(async () => {
+  if (workerDb) {
+    await workerDb.end();
+  }
   if (!app) return;
   try {
     const { rows } = await app.db.query("SELECT token FROM flow.auth_sessions");
@@ -1197,6 +1208,137 @@ test("m3 phase 3: authenticated portfolio API — authorization, cross-tenant is
   const cooldownData = await ownerGetDuringCooldown.json();
   assert.ok(cooldownData.cooldownRemainingSeconds > 0);
   assert.ok(cooldownData.cooldownRemainingSeconds <= 15);
+});
+
+test("m3 phase 4: authenticated activities API — authorization, cross-tenant isolation, pagination, and activity ingestion", async () => {
+  const owner = await person("activities-owner-p4@example.com");
+  const stranger = await person("activities-stranger-p4@example.com");
+  const unauth = await app.createClient();
+
+  // 1. Unauthenticated GET returns 401
+  const unauthRes = await unauth.get(
+    `/api/accounts/${owner.account.id}/activities`,
+  );
+  assert.equal(unauthRes.status(), 401);
+
+  // 2. Cross-tenant GET returns 404
+  const strangerRes = await stranger.client.get(
+    `/api/accounts/${owner.account.id}/activities`,
+  );
+  assert.equal(strangerRes.status(), 404);
+
+  // 3. Authenticated owner GET returns 200 with empty activities initially
+  const ownerRes = await owner.client.get(
+    `/api/accounts/${owner.account.id}/activities`,
+  );
+  assert.equal(ownerRes.status(), 200);
+  const data = await ownerRes.json();
+  assert.ok(Array.isArray(data.activities));
+  assert.equal(data.total, 0);
+  assert.equal(data.limit, 20);
+  assert.equal(data.offset, 0);
+  assert.equal(data.hasMore, false);
+
+  // 4. Test bounded pagination parameters
+  const pageRes = await owner.client.get(
+    `/api/accounts/${owner.account.id}/activities?limit=5&offset=10`,
+  );
+  assert.equal(pageRes.status(), 200);
+  const pageData = await pageRes.json();
+  assert.equal(pageData.limit, 5);
+  assert.equal(pageData.offset, 10);
+
+  // 5. Verify app role is denied direct write on wallet tables and activities, then insert verified on-chain activity using worker role
+  const txHash =
+    "0x4e83c748c89b43c683790ec37a89ad65cfba4128f645a2789bd0e87612c3f841";
+  const walletId = randomUUID();
+  const ownerBaseAddr = "0xaa6bA2Ae7F20748B46A3DB221a418137ec54A5a2";
+
+  await assert.rejects(
+    app.db.query(
+      `INSERT INTO flow.wallets (id, account_id, provider, provider_wallet_id, near_account_id, encrypted_credential, key_id, key_digest, status, environment)
+       VALUES ($1, $2, 'outlayer', $3, 'owner-near.testnet', 'v1:dummy', 'v1', 'digest', 'ACTIVE', 'testnet')`,
+      [walletId, owner.account.id, `prov-${walletId}`],
+    ),
+    { code: "42501" },
+    "Ordinary app role must be forbidden from inserting wallets",
+  );
+
+  assert.ok(
+    workerDb,
+    "Worker database connection required for activity fixture",
+  );
+
+  await workerDb.query(
+    `INSERT INTO flow.wallets (id, account_id, provider, provider_wallet_id, near_account_id, encrypted_credential, key_id, key_digest, status, environment)
+     VALUES ($1, $2, 'outlayer', $3, 'owner-near.testnet', 'v1:dummy', 'v1', 'digest', 'ACTIVE', 'testnet')`,
+    [walletId, owner.account.id, `prov-${walletId}`],
+  );
+
+  await workerDb.query(
+    `INSERT INTO flow.wallet_addresses (id, wallet_id, network, chain_id, address, public_key)
+     VALUES ($1, $2, 'base', '84532', $3, 'secp256k1:03owner')`,
+    [randomUUID(), walletId, ownerBaseAddr],
+  );
+
+  await workerDb.query(
+    `INSERT INTO flow.wallet_activities (
+       account_id, wallet_id, network, chain_id, ecosystem,
+       activity_type, direction, tx_hash, event_index,
+       from_address, to_address, asset_symbol, atomic_amount, decimals,
+       block_height, block_hash, finality, reorg_status, metadata
+     ) VALUES (
+       $1, $2, 'base', '84532', 'evm', 'ON_CHAIN_TRANSFER', 'INCOMING', $3, 0,
+       '0xsender', $4, 'USDC', 150000000, 6, 18500200, '0xblock185', 'FINALIZED', 'CANONICAL', '{"client":"flow"}'
+     )`,
+    [owner.account.id, walletId, txHash, ownerBaseAddr],
+  );
+
+  // 6. Owner now reads 1 activity with complete serialized fields
+  const updatedOwnerRes = await owner.client.get(
+    `/api/accounts/${owner.account.id}/activities`,
+  );
+  assert.equal(updatedOwnerRes.status(), 200);
+  const updatedData = await updatedOwnerRes.json();
+  assert.equal(updatedData.total, 1);
+  assert.equal(updatedData.activities.length, 1);
+  const act = updatedData.activities[0];
+  assert.equal(act.txHash, txHash);
+  assert.equal(act.direction, "INCOMING");
+  assert.equal(act.activityType, "ON_CHAIN_TRANSFER");
+  assert.equal(act.assetSymbol, "USDC");
+  assert.equal(act.atomicAmount, "150000000");
+  assert.equal(act.displayAmount, "150");
+  assert.equal(act.finality, "FINALIZED");
+  assert.equal(act.reorgStatus, "CANONICAL");
+  assert.equal(act.explorerUrl, `https://sepolia.basescan.org/tx/${txHash}`);
+
+  // 7. Stranger still sees 0 activities for their own account and 404 for owner
+  const strangerOwnRes = await stranger.client.get(
+    `/api/accounts/${stranger.account.id}/activities`,
+  );
+  assert.equal(strangerOwnRes.status(), 200);
+  const strangerOwnData = await strangerOwnRes.json();
+  assert.equal(strangerOwnData.total, 0);
+
+  // 8. Test sync endpoint
+  const unauthSync = await unauth.post(
+    `/api/accounts/${owner.account.id}/activities/sync`,
+  );
+  assert.equal(unauthSync.status(), 401);
+
+  const strangerSync = await stranger.client.post(
+    `/api/accounts/${owner.account.id}/activities/sync`,
+  );
+  assert.equal(strangerSync.status(), 404);
+
+  const ownerSync = await owner.client.post(
+    `/api/accounts/${owner.account.id}/activities/sync`,
+  );
+  assert.equal(ownerSync.status(), 200);
+  const syncData = await ownerSync.json();
+  assert.ok(syncData.syncSummary);
+  assert.equal(typeof syncData.syncSummary.totalDiscovered, "number");
 });
 
 test("FLOW desktop brand UI: multi-chain routing, curated asset registry, workspace navigation, and truthfulness gates", async () => {
