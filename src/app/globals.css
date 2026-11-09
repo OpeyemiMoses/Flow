@@ -2,32 +2,49 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+@theme {
+  --font-serif:
+    "Playfair Display", Georgia, Cambria, "Times New Roman", Times, serif;
+  --font-sans:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono:
+    "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas,
+    monospace;
+  --color-flow-red: #ff1a1a;
+  --color-flow-red-deep: #b30000;
+  --color-flow-black: #0b0b0b;
+  --color-flow-charcoal: #1f1f1f;
+  --color-flow-offwhite: #f8f6f3;
+}
+
 :root {
-  --flow-navy: #0b1f4b;
-  --flow-blue: #2563ff;
-  --flow-blue-hover: #1d4ed8;
-  --flow-mint: #34d8b2;
-  --flow-charcoal: #2e3440;
-  --flow-fog: #e8ecf3;
-  --flow-offwhite: #f8fafc;
+  --flow-black: #0b0b0b;
+  --flow-charcoal: #1f1f1f;
+  --flow-white: #ffffff;
+  --flow-offwhite: #f8f6f3;
+  --flow-red: #ff1a1a;
+  --flow-red-deep: #b30000;
+  --flow-red-glow: rgba(255, 26, 26, 0.16);
 
-  --surface-canvas: #f8fafc;
+  --surface-canvas: #ffffff;
+  --surface-canvas-subtle: #f8f6f3;
   --surface-card: #ffffff;
-  --surface-subtle: #f1f5f9;
+  --surface-subtle: #f8f6f3;
   --surface-elevated: #ffffff;
-  --border-subtle: #e8ecf3;
-  --border-strong: #cbd5e1;
-  --text-primary: #0b1f4b;
-  --text-secondary: #2e3440;
-  --text-muted: #64748b;
+  --border-subtle: #e5e5e5;
+  --border-strong: #0b0b0b;
+  --text-primary: #0b0b0b;
+  --text-secondary: #3b3b3b;
+  --text-muted: #737373;
 
-  --radius-chip: 4px;
-  --radius-control: 8px;
-  --radius-card: 16px;
+  --radius-chip: 6px;
+  --radius-control: 10px;
+  --radius-card: 20px;
+  --radius-pill: 9999px;
 
-  --font-display:
-    "Cal Sans", "Plus Jakarta Sans", "Inter", -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, sans-serif;
+  --font-serif:
+    "Playfair Display", Georgia, Cambria, "Times New Roman", Times, serif;
+  --font-display: var(--font-serif);
   --font-sans:
     "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono:
@@ -36,15 +53,16 @@
 }
 
 html.dark {
-  --surface-canvas: #060e24;
-  --surface-card: #0b1736;
-  --surface-subtle: #102048;
-  --surface-elevated: #132552;
-  --border-subtle: #1e315c;
-  --border-strong: #2d467e;
-  --text-primary: #f8fafc;
-  --text-secondary: #cbd5e1;
-  --text-muted: #94a3b8;
+  --surface-canvas: #0b0b0b;
+  --surface-canvas-subtle: #141414;
+  --surface-card: #141414;
+  --surface-subtle: #1f1f1f;
+  --surface-elevated: #262626;
+  --border-subtle: #262626;
+  --border-strong: #404040;
+  --text-primary: #ffffff;
+  --text-secondary: #d4d4d4;
+  --text-muted: #888888;
 }
 
 @layer base {
@@ -65,9 +83,9 @@ html.dark {
   h1,
   h2,
   h3,
-  .font-display {
-    font-family: var(--font-display);
-    letter-spacing: -0.025em;
+  .font-serif {
+    font-family: var(--font-serif);
+    letter-spacing: -0.02em;
   }
 }
 
@@ -76,8 +94,8 @@ html.dark {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-card);
   box-shadow:
-    0 1px 3px 0 rgba(11, 31, 75, 0.03),
-    0 4px 12px -2px rgba(11, 31, 75, 0.04);
+    0 1px 3px 0 rgba(0, 0, 0, 0.03),
+    0 4px 16px -2px rgba(0, 0, 0, 0.04);
 }
 
 .flow-card-interactive {
@@ -85,8 +103,8 @@ html.dark {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-card);
   box-shadow:
-    0 1px 3px 0 rgba(11, 31, 75, 0.03),
-    0 4px 12px -2px rgba(11, 31, 75, 0.04);
+    0 1px 3px 0 rgba(0, 0, 0, 0.03),
+    0 4px 16px -2px rgba(0, 0, 0, 0.04);
   transition:
     border-color 150ms ease,
     box-shadow 150ms ease,
@@ -94,40 +112,41 @@ html.dark {
 }
 
 .flow-card-interactive:hover {
-  border-color: #cbd5e1;
+  border-color: #0b0b0b;
   box-shadow:
-    0 4px 16px -2px rgba(37, 99, 255, 0.08),
-    0 2px 6px -1px rgba(11, 31, 75, 0.04);
+    0 6px 20px -2px rgba(0, 0, 0, 0.08),
+    0 2px 6px -1px rgba(0, 0, 0, 0.04);
 }
 
+.flow-dark-banner,
 .flow-navy-banner {
   background:
     radial-gradient(
-      120% 140% at 92% 15%,
-      rgba(52, 216, 178, 0.24) 0%,
-      rgba(37, 99, 255, 0.28) 42%,
-      rgba(11, 31, 75, 0.98) 100%
+      100% 120% at 85% 15%,
+      rgba(255, 26, 26, 0.22) 0%,
+      rgba(255, 26, 26, 0.06) 45%,
+      transparent 80%
     ),
-    linear-gradient(135deg, #0b1f4b 0%, #102a63 60%, #16377d 100%);
+    linear-gradient(135deg, #0b0b0b 0%, #161616 60%, #1f1f1f 100%);
   color: #ffffff;
   border-radius: var(--radius-card);
 }
 
 .flow-btn-primary {
-  background: linear-gradient(135deg, #2563ff 0%, #1d4ed8 100%);
+  background: #0b0b0b;
   color: #ffffff;
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-pill);
   font-weight: 600;
   transition:
-    filter 150ms ease,
+    background-color 150ms ease,
     transform 100ms ease,
     box-shadow 150ms ease;
-  box-shadow: 0 2px 8px rgba(37, 99, 255, 0.25);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 .flow-btn-primary:hover:not(:disabled) {
-  filter: brightness(1.06);
-  box-shadow: 0 4px 12px rgba(37, 99, 255, 0.35);
+  background: #1f1f1f;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
 }
 
 .flow-btn-primary:disabled {
@@ -136,11 +155,29 @@ html.dark {
   box-shadow: none;
 }
 
+.flow-btn-red {
+  background: #ff1a1a;
+  color: #ffffff;
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+  transition:
+    background-color 150ms ease,
+    filter 150ms ease,
+    transform 100ms ease,
+    box-shadow 150ms ease;
+  box-shadow: 0 2px 10px rgba(255, 26, 26, 0.35);
+}
+
+.flow-btn-red:hover:not(:disabled) {
+  background: #e01212;
+  box-shadow: 0 4px 16px rgba(255, 26, 26, 0.45);
+}
+
 .flow-btn-secondary {
   background-color: var(--surface-card);
   color: var(--text-primary);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-control);
+  border-radius: var(--radius-pill);
   font-weight: 500;
   transition:
     background-color 150ms ease,
@@ -149,7 +186,7 @@ html.dark {
 
 .flow-btn-secondary:hover:not(:disabled) {
   background-color: var(--surface-subtle);
-  border-color: var(--border-strong);
+  border-color: #0b0b0b;
 }
 
 .flow-input {
@@ -164,8 +201,8 @@ html.dark {
 
 .flow-input:focus {
   outline: none;
-  border-color: var(--flow-blue);
-  box-shadow: 0 0 0 3px rgba(37, 99, 255, 0.16);
+  border-color: #ff1a1a;
+  box-shadow: 0 0 0 3px rgba(255, 26, 26, 0.15);
 }
 
 .flow-chip {

@@ -102,14 +102,14 @@ export function MarketingRoutePreview() {
     <div className="flow-card relative overflow-hidden p-6 sm:p-7">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-4">
         <div>
-          <span className="text-[11px] font-bold uppercase tracking-wider text-[#2563FF]">
+          <span className="text-[11px] font-bold uppercase tracking-wider text-[#FF1A1A]">
             Cross-Chain Routing Model
           </span>
           <h2 className="mt-0.5 text-lg font-bold text-[var(--text-primary)]">
             Sender &amp; Recipient Asset Decoupling
           </h2>
         </div>
-        <span className="inline-flex items-center gap-1.5 rounded-[4px] border border-amber-200 bg-amber-50 dark:bg-amber-950/50 dark:border-amber-800 px-2.5 py-1 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+        <span className="inline-flex items-center gap-1.5 rounded-[4px] border border-neutral-200 bg-neutral-50 dark:bg-neutral-900 dark:border-neutral-800 px-2.5 py-1 text-[11px] font-semibold text-neutral-800 dark:text-neutral-300">
           <IconLock size={12} />
           Interactive Preview · Execution Disabled
         </span>
@@ -164,8 +164,8 @@ export function MarketingRoutePreview() {
         {/* Center Route Connector */}
         <div className="relative flex items-center justify-center py-0.5">
           <div className="h-px w-full bg-[var(--border-subtle)]" />
-          <div className="absolute inline-flex items-center gap-1.5 rounded-full border border-[#2563FF]/30 bg-[var(--surface-card)] px-3 py-1 text-[11px] font-semibold text-[#2563FF] shadow-xs">
-            <IconSwap size={13} />
+          <div className="absolute inline-flex items-center gap-1.5 rounded-full border border-neutral-300 bg-[var(--surface-card)] px-3 py-1 text-[11px] font-semibold text-[#0B0B0B] dark:text-white shadow-xs">
+            <IconSwap size={13} className="text-[#FF1A1A]" />
             {source.networkLabel} ({source.symbol}) → {dest.networkLabel} (
             {dest.symbol})
           </div>
@@ -232,7 +232,7 @@ export function MarketingRoutePreview() {
           <span className="text-[var(--text-muted)]">
             Settlement Foundation
           </span>
-          <span className="font-mono text-[11px] text-[#2563FF] font-semibold">
+          <span className="font-mono text-[11px] text-[#FF1A1A] font-semibold">
             Double-entry ledger &amp; guest checkout
           </span>
         </div>
@@ -240,8 +240,8 @@ export function MarketingRoutePreview() {
           <span className="text-[var(--text-muted)]">
             Deposit Issuance &amp; Lifecycle
           </span>
-          <span className="inline-flex items-center gap-1 font-semibold text-[#0B1F4B] dark:text-[#34D8B2]">
-            <IconShield size={13} className="text-[#34D8B2]" />
+          <span className="inline-flex items-center gap-1 font-semibold text-[#0B0B0B] dark:text-neutral-200">
+            <IconShield size={13} className="text-[#FF1A1A]" />
             Deterministic Staged Instructions
           </span>
         </div>

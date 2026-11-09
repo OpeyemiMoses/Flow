@@ -18,11 +18,11 @@ export default async function TeamPage({
   );
   return (
     <main className="space-y-6">
-      <section className="flow-navy-banner relative overflow-hidden p-6 sm:p-8">
+      <section className="flow-dark-banner relative overflow-hidden p-6 sm:p-8">
         <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-36 w-full opacity-80" />
         <div className="relative z-10 flex flex-wrap items-center justify-between gap-4">
           <div className="space-y-1.5">
-            <span className="inline-flex items-center gap-1.5 rounded-[4px] bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-[#34D8B2]">
+            <span className="inline-flex items-center gap-1.5 rounded-[4px] bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-400">
               <IconBuilding size={13} />
               Business Team &amp; Role Governance
             </span>

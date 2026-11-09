@@ -27,13 +27,13 @@ export function CompleteOnboarding() {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3 text-sm font-medium text-[var(--text-primary)]">
-        <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#34D8B2]/20 text-[#0F9F80]">
+        <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-600 dark:text-emerald-400">
           <IconCheck size={14} />
         </span>
         <span>Authenticated identity verified</span>
       </div>
       <div className="flex items-center gap-3 text-sm font-medium text-[var(--text-primary)]">
-        <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#2563FF]/15 text-[#2563FF]">
+        <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-[#FF1A1A]/10 text-[#FF1A1A]">
           <IconShield size={14} />
         </span>
         <span>
@@ -56,7 +56,11 @@ export function CompleteOnboarding() {
           </button>
         </div>
       ) : (
-        <p role="status" className="pt-2 text-xs text-[var(--text-muted)]">
+        <p
+          role="status"
+          className="pt-2 text-xs text-[var(--text-muted)] flex items-center gap-2"
+        >
+          <span className="h-2 w-2 rounded-full bg-[#FF1A1A] animate-ping" />
           Opening your personal account…
         </p>
       )}

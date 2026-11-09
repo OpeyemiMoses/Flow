@@ -428,8 +428,8 @@ export function PortfolioView({
             <span
               className={`rounded-[4px] px-2 py-0.5 text-[10px] font-bold uppercase ${
                 isBusiness
-                  ? "bg-[#34D8B2]/15 text-[#0F9F80]"
-                  : "bg-[#2563FF]/10 text-[#2563FF]"
+                  ? "bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200"
+                  : "bg-[#FF1A1A]/10 text-[#FF1A1A]"
               }`}
             >
               {isBusiness ? "Business account" : "Personal account"}
@@ -440,8 +440,8 @@ export function PortfolioView({
             <span
               className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] ${
                 isBusiness
-                  ? "bg-[#34D8B2]/15 text-[#0F9F80]"
-                  : "bg-[#2563FF]/10 text-[#2563FF]"
+                  ? "bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200"
+                  : "bg-[#FF1A1A]/10 text-[#FF1A1A]"
               }`}
             >
               {isBusiness ? (
@@ -476,7 +476,7 @@ export function PortfolioView({
                   href={`/accounts/${acc.id}`}
                   className={`flex items-center justify-between rounded-[8px] px-2.5 py-1.5 text-xs font-medium transition-colors ${
                     acc.id === accountId
-                      ? "bg-[#2563FF]/10 text-[#2563FF] font-semibold"
+                      ? "bg-[#FF1A1A]/10 text-[#FF1A1A] font-semibold"
                       : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)]"
                   }`}
                 >
@@ -493,7 +493,7 @@ export function PortfolioView({
                   href={`/accounts/${acc.id}`}
                   className={`flex items-center justify-between rounded-[8px] px-2.5 py-1.5 text-xs font-medium transition-colors ${
                     acc.id === accountId
-                      ? "bg-[#2563FF]/10 text-[#2563FF] font-semibold"
+                      ? "bg-[#FF1A1A]/10 text-[#FF1A1A] font-semibold"
                       : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)]"
                   }`}
                 >
@@ -514,7 +514,7 @@ export function PortfolioView({
             onClick={() => setActiveTab("dashboard")}
             className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
               activeTab === "dashboard"
-                ? "bg-[#0B1F4B] text-white shadow-xs"
+                ? "bg-neutral-900 text-white shadow-xs"
                 : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
             }`}
           >
@@ -529,7 +529,7 @@ export function PortfolioView({
             onClick={() => setActiveTab("assets")}
             className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
               activeTab === "assets"
-                ? "bg-[#0B1F4B] text-white shadow-xs"
+                ? "bg-neutral-900 text-white shadow-xs"
                 : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
             }`}
           >
@@ -542,7 +542,7 @@ export function PortfolioView({
             onClick={() => setActiveTab("send")}
             className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
               activeTab === "send"
-                ? "bg-[#0B1F4B] text-white shadow-xs"
+                ? "bg-neutral-900 text-white shadow-xs"
                 : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
             }`}
           >
@@ -555,7 +555,7 @@ export function PortfolioView({
             onClick={() => setActiveTab("receive")}
             className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
               activeTab === "receive"
-                ? "bg-[#0B1F4B] text-white shadow-xs"
+                ? "bg-neutral-900 text-white shadow-xs"
                 : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
             }`}
           >
@@ -568,7 +568,7 @@ export function PortfolioView({
             onClick={() => setActiveTab("activity")}
             className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
               activeTab === "activity"
-                ? "bg-[#0B1F4B] text-white shadow-xs"
+                ? "bg-neutral-900 text-white shadow-xs"
                 : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
             }`}
           >
@@ -589,7 +589,7 @@ export function PortfolioView({
         </div>
 
         {/* Sidebar Wave Callout Card (matching Reference #4-#10) */}
-        <div className="flow-navy-banner relative overflow-hidden p-5">
+        <div className="flow-dark-banner relative overflow-hidden p-5">
           <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-28 w-full opacity-80" />
           <div className="relative z-10 space-y-2">
             <FlowLogo size={22} variant="inverse" />
@@ -612,7 +612,7 @@ export function PortfolioView({
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-[#2563FF]">
+                <span className="text-xs font-bold uppercase tracking-wider text-[#FF1A1A]">
                   {isBusiness
                     ? "Business account · Treasury & Team"
                     : "Personal account · Your Portfolio"}
@@ -689,11 +689,11 @@ export function PortfolioView({
         {activeTab === "dashboard" && (
           <div className="space-y-6">
             {/* Hero Portfolio / Treasury Banner */}
-            <section className="flow-navy-banner relative overflow-hidden p-6 sm:p-8">
+            <section className="flow-dark-banner relative overflow-hidden p-6 sm:p-8">
               <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-40 w-full opacity-85" />
               <div className="relative z-10 grid grid-cols-1 gap-6 lg:grid-cols-12 items-center">
                 <div className="lg:col-span-7 space-y-2">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-[#34D8B2]">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-emerald-500">
                     {isBusiness
                       ? "Organization Multi-Chain Treasury"
                       : "Multi-Chain Portfolio Overview"}
@@ -789,7 +789,7 @@ export function PortfolioView({
                     <span className="text-[11px] text-slate-300">
                       Your Workspace Role
                     </span>
-                    <p className="mt-1 font-display text-lg font-bold text-[#34D8B2]">
+                    <p className="mt-1 font-display text-lg font-bold text-emerald-500">
                       {currentAccount.role}
                     </p>
                   </div>
@@ -816,7 +816,7 @@ export function PortfolioView({
                     <button
                       type="button"
                       onClick={() => setActiveTab("assets")}
-                      className="text-xs font-semibold text-[#2563FF] hover:underline"
+                      className="text-xs font-semibold text-[#FF1A1A] hover:underline"
                     >
                       Explore All {CURATED_SUPPORTED_DEPLOYMENTS.length}{" "}
                       Supported Assets →
@@ -959,7 +959,7 @@ export function PortfolioView({
                               onClick={() =>
                                 copyAddress(addr.network, addr.address)
                               }
-                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#2563FF] hover:underline"
+                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#FF1A1A] hover:underline"
                             >
                               {copiedKey === addr.network ? (
                                 <>
@@ -993,14 +993,14 @@ export function PortfolioView({
                 <section className="flow-card p-5 space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#2563FF]">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF1A1A]">
                         Cross-Chain Routing
                       </span>
                       <h2 className="font-display text-sm font-bold text-[var(--text-primary)]">
                         Send One Asset, Settle Another
                       </h2>
                     </div>
-                    <IconSwap size={16} className="text-[#2563FF]" />
+                    <IconSwap size={16} className="text-[#FF1A1A]" />
                   </div>
 
                   <div className="space-y-2.5 text-xs">
@@ -1131,7 +1131,7 @@ export function PortfolioView({
                                   firstAddr.address,
                                 )
                               }
-                              className="text-[11px] font-semibold text-[#2563FF] hover:underline"
+                              className="text-[11px] font-semibold text-[#FF1A1A] hover:underline"
                             >
                               {copiedKey === `eco:${eco.family}`
                                 ? "Copied!"
@@ -1202,7 +1202,7 @@ export function PortfolioView({
                       onClick={() => setEcosystemFilter(tab.id)}
                       className={`rounded-[6px] px-3 py-1.5 text-xs font-semibold transition-colors ${
                         ecosystemFilter === tab.id
-                          ? "bg-[#2563FF] text-white"
+                          ? "bg-[#FF1A1A] text-white"
                           : "border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[var(--text-secondary)] hover:bg-[var(--surface-card)]"
                       }`}
                     >
@@ -1231,7 +1231,7 @@ export function PortfolioView({
                             onClick={() => setSelectedAssetId(catalog.id)}
                             className={`cursor-pointer transition-colors ${
                               selectedAssetId === catalog.id
-                                ? "bg-[#2563FF]/8"
+                                ? "bg-[#FF1A1A]/8"
                                 : "hover:bg-[var(--surface-subtle)]/60"
                             }`}
                           >
@@ -1291,7 +1291,7 @@ export function PortfolioView({
               <aside className="xl:col-span-4 flow-card p-5 space-y-4">
                 <div className="flex items-center justify-between border-b border-[var(--border-subtle)] pb-3">
                   <div>
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#2563FF]">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF1A1A]">
                       Asset Deployment Inspector
                     </span>
                     <h3 className="font-display text-base font-bold text-[var(--text-primary)]">
@@ -1368,7 +1368,7 @@ export function PortfolioView({
             <section className="xl:col-span-7 flow-card p-6 sm:p-7 space-y-6">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
                 <div>
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#2563FF]">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#FF1A1A]">
                     Decoupled Multi-Chain Routing
                   </span>
                   <h2 className="font-display text-xl font-bold text-[var(--text-primary)]">
@@ -1454,7 +1454,7 @@ export function PortfolioView({
                   <span className="font-bold text-[var(--text-primary)]">
                     2. Recipient Destination Network &amp; Settlement Asset
                   </span>
-                  <span className="rounded-[4px] bg-[#2563FF]/10 px-2 py-0.5 text-[10px] font-bold text-[#2563FF]">
+                  <span className="rounded-[4px] bg-[#FF1A1A]/10 px-2 py-0.5 text-[10px] font-bold text-[#FF1A1A]">
                     Independent Choice
                   </span>
                 </div>
@@ -1534,7 +1534,7 @@ export function PortfolioView({
             {/* Right Column: Route Summary Inspector */}
             <aside className="xl:col-span-5 flow-card p-6 space-y-5">
               <div>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-[#2563FF]">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF1A1A]">
                   Route Architecture Summary
                 </span>
                 <h3 className="mt-1 font-display text-base font-bold text-[var(--text-primary)]">
@@ -1620,7 +1620,7 @@ export function PortfolioView({
               {/* Left 7 Columns: Settlement Asset Preference + Registered Addresses */}
               <section className="xl:col-span-7 flow-card p-6 space-y-5">
                 <div>
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#2563FF]">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#FF1A1A]">
                     Recipient Settlement Preference
                   </span>
                   <h2 className="mt-1 font-display text-lg font-bold text-[var(--text-primary)]">
@@ -1653,7 +1653,7 @@ export function PortfolioView({
                     <span className="font-semibold text-[var(--text-primary)]">
                       Selected Settlement Target
                     </span>
-                    <span className="inline-flex items-center gap-1.5 font-bold text-[#2563FF]">
+                    <span className="inline-flex items-center gap-1.5 font-bold text-[#FF1A1A]">
                       <ChainBadge
                         chainKey={receiveDeployment.networkKey}
                         size={15}
@@ -1720,14 +1720,14 @@ export function PortfolioView({
               <aside className="xl:col-span-5 flow-card p-6 space-y-5">
                 <div className="flex items-center justify-between">
                   <div>
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#2563FF]">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF1A1A]">
                       Payment Requests
                     </span>
                     <h3 className="font-display text-base font-bold text-[var(--text-primary)]">
                       Create Payment Link
                     </h3>
                   </div>
-                  <span className="rounded-[4px] bg-[#2563FF]/10 px-2 py-0.5 text-[11px] font-semibold text-[#2563FF]">
+                  <span className="rounded-[4px] bg-[#FF1A1A]/10 px-2 py-0.5 text-[11px] font-semibold text-[#FF1A1A]">
                     {
                       paymentRequests.filter((r) => r.status === "ACTIVE")
                         .length
@@ -1899,7 +1899,7 @@ export function PortfolioView({
                             <Link
                               href={`/pay/${req.publicId}`}
                               target="_blank"
-                              className="flow-btn-secondary px-2 py-1 text-[10px] shrink-0 text-[#2563FF]"
+                              className="flow-btn-secondary px-2 py-1 text-[10px] shrink-0 text-[#FF1A1A]"
                             >
                               Open
                             </Link>
@@ -1961,7 +1961,7 @@ export function PortfolioView({
                 <span className="text-xs font-medium text-[var(--text-muted)]">
                   Balance Observations
                 </span>
-                <p className="mt-1 font-display text-2xl font-extrabold text-[#2563FF]">
+                <p className="mt-1 font-display text-2xl font-extrabold text-[#FF1A1A]">
                   {balances.length}
                 </p>
                 <span className="text-[11px] text-[var(--text-muted)]">
@@ -2096,7 +2096,7 @@ export function PortfolioView({
                                   href={explorer}
                                   target="_blank"
                                   rel="noreferrer"
-                                  className="text-[#2563FF] hover:underline"
+                                  className="text-[#FF1A1A] hover:underline"
                                 >
                                   {truncateMiddle(act.txHash, 6, 4)} ↗
                                 </a>

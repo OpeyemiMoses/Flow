@@ -71,7 +71,7 @@ export function TeamManager({
         {/* Left 5 Columns: Invite Form + Role Governance */}
         <div className="lg:col-span-5 space-y-6">
           <section className="flow-card p-6 space-y-4">
-            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[#2563FF]">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[#FF1A1A]">
               <IconUsers size={15} />
               <span>Organization Access</span>
             </div>
@@ -156,7 +156,7 @@ export function TeamManager({
               <h2 className="font-display text-base font-bold text-[var(--text-primary)]">
                 Members
               </h2>
-              <span className="rounded-[4px] bg-[#34D8B2]/15 px-2.5 py-0.5 text-[11px] font-bold text-[#0F9F80]">
+              <span className="rounded-[4px] bg-emerald-400/15 px-2.5 py-0.5 text-[11px] font-bold text-[#0F9F80]">
                 {members.length} Active
               </span>
             </div>

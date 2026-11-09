@@ -71,7 +71,7 @@ export function googleNavigate(url: string) {
 export function Feedback({ text }: { text: string }) {
   return text ? (
     <p
-      className="rounded-[8px] border border-[#2563FF]/30 bg-[#2563FF]/5 px-4 py-2.5 text-xs font-semibold text-[var(--text-primary)]"
+      className="rounded-[8px] border border-[#FF1A1A]/30 bg-[#FF1A1A]/5 px-4 py-2.5 text-xs font-semibold text-[var(--text-primary)]"
       role="status"
     >
       {text}
@@ -177,11 +177,11 @@ export function FreshProof({
 
   return (
     <section
-      className="flow-card p-6 space-y-4 border-l-4 border-l-[#2563FF]"
+      className="flow-card p-6 space-y-4 border-l-4 border-l-[#FF1A1A]"
       aria-label="Security confirmation"
     >
       <div className="flex items-start gap-3">
-        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] bg-[#2563FF]/10 text-[#2563FF]">
+        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[8px] bg-[#FF1A1A]/10 text-[#FF1A1A]">
           <IconShield size={18} />
         </span>
         <div>

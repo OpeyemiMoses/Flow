@@ -1347,7 +1347,11 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
     ignoreHTTPSErrors: true,
     viewport: { width: 1440, height: 900 },
   });
-  const screenshotDir = process.env.FLOW_CAPTURE_SCREENSHOTS_DIR;
+  const brainArtifactDir =
+    "/Users/user/.gemini/antigravity/brain/799cfa99-869c-4a92-b3b0-b81a38ecce2b";
+  const screenshotDir =
+    process.env.FLOW_CAPTURE_SCREENSHOTS_DIR ||
+    (existsSync(brainArtifactDir) ? brainArtifactDir : null);
   const snap = async (page, filename) => {
     if (!screenshotDir) return;
     await page.waitForTimeout(250);
@@ -1374,10 +1378,18 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
     assert.ok(!/pay\.flow\.com/i.test(landingBody));
     await snap(page, "01-marketing-landing.png");
 
+    await page.setViewportSize({ width: 390, height: 844 });
+    await snap(page, "01-marketing-landing-mobile.png");
+    await page.setViewportSize({ width: 1440, height: 900 });
+
     // 2. Sign-In & Email OTP (/sign-in)
     await page.goto(`${app.origin}/sign-in`);
     await page.getByRole("heading", { name: "Sign in to FLOW" }).waitFor();
     await snap(page, "02-sign-in.png");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await snap(page, "02-sign-in-mobile.png");
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     const uiEmail = "flow-ui-brand@example.test";
     await page.getByLabel("Email address").fill(uiEmail);
@@ -1395,6 +1407,10 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
       .waitFor();
     assert.ok(await page.getByText("Wallet setup pending").isVisible());
     await snap(page, "04-personal-dashboard.png");
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await snap(page, "04-personal-dashboard-mobile.png");
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     // 4. Wallets & Supported Assets view
     await page.getByRole("button", { name: "Wallets & Assets" }).click();
@@ -1666,6 +1682,11 @@ test("m5 phase 1: payment requests & public guest checkout — authorization, cr
       await page.screenshot({
         path: `${brainArtifactDir}/14-public-guest-checkout-wallet.png`,
       });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.screenshot({
+        path: `${brainArtifactDir}/14-public-guest-checkout-wallet-mobile.png`,
+      });
+      await page.setViewportSize({ width: 1440, height: 900 });
     }
 
     // Switch to Exchange Withdrawal mode

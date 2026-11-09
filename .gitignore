@@ -26,3 +26,4 @@ postgres-data/
 coverage/
 work/
 outputs/
+public/assets/reference/

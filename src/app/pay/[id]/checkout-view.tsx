@@ -306,7 +306,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
             <span className="text-sm font-semibold tracking-wide text-[var(--text-primary)]">
               FLOW Checkout
             </span>
-            <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-[#34D8B2]/10 px-2.5 py-0.5 text-xs font-medium text-[#0F9F80] border border-[#34D8B2]/30">
+            <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
               <IconShield size={12} />
               Public Payment Link
             </span>
@@ -320,7 +320,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
             >
               {copiedLink ? (
                 <>
-                  <IconCheck size={13} className="text-[#34D8B2]" />
+                  <IconCheck size={13} className="text-emerald-500" />
                   Copied
                 </>
               ) : (
@@ -346,8 +346,8 @@ export function CheckoutView({ request }: CheckoutViewProps) {
         )}
 
         {/* Execution Guardrail Notice */}
-        <div className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-4 text-xs text-[var(--text-secondary)] flex items-start gap-3">
-          <IconInfo size={16} className="text-[#2563FF] shrink-0 mt-0.5" />
+        <div className="rounded-xl border border-[#FF1A1A]/20 bg-neutral-50 dark:bg-neutral-900 p-4 text-xs text-[var(--text-secondary)] flex items-start gap-3">
+          <IconInfo size={16} className="text-[#FF1A1A] shrink-0 mt-0.5" />
           <div className="space-y-1">
             <div className="font-medium text-[var(--text-primary)]">
               M5 Phase 3 Staged Checkout · Verified Quote Integrity &amp;
@@ -402,7 +402,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                   <span className="text-[var(--text-secondary)]">
                     Settlement Asset
                   </span>
-                  <span className="font-semibold text-[#2563FF] dark:text-[#3876FF]">
+                  <span className="font-semibold text-[#FF1A1A] dark:text-[#3876FF]">
                     {request.destinationAssetSymbol}
                   </span>
                 </div>
@@ -419,7 +419,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
               </div>
 
               {/* Amount Display */}
-              <div className="rounded-xl border border-[#2563FF]/20 bg-[#2563FF]/5 p-4 text-center space-y-1">
+              <div className="rounded-xl border border-[#FF1A1A]/20 bg-[#FF1A1A]/5 p-4 text-center space-y-1">
                 <span className="text-xs font-medium text-[var(--text-secondary)]">
                   {request.amountMode === "FIXED"
                     ? "Requested Amount"
@@ -443,20 +443,20 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                 Checkout Protocol Progress
               </h3>
               <ol className="space-y-2.5 text-xs">
-                <li className="flex items-center gap-2.5 text-[#34D8B2] font-medium">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#34D8B2]/20 text-[10px]">
+                <li className="flex items-center gap-2.5 text-emerald-500 font-medium">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/20 text-[10px]">
                     ✓
                   </span>
                   1. View Request & Recipient
                 </li>
-                <li className="flex items-center gap-2.5 text-[#34D8B2] font-medium">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#34D8B2]/20 text-[10px]">
+                <li className="flex items-center gap-2.5 text-emerald-500 font-medium">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/20 text-[10px]">
                     ✓
                   </span>
                   2. Choose Source Asset & Network
                 </li>
-                <li className="flex items-center gap-2.5 text-[#2563FF] font-medium">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#2563FF]/20 text-[10px]">
+                <li className="flex items-center gap-2.5 text-[#FF1A1A] font-medium">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#FF1A1A]/20 text-[10px]">
                     3
                   </span>
                   3. Real Indicative Quote Discovery (M5 Phase 2)
@@ -541,7 +541,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                     onClick={() => setPayerMode("WALLET")}
                     className={`flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${
                       payerMode === "WALLET"
-                        ? "bg-[var(--bg-card)] text-[#2563FF] shadow-sm border border-[var(--border-subtle)]"
+                        ? "bg-[var(--bg-card)] text-[#FF1A1A] shadow-sm border border-[var(--border-subtle)]"
                         : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     }`}
                   >
@@ -553,7 +553,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                     onClick={() => setPayerMode("EXCHANGE")}
                     className={`flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${
                       payerMode === "EXCHANGE"
-                        ? "bg-[var(--bg-card)] text-[#2563FF] shadow-sm border border-[var(--border-subtle)]"
+                        ? "bg-[var(--bg-card)] text-[#FF1A1A] shadow-sm border border-[var(--border-subtle)]"
                         : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
                     }`}
                   >
@@ -587,7 +587,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                         value={refundAddress}
                         onChange={(e) => setRefundAddress(e.target.value)}
                         placeholder="Enter 0x... or Solana Base58 or NEAR account"
-                        className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:border-[#2563FF] focus:outline-none"
+                        className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:border-[#FF1A1A] focus:outline-none"
                       />
                       {refundValidationMessage && (
                         <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1 font-medium">
@@ -612,7 +612,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                       }}
                       className={`flex-1 py-2 px-3 rounded-xl border text-xs font-medium transition-all ${
                         selectedEcosystem === "evm"
-                          ? "border-[#2563FF] bg-[#2563FF]/10 text-[#2563FF] font-semibold"
+                          ? "border-[#FF1A1A] bg-[#FF1A1A]/10 text-[#FF1A1A] font-semibold"
                           : "border-[var(--border-subtle)] bg-[var(--bg-app)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]"
                       }`}
                     >
@@ -626,7 +626,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                       }}
                       className={`flex-1 py-2 px-3 rounded-xl border text-xs font-medium transition-all ${
                         selectedEcosystem === "solana"
-                          ? "border-[#2563FF] bg-[#2563FF]/10 text-[#2563FF] font-semibold"
+                          ? "border-[#FF1A1A] bg-[#FF1A1A]/10 text-[#FF1A1A] font-semibold"
                           : "border-[var(--border-subtle)] bg-[var(--bg-app)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]"
                       }`}
                     >
@@ -640,7 +640,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                       }}
                       className={`flex-1 py-2 px-3 rounded-xl border text-xs font-medium transition-all ${
                         selectedEcosystem === "near"
-                          ? "border-[#2563FF] bg-[#2563FF]/10 text-[#2563FF] font-semibold"
+                          ? "border-[#FF1A1A] bg-[#FF1A1A]/10 text-[#FF1A1A] font-semibold"
                           : "border-[var(--border-subtle)] bg-[var(--bg-app)] text-[var(--text-secondary)] hover:border-[var(--border-strong)]"
                       }`}
                     >
@@ -664,7 +664,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                           onClick={() => setSelectedRouteId(route.id)}
                           className={`flex items-start justify-between p-3 rounded-xl border text-left transition-all ${
                             isSelected
-                              ? "border-[#2563FF] bg-[#2563FF]/10 shadow-sm"
+                              ? "border-[#FF1A1A] bg-[#FF1A1A]/10 shadow-sm"
                               : "border-[var(--border-subtle)] bg-[var(--bg-app)] hover:border-[var(--border-strong)]"
                           }`}
                         >
@@ -685,7 +685,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                             className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
                               route.routeType === "DIRECT_TRANSFER"
                                 ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-                                : "bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20"
+                                : "bg-[#FF1A1A]/10 text-[#FF1A1A] dark:text-blue-400 border border-[#FF1A1A]/20"
                             }`}
                           >
                             {route.routeType === "DIRECT_TRANSFER"
@@ -709,7 +709,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                       value={customAmount}
                       onChange={(e) => setCustomAmount(e.target.value)}
                       placeholder="e.g. 25"
-                      className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-app)] px-3.5 py-2 text-sm text-[var(--text-primary)] font-semibold focus:border-[#2563FF] focus:outline-none"
+                      className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-app)] px-3.5 py-2 text-sm text-[var(--text-primary)] font-semibold focus:border-[#FF1A1A] focus:outline-none"
                     />
                   </div>
                 )}
@@ -728,7 +728,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                             instructions.status === "SETTLED"
                               ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
                               : instructions.status === "SETTLING"
-                                ? "bg-[#2563FF]/10 text-[#2563FF] border-[#2563FF]/30"
+                                ? "bg-[#FF1A1A]/10 text-[#FF1A1A] border-[#FF1A1A]/30"
                                 : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30"
                           }`}
                         >
@@ -739,7 +739,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                             </>
                           ) : instructions.status === "SETTLING" ? (
                             <>
-                              <span className="h-1.5 w-1.5 rounded-full bg-[#2563FF] animate-ping" />
+                              <span className="h-1.5 w-1.5 rounded-full bg-[#FF1A1A] animate-ping" />
                               SETTLING
                             </>
                           ) : (
@@ -802,7 +802,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                                 <span className="text-[var(--text-secondary)]">
                                   Settlement Tx:
                                 </span>
-                                <span className="font-mono text-[#2563FF]">
+                                <span className="font-mono text-[#FF1A1A]">
                                   {instructions.destinationTxHash.slice(0, 10)}
                                   ...
                                   {instructions.destinationTxHash.slice(-8)}
@@ -817,7 +817,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                               setInstructions(null);
                               setRefreshTrigger((n) => n + 1);
                             }}
-                            className="w-full rounded-xl bg-[var(--bg-card)] border border-[var(--border-subtle)] py-2.5 text-center text-xs font-semibold text-[var(--text-primary)] hover:border-[#2563FF] transition-colors"
+                            className="w-full rounded-xl bg-[var(--bg-card)] border border-[var(--border-subtle)] py-2.5 text-center text-xs font-semibold text-[var(--text-primary)] hover:border-[#FF1A1A] transition-colors"
                           >
                             Make Another Payment
                           </button>
@@ -846,7 +846,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                             </div>
                             <div className="text-base font-extrabold text-[var(--text-primary)]">
                               {instructions.requiredDisplayAmount}{" "}
-                              <span className="text-[#2563FF]">
+                              <span className="text-[#FF1A1A]">
                                 {instructions.sourceAssetSymbol}
                               </span>
                             </div>
@@ -1010,7 +1010,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                               <span className="text-[var(--text-secondary)]">
                                 Recipient Gets:
                               </span>
-                              <span className="font-bold text-sm text-[#2563FF] dark:text-[#3876FF]">
+                              <span className="font-bold text-sm text-[#FF1A1A] dark:text-[#3876FF]">
                                 {quote.destinationDisplayAmount}{" "}
                                 {quote.destinationAssetSymbol}
                               </span>
@@ -1058,7 +1058,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                                   onClick={() =>
                                     setRefreshTrigger((n) => n + 1)
                                   }
-                                  className="text-[#2563FF] hover:underline font-semibold"
+                                  className="text-[#FF1A1A] hover:underline font-semibold"
                                 >
                                   Refresh
                                 </button>
@@ -1124,7 +1124,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                             quote &&
                             quote.routeStatus === "SUPPORTED_AND_QUOTABLE" &&
                             !quote.isExecutionDisabled
-                              ? "bg-[#2563FF] hover:bg-[#1D4ED8] text-white cursor-pointer shadow-sm"
+                              ? "bg-[#FF1A1A] hover:bg-[#1D4ED8] text-white cursor-pointer shadow-sm"
                               : "bg-[var(--border-subtle)] text-[var(--text-muted)] cursor-not-allowed"
                           }`}
                         >

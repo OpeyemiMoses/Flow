@@ -38,7 +38,7 @@ export default function AccountLayout({ children }: { children: ReactNode }) {
                 href="/security"
                 className="inline-flex items-center gap-1.5 rounded-[6px] px-3 py-1.5 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--surface-card)] hover:text-[var(--text-primary)] transition-colors"
               >
-                <IconShield size={14} className="text-[#2563FF]" />
+                <IconShield size={14} className="text-[#FF1A1A]" />
                 Security
               </Link>
             </nav>

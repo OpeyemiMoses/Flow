@@ -33,11 +33,11 @@ export default async function AccountsPage() {
   return (
     <main className="space-y-8">
       {/* Top Banner */}
-      <section className="flow-navy-banner relative overflow-hidden p-6 sm:p-8">
+      <section className="flow-dark-banner relative overflow-hidden p-6 sm:p-8">
         <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-36 w-full opacity-75" />
         <div className="relative z-10 flex flex-wrap items-center justify-between gap-6">
           <div className="space-y-2">
-            <span className="inline-flex items-center gap-1.5 rounded-[4px] bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-[#34D8B2]">
+            <span className="inline-flex items-center gap-1.5 rounded-[4px] bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-400">
               <IconShield size={13} />
               Tenant-Isolated Account Directory
             </span>
@@ -84,7 +84,7 @@ export default async function AccountsPage() {
                   >
                     <div className="flex flex-wrap items-center justify-between gap-4">
                       <div className="flex items-center gap-3.5">
-                        <span className="inline-flex h-11 w-11 items-center justify-center rounded-[12px] bg-[#2563FF]/10 text-[#2563FF]">
+                        <span className="inline-flex h-11 w-11 items-center justify-center rounded-[12px] bg-[#FF1A1A]/10 text-[#FF1A1A]">
                           <IconUsers size={20} />
                         </span>
                         <div>
@@ -92,7 +92,7 @@ export default async function AccountsPage() {
                             <strong className="font-display text-base font-bold text-[var(--text-primary)]">
                               {account.name}
                             </strong>
-                            <span className="rounded-[4px] bg-[#2563FF]/10 px-2 py-0.5 text-[11px] font-bold text-[#2563FF]">
+                            <span className="rounded-[4px] bg-[#FF1A1A]/10 px-2 py-0.5 text-[11px] font-bold text-[#FF1A1A]">
                               Personal
                             </span>
                           </div>
@@ -113,7 +113,7 @@ export default async function AccountsPage() {
                         <span className="rounded-[6px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2.5 py-1 text-xs font-semibold text-[var(--text-secondary)]">
                           {account.role.toLowerCase()}
                         </span>
-                        <span className="rounded-[6px] bg-[#0B1F4B] px-3 py-1.5 text-xs font-semibold text-white">
+                        <span className="rounded-[6px] bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-white">
                           Open →
                         </span>
                       </div>
@@ -160,7 +160,7 @@ export default async function AccountsPage() {
                     >
                       <div className="flex flex-wrap items-center justify-between gap-4">
                         <div className="flex items-center gap-3.5">
-                          <span className="inline-flex h-11 w-11 items-center justify-center rounded-[12px] bg-[#34D8B2]/15 text-[#0F9F80]">
+                          <span className="inline-flex h-11 w-11 items-center justify-center rounded-[12px] bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200">
                             <IconBuilding size={20} />
                           </span>
                           <div>
@@ -168,7 +168,7 @@ export default async function AccountsPage() {
                               <strong className="font-display text-base font-bold text-[var(--text-primary)]">
                                 {account.name}
                               </strong>
-                              <span className="rounded-[4px] bg-[#34D8B2]/15 px-2 py-0.5 text-[11px] font-bold text-[#0F9F80]">
+                              <span className="rounded-[4px] bg-emerald-400/15 px-2 py-0.5 text-[11px] font-bold text-[#0F9F80]">
                                 Business
                               </span>
                             </div>
@@ -189,7 +189,7 @@ export default async function AccountsPage() {
                           <span className="rounded-[6px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2.5 py-1 text-xs font-semibold text-[var(--text-secondary)]">
                             {account.role.toLowerCase()}
                           </span>
-                          <span className="rounded-[6px] bg-[#0B1F4B] px-3 py-1.5 text-xs font-semibold text-white">
+                          <span className="rounded-[6px] bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-white">
                             Open →
                           </span>
                         </div>
@@ -205,7 +205,7 @@ export default async function AccountsPage() {
         {/* Right 5 Columns: Create Business Form */}
         <div className="lg:col-span-5">
           <section className="flow-card p-6 sm:p-7 space-y-4">
-            <div className="inline-flex items-center gap-2 rounded-[4px] bg-[#2563FF]/10 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[#2563FF]">
+            <div className="inline-flex items-center gap-2 rounded-[4px] bg-[#FF1A1A]/10 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[#FF1A1A]">
               <IconBuilding size={13} />
               New Organization Workspace
             </div>

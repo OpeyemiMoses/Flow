@@ -70,11 +70,11 @@ export function SecurityPanel({
   return (
     <div className="space-y-6">
       {/* Top Security & Settings Banner */}
-      <section className="flow-navy-banner relative overflow-hidden p-6 sm:p-8">
+      <section className="flow-dark-banner relative overflow-hidden p-6 sm:p-8">
         <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-36 w-full opacity-80" />
         <div className="relative z-10 flex flex-wrap items-center justify-between gap-4">
           <div className="space-y-2">
-            <span className="inline-flex items-center gap-1.5 rounded-[4px] bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-[#34D8B2]">
+            <span className="inline-flex items-center gap-1.5 rounded-[4px] bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-400">
               <IconShield size={13} />
               Profile, Security &amp; Account Preferences
             </span>
@@ -121,11 +121,11 @@ export function SecurityPanel({
         <div className="lg:col-span-4 space-y-6">
           <section className="flow-card p-6 space-y-4">
             <div className="flex items-center gap-3">
-              <span className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-[#2563FF]/10 font-display text-base font-bold text-[#2563FF]">
+              <span className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-[#FF1A1A]/10 font-display text-base font-bold text-[#FF1A1A]">
                 {email.slice(0, 2).toUpperCase()}
               </span>
               <div className="min-w-0 flex-1">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-[#2563FF]">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF1A1A]">
                   Authenticated Identity
                 </span>
                 <p className="truncate font-display text-sm font-bold text-[var(--text-primary)]">
@@ -158,7 +158,7 @@ export function SecurityPanel({
           <section className="flow-card p-6 space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <IconSettings size={16} className="text-[#2563FF]" />
+                <IconSettings size={16} className="text-[#FF1A1A]" />
                 <h2 className="font-display text-sm font-bold text-[var(--text-primary)]">
                   Interface Appearance
                 </h2>
@@ -180,7 +180,7 @@ export function SecurityPanel({
               <Link
                 prefetch={false}
                 href="/accounts"
-                className="text-xs font-semibold text-[#2563FF] hover:underline"
+                className="text-xs font-semibold text-[#FF1A1A] hover:underline"
               >
                 Open Directory →
               </Link>
@@ -197,7 +197,7 @@ export function SecurityPanel({
           <section className="flow-card p-6 space-y-4">
             <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--border-subtle)] pb-4">
               <div>
-                <span className="text-[11px] font-bold uppercase tracking-wider text-[#2563FF]">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-[#FF1A1A]">
                   Connected Login Methods
                 </span>
                 <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
@@ -294,7 +294,7 @@ export function SecurityPanel({
                   <span className="inline-flex items-center gap-2.5 font-semibold text-[var(--text-primary)]">
                     <span
                       className={`h-2.5 w-2.5 rounded-full ${
-                        session.current ? "bg-[#34D8B2]" : "bg-slate-400"
+                        session.current ? "bg-emerald-400" : "bg-slate-400"
                       }`}
                     />
                     <span>
@@ -321,7 +321,7 @@ export function SecurityPanel({
           </section>
 
           <section className="flow-card p-5 flex items-start gap-3 text-xs text-[var(--text-secondary)]">
-            <IconLock size={16} className="mt-0.5 shrink-0 text-[#2563FF]" />
+            <IconLock size={16} className="mt-0.5 shrink-0 text-[#FF1A1A]" />
             <div>
               <p className="font-semibold text-[var(--text-primary)]">
                 Platform Security Controls
