@@ -1501,3 +1501,188 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
     await ctx.close();
   }
 });
+
+test("m5 phase 1: payment requests & public guest checkout — authorization, cross-tenant isolation, safe public projection, and browser checkout flow", async () => {
+  const owner = await person("payment-owner-m5@example.com");
+  const stranger = await person("payment-stranger-m5@example.com");
+  const unauth = await app.createClient();
+
+  // 1. Unauthenticated endpoints return 401
+  const unauthList = await unauth.get(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+  );
+  assert.equal(unauthList.status(), 401);
+
+  const unauthCreate = await unauth.post(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Unauth Invoice",
+        destinationNetwork: "base-sepolia",
+        destinationAssetId: "base-sepolia:USDC",
+      },
+    },
+  );
+  assert.equal(unauthCreate.status(), 401);
+
+  // 2. Cross-tenant access returns 404
+  const strangerCreate = await stranger.client.post(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Cross Tenant Attack",
+        destinationNetwork: "base-sepolia",
+        destinationAssetId: "base-sepolia:USDC",
+      },
+    },
+  );
+  assert.equal(strangerCreate.status(), 404);
+
+  const strangerList = await stranger.client.get(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+  );
+  assert.equal(strangerList.status(), 404);
+
+  // 3. Authenticated owner creates a valid payment request
+  const createRes = await owner.client.post(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Invoice #1042 - Security Audit",
+        description: "Phase 1 deliverables for FLOW M5",
+        destinationNetwork: "base-sepolia",
+        destinationAssetId: "base-sepolia:USDC",
+        amountMode: "FIXED",
+        requestedAmount: "250.50",
+        expiresInHours: 72,
+        payerMemoRequired: false,
+      },
+    },
+  );
+  assert.equal(createRes.status(), 201);
+  const created = await createRes.json();
+  assert.ok(created.publicId.startsWith("pr_"));
+  assert.equal(created.title, "Invoice #1042 - Security Audit");
+  assert.equal(created.displayAmount, "250.5");
+  assert.equal(created.destinationAssetSymbol, "USDC");
+  assert.equal(created.destinationNetwork, "base-sepolia");
+  assert.equal(created.status, "ACTIVE");
+  assert.ok(created.shareUrl.includes(`/pay/${created.publicId}`));
+
+  // 4. Authenticated owner lists requests
+  const listRes = await owner.client.get(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+  );
+  assert.equal(listRes.status(), 200);
+  const listData = await listRes.json();
+  assert.equal(listData.total, 1);
+  assert.equal(listData.requests[0].publicId, created.publicId);
+
+  // 5. Stranger sees 0 payment requests on their own account
+  const strangerOwnList = await stranger.client.get(
+    `/api/accounts/${stranger.account.id}/payment-requests`,
+  );
+  assert.equal(strangerOwnList.status(), 200);
+  const strangerOwnData = await strangerOwnList.json();
+  assert.equal(strangerOwnData.total, 0);
+
+  // 6. Unauthenticated public guest queries /api/pay/[publicId]
+  const publicApiRes = await unauth.get(`/api/pay/${created.publicId}`);
+  assert.equal(publicApiRes.status(), 200);
+  const publicData = await publicApiRes.json();
+  assert.equal(publicData.publicId, created.publicId);
+  assert.equal(publicData.title, "Invoice #1042 - Security Audit");
+  assert.equal(publicData.displayAmount, "250.5");
+  assert.equal(publicData.destinationAssetSymbol, "USDC");
+  assert.equal(publicData.status, "ACTIVE");
+  assert.ok(Array.isArray(publicData.eligibleSourceRoutes));
+  assert.ok(publicData.eligibleSourceRoutes.length > 0);
+
+  // Strict omission of internal identifiers from public payload
+  assert.equal(publicData.accountId, undefined);
+  assert.equal(publicData.walletId, undefined);
+  assert.equal(publicData.id, undefined);
+
+  // 7. Enumeration resistance: random / invalid tokens return 404
+  const randomRes = await unauth.get(
+    `/api/pay/pr_random_non_existent_token_1234567890`,
+  );
+  assert.equal(randomRes.status(), 404);
+
+  const invalidTokenRes = await unauth.get(`/api/pay/invalid_token_prefix`);
+  assert.equal(invalidTokenRes.status(), 404);
+
+  // 8. Disabling the request revokes public access
+  const patchRes = await owner.client.patch(
+    `/api/accounts/${owner.account.id}/payment-requests/${created.id}`,
+    { data: { status: "DISABLED" } },
+  );
+  assert.equal(patchRes.status(), 200);
+
+  const disabledPublicRes = await unauth.get(`/api/pay/${created.publicId}`);
+  assert.equal(disabledPublicRes.status(), 404);
+
+  // Re-enable for browser verification
+  await owner.client.patch(
+    `/api/accounts/${owner.account.id}/payment-requests/${created.id}`,
+    { data: { status: "ACTIVE" } },
+  );
+
+  // 9. Browser Integration Test: Public Guest Checkout at /pay/[id]
+  const ctx = await app.browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 1440, height: 900 },
+  });
+
+  const brainArtifactDir =
+    "/Users/user/.gemini/antigravity/brain/799cfa99-869c-4a92-b3b0-b81a38ecce2b";
+
+  try {
+    const page = await ctx.newPage();
+    const payUrl = `${app.origin}/pay/${created.publicId}`;
+
+    const navRes = await page.goto(payUrl);
+    assert.equal(navRes.status(), 200);
+
+    // Verify public request rendering
+    await page
+      .getByRole("heading", { name: "Invoice #1042 - Security Audit" })
+      .waitFor();
+    assert.ok(await page.getByText("250.5 USDC").first().isVisible());
+    assert.ok(
+      await page.getByText("base-sepolia", { exact: true }).first().isVisible(),
+    );
+    assert.ok(await page.getByText("Self-Custody Wallet").first().isVisible());
+    assert.ok(await page.getByText("Exchange Withdrawal").first().isVisible());
+    assert.ok(
+      await page.getByText("FLOW_EXECUTION=disabled").first().isVisible(),
+    );
+
+    // Capture wallet mode screenshot
+    await page.screenshot({
+      path: `${brainArtifactDir}/14-public-guest-checkout-wallet.png`,
+    });
+
+    // Switch to Exchange Withdrawal mode
+    await page.getByRole("button", { name: "Exchange Withdrawal" }).click();
+    assert.ok(
+      await page.getByText("Exchange Withdrawal Mode").first().isVisible(),
+    );
+    assert.ok(
+      await page
+        .getByPlaceholder("0x... or Solana Base58 or NEAR account")
+        .isVisible(),
+    );
+
+    // Switch ecosystem to Solana
+    await page.getByRole("button", { name: "Solana" }).click();
+    assert.ok(await page.getByText("SOL").first().isVisible());
+
+    // Capture exchange mode screenshot
+    await page.screenshot({
+      path: `${brainArtifactDir}/15-public-guest-checkout-exchange.png`,
+    });
+  } finally {
+    await ctx.close();
+  }
+});

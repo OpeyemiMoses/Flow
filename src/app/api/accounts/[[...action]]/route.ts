@@ -10,6 +10,12 @@ import {
 } from "../../../../server/activities.ts";
 import { api, reply } from "../../../../server/http.ts";
 import {
+  createPaymentRequest,
+  getPaymentRequest,
+  listPaymentRequests,
+  updatePaymentRequest,
+} from "../../../../server/payment-requests.ts";
+import {
   readPortfolio,
   refreshPortfolio,
 } from "../../../../server/portfolio.ts";
@@ -56,8 +62,20 @@ export async function GET(
         if (request.method === "POST")
           return syncActivities(request, accountId(id));
       }
+      if (section === "payment-requests") {
+        if (request.method === "GET")
+          return listPaymentRequests(request, accountId(id));
+        if (request.method === "POST")
+          return createPaymentRequest(request, accountId(id));
+      }
     }
     if (id && child && parts.length === 3) {
+      if (section === "payment-requests") {
+        if (request.method === "GET")
+          return getPaymentRequest(request, accountId(id), child);
+        if (request.method === "PATCH")
+          return updatePaymentRequest(request, accountId(id), child);
+      }
       if (
         section === "portfolio" &&
         child === "refresh" &&

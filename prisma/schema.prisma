@@ -191,6 +191,7 @@ model FlowAccount {
   recoveryApprovals CustodyRecoveryApproval[]
   refreshLease    PortfolioRefreshLease?
   activities      WalletActivity[]
+  paymentRequests PaymentRequest[]
 
   @@unique([id, kind])
   @@map("accounts")
@@ -565,4 +566,50 @@ model WalletActivity {
   @@map("wallet_activities")
   @@schema("flow")
 }
+
+enum PaymentAmountMode {
+  FIXED
+  OPTIONAL
+
+  @@map("payment_amount_mode")
+  @@schema("flow")
+}
+
+enum PaymentRequestStatus {
+  ACTIVE
+  DISABLED
+  EXPIRED
+  COMPLETED
+
+  @@map("payment_request_status")
+  @@schema("flow")
+}
+
+model PaymentRequest {
+  id                     String               @id @default(uuid()) @db.Uuid
+  accountId              String               @map("account_id") @db.Uuid
+  publicId               String               @unique @map("public_id") @db.VarChar(64)
+  title                  String               @db.VarChar(120)
+  description            String?              @db.Text
+  destinationNetwork     String               @map("destination_network") @db.VarChar(64)
+  destinationAssetId     String               @map("destination_asset_id") @db.VarChar(128)
+  destinationAssetSymbol String               @map("destination_asset_symbol") @db.VarChar(32)
+  destinationDecimals    Int                  @map("destination_decimals")
+  amountMode             PaymentAmountMode    @default(FIXED) @map("amount_mode")
+  requestedAtomicAmount  Decimal?             @map("requested_atomic_amount") @db.Decimal(78, 0)
+  status                 PaymentRequestStatus @default(ACTIVE)
+  expiresAt              DateTime?            @map("expires_at") @db.Timestamptz
+  payerMemoRequired      Boolean              @default(false) @map("payer_memo_required")
+  metadata               Json                 @default("{}") @db.JsonB
+  createdAt              DateTime             @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt              DateTime             @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
+
+  account                FlowAccount          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, status])
+  @@index([publicId])
+  @@map("payment_requests")
+  @@schema("flow")
+}
+
 

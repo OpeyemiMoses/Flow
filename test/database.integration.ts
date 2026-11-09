@@ -7920,3 +7920,242 @@ test("M3 Phase 4: flow.wallet_activities row-level security, adversarial isolati
     appClient.release();
   }
 });
+
+test("M5 Phase 1: flow.payment_requests row-level security, adversarial tenant isolation, consistency constraints, and safe public projection", async () => {
+  const adminClient = await pool.connect();
+  const workerClient = await workerPool.connect();
+  const appClient = await pool.connect();
+
+  try {
+    // 1. Setup Tenant A (Victim) and Tenant B (Attacker)
+    const victim = await createTestAccount(
+      adminClient,
+      "PERSONAL",
+      "m5p1-victim",
+    );
+    const victimSessionToken = await createTestSession(
+      adminClient,
+      victim.authUserId,
+    );
+
+    const attacker = await createTestAccount(
+      adminClient,
+      "PERSONAL",
+      "m5p1-attacker",
+    );
+    const attackerSessionToken = await createTestSession(
+      adminClient,
+      attacker.authUserId,
+    );
+
+    // 2. Consistency Triggers & Check Constraints Enforcement:
+    // (a) Empty title must fail
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.payment_requests (account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals)
+         VALUES ($1, 'pr_empty_title_1234567890', '   ', 'base-sepolia', 'base-sepolia:USDC', 'USDC', 6)`,
+        [victim.accountId],
+      ),
+      (err: unknown) => {
+        const e = err as { code?: string; message?: string };
+        assert.ok(
+          e.code === "23514" || e.message?.includes("Title cannot be empty"),
+        );
+        return true;
+      },
+    );
+
+    // (b) Invalid public_id format must fail check constraint
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.payment_requests (account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals)
+         VALUES ($1, 'invalid_no_pr_prefix', 'Valid Title', 'base-sepolia', 'base-sepolia:USDC', 'USDC', 6)`,
+        [victim.accountId],
+      ),
+      (err: unknown) => {
+        const e = err as { code?: string };
+        assert.equal(e.code, "23514");
+        return true;
+      },
+    );
+
+    // (c) Amount mode FIXED with NULL amount must fail check constraint
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.payment_requests (account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount)
+         VALUES ($1, 'pr_fixed_null_amount_123456', 'Valid Title', 'base-sepolia', 'base-sepolia:USDC', 'USDC', 6, 'FIXED', NULL)`,
+        [victim.accountId],
+      ),
+      (err: unknown) => {
+        const e = err as { code?: string };
+        assert.equal(e.code, "23514");
+        return true;
+      },
+    );
+
+    // (d) Amount mode OPTIONAL with positive amount must fail check constraint
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.payment_requests (account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount)
+         VALUES ($1, 'pr_opt_with_amount_12345678', 'Valid Title', 'base-sepolia', 'base-sepolia:USDC', 'USDC', 6, 'OPTIONAL', 10000000)`,
+        [victim.accountId],
+      ),
+      (err: unknown) => {
+        const e = err as { code?: string };
+        assert.equal(e.code, "23514");
+        return true;
+      },
+    );
+
+    // (e) Past expiry on creation must fail trigger
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.payment_requests (account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals, expires_at)
+         VALUES ($1, 'pr_past_expiry_123456789012', 'Valid Title', 'base-sepolia', 'base-sepolia:USDC', 'USDC', 6, now() - interval '1 hour')`,
+        [victim.accountId],
+      ),
+      (err: unknown) => {
+        const e = err as { code?: string; message?: string };
+        assert.ok(
+          e.code === "23514" ||
+            e.message?.includes("Expiry cannot be in the past"),
+        );
+        return true;
+      },
+    );
+
+    // 3. Create Valid Payment Requests for Victim and Attacker
+    const victimPublicId = "pr_victim_active_request_1234567890";
+    const attackerPublicId = "pr_attacker_active_request_12345678";
+
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+         account_id, public_id, title, description,
+         destination_network, destination_asset_id, destination_asset_symbol, destination_decimals,
+         amount_mode, requested_atomic_amount, expires_at
+       ) VALUES
+       ($1, $2, 'Victim Invoice #1', 'Phase 1 Consulting', 'base-sepolia', 'base-sepolia:USDC', 'USDC', 6, 'FIXED', 25000000, now() + interval '7 days'),
+       ($3, $4, 'Attacker Invoice #2', 'Attacker services', 'solana-devnet', 'solana-devnet:USDC', 'USDC', 6, 'OPTIONAL', NULL, now() + interval '7 days')`,
+      [victim.accountId, victimPublicId, attacker.accountId, attackerPublicId],
+    );
+
+    // 4. Adversarial RLS Isolation:
+    // Attacker sets session to their own valid session token
+    await appClient.query("BEGIN");
+    await appClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [attackerSessionToken],
+    );
+
+    // Attacker queries payment requests: sees ONLY their own (attackerPublicId)
+    const attackerQuery = await appClient.query<{
+      public_id: string;
+      account_id: string;
+    }>(`SELECT public_id, account_id FROM flow.payment_requests`);
+    assert.equal(attackerQuery.rows.length, 1);
+    assert.equal(attackerQuery.rows[0]!.public_id, attackerPublicId);
+    assert.equal(attackerQuery.rows[0]!.account_id, attacker.accountId);
+
+    // Attacker attempts to SELECT victim's payment request directly: 0 rows returned
+    const crossSelect = await appClient.query(
+      `SELECT * FROM flow.payment_requests WHERE account_id = $1::uuid`,
+      [victim.accountId],
+    );
+    assert.equal(crossSelect.rows.length, 0);
+
+    // Attacker attempts to UPDATE victim's payment request: 0 rows affected
+    const crossUpdate = await appClient.query(
+      `UPDATE flow.payment_requests SET title = 'Hacked' WHERE public_id = $1`,
+      [victimPublicId],
+    );
+    assert.equal(crossUpdate.rowCount, 0);
+
+    // Attacker attempts to DELETE victim's payment request: 0 rows affected
+    const crossDelete = await appClient.query(
+      `DELETE FROM flow.payment_requests WHERE public_id = $1`,
+      [victimPublicId],
+    );
+    assert.equal(crossDelete.rowCount, 0);
+
+    // Attacker attempts session token forgery: 0 rows returned
+    await appClient.query(
+      `SELECT set_config('flow.current_session_token', 'forged_fake_token', true)`,
+    );
+    const forgedSelect = await appClient.query(
+      `SELECT * FROM flow.payment_requests`,
+    );
+    assert.equal(forgedSelect.rows.length, 0);
+
+    // Attacker attempts custom GUC manipulation: 0 rows returned
+    await appClient.query(
+      `SELECT set_config('flow.current_account_id', $1, true)`,
+      [victim.accountId],
+    );
+    const gucSelect = await appClient.query(
+      `SELECT * FROM flow.payment_requests`,
+    );
+    assert.equal(gucSelect.rows.length, 0);
+
+    await appClient.query("ROLLBACK");
+
+    // 5. Legitimate Tenant (Victim) access:
+    await appClient.query("BEGIN");
+    await appClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [victimSessionToken],
+    );
+    const victimQuery = await appClient.query<{
+      public_id: string;
+      title: string;
+    }>(`SELECT public_id, title FROM flow.payment_requests`);
+    assert.equal(victimQuery.rows.length, 1);
+    assert.equal(victimQuery.rows[0]!.public_id, victimPublicId);
+    assert.equal(victimQuery.rows[0]!.title, "Victim Invoice #1");
+    await appClient.query("ROLLBACK");
+
+    // 6. Public Guest Checkout Security Definer Function:
+    // (a) Active request returns safe projection
+    const publicRow = await appClient.query<{
+      public_id: string;
+      title: string;
+      status: string;
+      recipient_name: string;
+      requested_atomic_amount: string;
+    }>(`SELECT * FROM flow.get_public_payment_request($1)`, [victimPublicId]);
+    assert.equal(publicRow.rows.length, 1);
+    assert.equal(publicRow.rows[0]!.public_id, victimPublicId);
+    assert.equal(publicRow.rows[0]!.title, "Victim Invoice #1");
+    assert.equal(publicRow.rows[0]!.status, "ACTIVE");
+    assert.equal(publicRow.rows[0]!.requested_atomic_amount, "25000000");
+
+    // (b) Non-existent / invalid token returns 0 rows
+    const nonExistent = await appClient.query(
+      `SELECT * FROM flow.get_public_payment_request('pr_non_existent_token_12345678')`,
+    );
+    assert.equal(nonExistent.rows.length, 0);
+
+    // (c) Expired request returns status EXPIRED
+    const expiredPublicId = "pr_victim_expired_request_12345678";
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+         account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount, expires_at
+       ) VALUES ($1, $2, 'Expired Invoice', 'base-sepolia', 'base-sepolia:USDC', 'USDC', 6, 'FIXED', 10000000, now() + interval '1 second')`,
+      [victim.accountId, expiredPublicId],
+    );
+    // Fast-forward expires_at to the past
+    await workerClient.query(
+      `UPDATE flow.payment_requests SET expires_at = now() - interval '1 second' WHERE public_id = $1`,
+      [expiredPublicId],
+    );
+    const expiredRow = await appClient.query<{ status: string }>(
+      `SELECT status FROM flow.get_public_payment_request($1)`,
+      [expiredPublicId],
+    );
+    assert.equal(expiredRow.rows.length, 1);
+    assert.equal(expiredRow.rows[0]!.status, "EXPIRED");
+  } finally {
+    adminClient.release();
+    workerClient.release();
+    appClient.release();
+  }
+});

@@ -37,6 +37,7 @@ import type {
   SerializedWalletActivityRecord,
 } from "../../../../domain/activities.ts";
 import { getExplorerUrl } from "../../../../domain/activities.ts";
+import type { SerializedPaymentRequest } from "../../../../domain/payment-requests.ts";
 import type {
   SerializedAccountPortfolio,
   SerializedWalletBalanceRecord,
@@ -173,6 +174,38 @@ export function PortfolioView({
     };
   }, [accountId, activeTab]);
 
+  // Payment Requests state (M5 Phase 1)
+  const [paymentRequests, setPaymentRequests] = useState<
+    SerializedPaymentRequest[]
+  >([]);
+  const [prTitle, setPrTitle] = useState<string>("");
+  const [prDescription, setPrDescription] = useState<string>("");
+  const [prAmountMode, setPrAmountMode] = useState<"FIXED" | "OPTIONAL">(
+    "FIXED",
+  );
+  const [prAmount, setPrAmount] = useState<string>("10");
+  const [prExpiresInHours, setPrExpiresInHours] = useState<number>(168);
+  const [prCreating, setPrCreating] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (activeTab !== "receive") return;
+    let active = true;
+    send<{ requests: SerializedPaymentRequest[] }>(
+      `/api/accounts/${accountId}/payment-requests`,
+      {},
+      "GET",
+    )
+      .then((res) => {
+        if (active) {
+          setPaymentRequests(res.requests);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [accountId, activeTab]);
+
   useEffect(() => {
     if (cooldown <= 0) return;
     const timer = setInterval(() => {
@@ -277,6 +310,65 @@ export function PortfolioView({
       CURATED_SUPPORTED_DEPLOYMENTS.find((d) => d.id === receiveDeploymentId) ??
       CURATED_SUPPORTED_DEPLOYMENTS[0],
     [receiveDeploymentId],
+  );
+
+  const handleCreatePaymentRequest = useCallback(async () => {
+    if (!prTitle.trim()) {
+      setMessage("Please enter a title for the payment request.");
+      return;
+    }
+    setPrCreating(true);
+    setMessage("");
+    try {
+      const created = await send<SerializedPaymentRequest>(
+        `/api/accounts/${accountId}/payment-requests`,
+        {
+          title: prTitle.trim(),
+          description: prDescription.trim() || null,
+          destinationNetwork: receiveDeployment.networkKey,
+          destinationAssetId: receiveDeployment.id,
+          amountMode: prAmountMode,
+          requestedAmount: prAmountMode === "FIXED" ? prAmount : null,
+          expiresInHours: prExpiresInHours > 0 ? prExpiresInHours : null,
+        },
+        "POST",
+      );
+      setPaymentRequests((prev) => [created, ...prev]);
+      setPrTitle("");
+      setPrDescription("");
+      setMessage(`Payment link generated: ${created.shareUrl}`);
+    } catch (error) {
+      setMessage(describe(error));
+    } finally {
+      setPrCreating(false);
+    }
+  }, [
+    accountId,
+    prTitle,
+    prDescription,
+    receiveDeployment,
+    prAmountMode,
+    prAmount,
+    prExpiresInHours,
+  ]);
+
+  const handleDisablePaymentRequest = useCallback(
+    async (requestId: string) => {
+      try {
+        const updated = await send<SerializedPaymentRequest>(
+          `/api/accounts/${accountId}/payment-requests/${requestId}`,
+          { status: "DISABLED" },
+          "PATCH",
+        );
+        setPaymentRequests((prev) =>
+          prev.map((r) => (r.id === updated.id ? updated : r)),
+        );
+        setMessage("Payment request disabled.");
+      } catch (error) {
+        setMessage(describe(error));
+      }
+    },
+    [accountId],
   );
 
   const sourceObservedBalance = useMemo(() => {
@@ -1624,32 +1716,210 @@ export function PortfolioView({
                 </div>
               </section>
 
-              {/* Right 5 Columns: Payment Links & Requests State */}
-              <aside className="xl:col-span-5 flow-card p-6 space-y-4">
+              {/* Right 5 Columns: Payment Requests Creation & Stored Links */}
+              <aside className="xl:col-span-5 flow-card p-6 space-y-5">
                 <div className="flex items-center justify-between">
                   <div>
                     <span className="text-[10px] font-bold uppercase tracking-wider text-[#2563FF]">
                       Payment Requests
                     </span>
                     <h3 className="font-display text-base font-bold text-[var(--text-primary)]">
-                      Payment Links &amp; Invoices
+                      Create Payment Link
                     </h3>
                   </div>
-                  <span className="rounded-[4px] bg-[var(--surface-subtle)] px-2 py-0.5 text-[11px] font-semibold text-[var(--text-muted)]">
-                    0 Active
+                  <span className="rounded-[4px] bg-[#2563FF]/10 px-2 py-0.5 text-[11px] font-semibold text-[#2563FF]">
+                    {
+                      paymentRequests.filter((r) => r.status === "ACTIVE")
+                        .length
+                    }{" "}
+                    Active
                   </span>
                 </div>
 
-                <div className="rounded-[12px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-subtle)]/50 p-6 text-center space-y-2">
-                  <p className="text-xs font-semibold text-[var(--text-primary)]">
-                    No active payment links on this workspace
-                  </p>
-                  <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
-                    Shareable payment links and QR payment requests are not
-                    generated while wallet custody is in{" "}
-                    <strong>PROVISIONING</strong> state and{" "}
-                    <code className="font-mono">FLOW_EXECUTION=disabled</code>.
-                  </p>
+                {/* Create Request Form */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void handleCreatePaymentRequest();
+                  }}
+                  className="rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 p-4 space-y-3.5 text-xs"
+                >
+                  <div>
+                    <label className="block text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
+                      Request Title / Reference
+                    </label>
+                    <input
+                      type="text"
+                      value={prTitle}
+                      onChange={(e) => setPrTitle(e.target.value)}
+                      placeholder="e.g. Consulting Invoice #1042"
+                      required
+                      className="flow-input w-full px-3 py-1.5 text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
+                      Description (Optional)
+                    </label>
+                    <textarea
+                      value={prDescription}
+                      onChange={(e) => setPrDescription(e.target.value)}
+                      placeholder="Scope of work or payment note"
+                      rows={2}
+                      className="flow-input w-full px-3 py-1.5 text-xs resize-none"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
+                        Amount Mode
+                      </label>
+                      <select
+                        value={prAmountMode}
+                        onChange={(e) =>
+                          setPrAmountMode(
+                            e.target.value as "FIXED" | "OPTIONAL",
+                          )
+                        }
+                        className="flow-input w-full px-2.5 py-1.5 text-xs font-semibold"
+                      >
+                        <option value="FIXED">Fixed Amount</option>
+                        <option value="OPTIONAL">Payer Specified</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
+                        {prAmountMode === "FIXED"
+                          ? `Amount (${receiveDeployment.symbol})`
+                          : "Amount"}
+                      </label>
+                      <input
+                        type="text"
+                        disabled={prAmountMode === "OPTIONAL"}
+                        value={prAmountMode === "OPTIONAL" ? "Any" : prAmount}
+                        onChange={(e) => setPrAmount(e.target.value)}
+                        placeholder="10"
+                        className="flow-input w-full px-3 py-1.5 text-xs disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)] pt-1">
+                    <span>
+                      Target: {receiveDeployment.symbol} on{" "}
+                      {receiveDeployment.networkName}
+                    </span>
+                    <select
+                      value={prExpiresInHours}
+                      onChange={(e) =>
+                        setPrExpiresInHours(Number(e.target.value))
+                      }
+                      className="flow-input px-2 py-1 text-[11px]"
+                    >
+                      <option value={24}>24 Hours</option>
+                      <option value={168}>7 Days</option>
+                      <option value={720}>30 Days</option>
+                      <option value={0}>No Expiry</option>
+                    </select>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={prCreating}
+                    className="flow-btn-primary w-full py-2 text-xs font-semibold"
+                  >
+                    {prCreating
+                      ? "Creating Link..."
+                      : "Generate Public Payment Link"}
+                  </button>
+                </form>
+
+                {/* List of Stored Payment Requests */}
+                <div className="space-y-3 pt-2">
+                  <h4 className="text-xs font-semibold text-[var(--text-primary)]">
+                    Active &amp; Stored Payment Links ({paymentRequests.length})
+                  </h4>
+
+                  {paymentRequests.length === 0 ? (
+                    <div className="rounded-[12px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-subtle)]/30 p-4 text-center text-xs text-[var(--text-muted)]">
+                      No payment links generated yet. Create one above to share
+                      with payers.
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+                      {paymentRequests.map((req) => (
+                        <div
+                          key={req.id}
+                          className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--surface-card)] p-3 text-xs space-y-2"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <div className="font-bold text-[var(--text-primary)] truncate max-w-[200px]">
+                                {req.title}
+                              </div>
+                              <div className="text-[11px] text-[var(--text-muted)]">
+                                {req.amountMode === "FIXED"
+                                  ? `${req.displayAmount} ${req.destinationAssetSymbol}`
+                                  : "Payer Specified"}{" "}
+                                on {req.destinationNetwork}
+                              </div>
+                            </div>
+                            <span
+                              className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                                req.status === "ACTIVE"
+                                  ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
+                                  : "bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-400"
+                              }`}
+                            >
+                              {req.status}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 pt-1 border-t border-[var(--border-subtle)]">
+                            <input
+                              type="text"
+                              readOnly
+                              value={req.shareUrl}
+                              className="font-mono text-[10px] text-[var(--text-secondary)] bg-[var(--surface-subtle)] px-2 py-1 rounded w-full border border-[var(--border-subtle)] select-all"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                copyAddress(`link:${req.id}`, req.shareUrl)
+                              }
+                              className="flow-btn-secondary px-2 py-1 text-[10px] shrink-0"
+                            >
+                              {copiedKey === `link:${req.id}`
+                                ? "Copied!"
+                                : "Copy"}
+                            </button>
+                            <Link
+                              href={`/pay/${req.publicId}`}
+                              target="_blank"
+                              className="flow-btn-secondary px-2 py-1 text-[10px] shrink-0 text-[#2563FF]"
+                            >
+                              Open
+                            </Link>
+                            {req.status === "ACTIVE" && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleDisablePaymentRequest(req.id)
+                                }
+                                className="px-1.5 py-1 text-[10px] text-red-600 hover:text-red-700 shrink-0"
+                                title="Disable payment request"
+                              >
+                                Disable
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </aside>
             </div>
