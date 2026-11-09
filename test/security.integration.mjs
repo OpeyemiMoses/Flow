@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHmac, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import pg from "pg";
@@ -1635,7 +1636,9 @@ test("m5 phase 1: payment requests & public guest checkout — authorization, cr
   });
 
   const brainArtifactDir =
+    process.env.FLOW_CAPTURE_SCREENSHOTS_DIR ||
     "/Users/user/.gemini/antigravity/brain/799cfa99-869c-4a92-b3b0-b81a38ecce2b";
+  const canCapture = Boolean(brainArtifactDir && existsSync(brainArtifactDir));
 
   try {
     const page = await ctx.newPage();
@@ -1658,10 +1661,12 @@ test("m5 phase 1: payment requests & public guest checkout — authorization, cr
       await page.getByText("FLOW_EXECUTION=disabled").first().isVisible(),
     );
 
-    // Capture wallet mode screenshot
-    await page.screenshot({
-      path: `${brainArtifactDir}/14-public-guest-checkout-wallet.png`,
-    });
+    // Capture wallet mode screenshot if directory exists
+    if (canCapture) {
+      await page.screenshot({
+        path: `${brainArtifactDir}/14-public-guest-checkout-wallet.png`,
+      });
+    }
 
     // Switch to Exchange Withdrawal mode
     await page.getByRole("button", { name: "Exchange Withdrawal" }).click();
@@ -1678,10 +1683,12 @@ test("m5 phase 1: payment requests & public guest checkout — authorization, cr
     await page.getByRole("button", { name: "Solana" }).click();
     assert.ok(await page.getByText("SOL").first().isVisible());
 
-    // Capture exchange mode screenshot
-    await page.screenshot({
-      path: `${brainArtifactDir}/15-public-guest-checkout-exchange.png`,
-    });
+    // Capture exchange mode screenshot if directory exists
+    if (canCapture) {
+      await page.screenshot({
+        path: `${brainArtifactDir}/15-public-guest-checkout-exchange.png`,
+      });
+    }
   } finally {
     await ctx.close();
   }
