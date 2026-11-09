@@ -2197,4 +2197,87 @@ test("security: M5 Phase 4 deposit commitment, instruction issuance, polling, an
   );
   assert.equal(ledgerAcctRes.rows.length, 1);
   assert.equal(ledgerAcctRes.rows[0].balance_atomic, "50000000"); // 50 USDC with 6 decimals
+
+  // 11. End-to-end Browser Lifecycle Demonstration & Screenshot Capture
+  const brainArtifactDir =
+    process.env.FLOW_CAPTURE_SCREENSHOTS_DIR ||
+    "/Users/user/.gemini/antigravity/brain/799cfa99-869c-4a92-b3b0-b81a38ecce2b";
+  const canCapture = Boolean(brainArtifactDir && existsSync(brainArtifactDir));
+
+  const demoReqRes = await owner.client.post(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Global Infrastructure Services",
+        description: "Decentralized node cluster subscription",
+        destinationNetwork: "base-mainnet",
+        destinationAssetId: "base-mainnet:USDC",
+        amountMode: "FIXED",
+        requestedAmount: "250.0",
+        expiresInHours: 48,
+      },
+    },
+  );
+  assert.equal(demoReqRes.status(), 201);
+  const demoReq = await demoReqRes.json();
+
+  const ctx = await app.browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 1440, height: 950 },
+  });
+
+  try {
+    const page = await ctx.newPage();
+    await page.goto(`${app.origin}/pay/${demoReq.publicId}`);
+    await page
+      .getByRole("heading", { name: "Global Infrastructure Services" })
+      .waitFor();
+
+    // Select Solana ecosystem and SOL
+    await page.getByRole("button", { name: "Solana" }).click();
+    await page.getByText("SOL").first().click();
+
+    // Wait for quotable route and proceed button
+    const proceedBtn = page.getByRole("button", {
+      name: "Proceed to Payment (Generate Deposit)",
+    });
+    await proceedBtn.waitFor({ state: "visible" });
+    await page.waitForTimeout(500);
+
+    // Click proceed to generate deposit instructions
+    await proceedBtn.click();
+
+    // Wait for Deposit Address to appear
+    await page.getByText("Deposit Address:").waitFor();
+    await page.getByText("Scan to pay with any compatible wallet").waitFor();
+    await page.waitForTimeout(800);
+
+    // Capture screenshot: 18-public-guest-checkout-deposit.png
+    if (canCapture) {
+      await page.screenshot({
+        path: `${brainArtifactDir}/18-public-guest-checkout-deposit.png`,
+      });
+    }
+
+    // Trigger local settlement simulation
+    const simulateBtn = page.getByRole("button", {
+      name: "Simulate Payer Transfer & Settlement",
+    });
+    await simulateBtn.waitFor({ state: "visible" });
+    await simulateBtn.click();
+
+    // Wait for settled state
+    await page.getByText("Payment Completed!").waitFor();
+    await page.getByText("Funds credited to recipient ledger.").waitFor();
+    await page.waitForTimeout(800);
+
+    // Capture screenshot: 19-public-guest-checkout-settled.png
+    if (canCapture) {
+      await page.screenshot({
+        path: `${brainArtifactDir}/19-public-guest-checkout-settled.png`,
+      });
+    }
+  } finally {
+    await ctx.close();
+  }
 });
