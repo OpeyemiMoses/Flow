@@ -1,14 +1,12 @@
 import "server-only";
-import { createHash } from "node:crypto";
 import {
   type PaymentAttemptStatus,
   type PaymentDepositInstructions,
   isValidPaymentAttemptPublicId,
-  PROBE_ADDRESSES,
 } from "../domain/quote-discovery.ts";
 import { formatAtomicToDisplay } from "../domain/atomic-amounts.ts";
 import { isValidPublicPaymentId } from "../domain/payment-requests.ts";
-import { CURATED_SUPPORTED_DEPLOYMENTS } from "../domain/supported-assets-catalog.ts";
+import { isFinancialExecutionDisabled } from "../domain/custody.ts";
 import { getPrismaClient, runtime } from "../foundation/prisma.ts";
 import { clientBudget } from "./auth/limits.ts";
 import { ApiFailure, reply } from "./http.ts";
@@ -18,13 +16,26 @@ export interface CommitPaymentAttemptInput {
 }
 
 /**
- * Commits a guest payer to an indicative quote, generating safe deposit instructions
+ * Commits a guest payer to a quote, generating verified deposit instructions
  * and transitioning the payment attempt to DEPOSIT_COMMITTED status.
+ *
+ * Mandatory Security Safeguards:
+ * 1. Rejected if FLOW_EXECUTION=disabled (Requirement 8)
+ * 2. Rejected if quote is expired (Requirement 12 - strictly enforced without 1-hour grace)
+ * 3. Synthetic deposit addresses are strictly prohibited (Requirement 7 & 9)
  */
 export async function commitPaymentAttempt(
   request: Request,
   publicId: string,
 ): Promise<Response> {
+  // Requirement 8: Execution guardrail
+  if (isFinancialExecutionDisabled()) {
+    throw new ApiFailure(
+      403,
+      "PAYMENT_EXECUTION_DISABLED: Payment execution and deposit commitment are disabled (FLOW_EXECUTION=disabled).",
+    );
+  }
+
   if (!isValidPublicPaymentId(publicId)) {
     throw new ApiFailure(404, "PAYMENT_REQUEST_NOT_FOUND");
   }
@@ -66,6 +77,10 @@ export async function commitPaymentAttempt(
       destination_network: string;
       destination_asset_symbol: string;
       destination_decimals: number;
+      deposit_address: string | null;
+      deposit_memo: string | null;
+      deposit_deadline: Date | null;
+      deposit_instructions: Record<string, unknown> | null;
     }>
   >`
     SELECT
@@ -81,7 +96,11 @@ export async function commitPaymentAttempt(
       quote_expires_at,
       destination_network,
       destination_asset_symbol,
-      destination_decimals
+      destination_decimals,
+      deposit_address,
+      deposit_memo,
+      deposit_deadline,
+      deposit_instructions
     FROM flow.get_public_payment_attempt(${publicId}, ${attemptPublicId})
     LIMIT 1
   `;
@@ -99,57 +118,36 @@ export async function commitPaymentAttempt(
     throw new ApiFailure(400, `INVALID_STATUS_FOR_COMMIT: ${attempt.status}`);
   }
 
+  // Requirement 12: Strict quote expiration enforcement
   if (
     attempt.quote_expires_at &&
-    new Date(attempt.quote_expires_at).getTime() < Date.now() - 3600_000
+    new Date(attempt.quote_expires_at).getTime() < Date.now()
   ) {
     throw new ApiFailure(400, "QUOTE_EXPIRED");
   }
 
-  const sourceDeployment = CURATED_SUPPORTED_DEPLOYMENTS.find(
-    (d) => d.id === attempt.source_asset_id,
-  );
-  const ecosystem = sourceDeployment?.ecosystem ?? "evm";
-
-  // Generate deterministic staging deposit address for the source network
-  let depositAddress = "";
-  let depositMemo: string | null = null;
-  let qrData = "";
-
-  const hash = createHash("sha256").update(attemptPublicId).digest("hex");
-
-  if (ecosystem === "evm") {
-    depositAddress = `0x${hash.slice(0, 40)}`;
-    qrData = `ethereum:${depositAddress}`;
-  } else if (ecosystem === "solana") {
-    depositAddress = PROBE_ADDRESSES.solana;
-    qrData = `solana:${depositAddress}`;
-  } else {
-    depositAddress = `flow-${attemptPublicId.slice(3, 15)}.near`;
-    depositMemo = attemptPublicId;
-    qrData = `near:${depositAddress}?memo=${depositMemo}`;
+  // Requirement 9 & 10: Deposit destination must come from an authenticated, validated provider quote
+  // Synthetic address fabrication is strictly prohibited.
+  if (!attempt.deposit_address) {
+    throw new ApiFailure(
+      400,
+      "PROVIDER_DEPOSIT_DESTINATION_UNAVAILABLE: Real provider deposit destination has not been authorized.",
+    );
   }
 
-  // 15-minute deposit deadline
-  const deadline = new Date(Date.now() + 15 * 60 * 1000);
+  // 15-minute deposit deadline from now or provider deadline
+  const deadline = attempt.deposit_deadline
+    ? new Date(attempt.deposit_deadline)
+    : new Date(Date.now() + 15 * 60 * 1000);
 
-  const instructionsNotice =
-    `Send exactly ${formatAtomicToDisplay(
-      BigInt(attempt.quoted_source_atomic_amount ?? "0"),
-      attempt.source_decimals,
-    )} ${attempt.source_asset_symbol} on ${attempt.source_network} within 15 minutes. ` +
-    (depositMemo ? `You MUST include memo: ${depositMemo}. ` : "") +
-    "Execution is currently disabled in test/staging mode (FLOW_EXECUTION=disabled).";
-
-  const depositInstructionsPayload = {
-    ecosystem,
+  const depositInstructionsPayload = attempt.deposit_instructions ?? {
     network: attempt.source_network,
     tokenSymbol: attempt.source_asset_symbol,
     decimals: attempt.source_decimals,
     expectedAtomicAmount: attempt.quoted_source_atomic_amount,
     deadlineIso: deadline.toISOString(),
-    memo: depositMemo,
-    qrData,
+    memo: attempt.deposit_memo,
+    depositAddress: attempt.deposit_address,
   };
 
   // Commit via stored procedure
@@ -168,8 +166,8 @@ export async function commitPaymentAttempt(
     SELECT *
     FROM flow.commit_payment_attempt(
       ${attemptPublicId},
-      ${depositAddress},
-      ${depositMemo},
+      ${attempt.deposit_address},
+      ${attempt.deposit_memo},
       ${deadline},
       ${JSON.stringify(depositInstructionsPayload)}::jsonb
     )
@@ -205,9 +203,14 @@ export async function commitPaymentAttempt(
     requiredAtomicAmount: attempt.quoted_source_atomic_amount ?? "0",
     requiredDisplayAmount: sourceDisplayAmount,
     destinationDisplayAmount: destDisplayAmount,
-    qrData,
-    instructionsNotice,
-    isExecutionDisabled: true,
+    qrData:
+      typeof committed.deposit_instructions === "object" &&
+      committed.deposit_instructions !== null
+        ? (((committed.deposit_instructions as Record<string, unknown>)
+            .qrData as string) ?? "")
+        : "",
+    instructionsNotice: `Send verified ${sourceDisplayAmount} ${attempt.source_asset_symbol} on ${attempt.source_network}.`,
+    isExecutionDisabled: false,
     sourceTxHash: null,
     destinationTxHash: null,
     settledAt: null,
@@ -378,47 +381,4 @@ export async function workerSettlePayment(
     journalId: r.journal_id,
     journalPublicId: r.journal_public_id,
   };
-}
-
-/**
- * Endpoint for testing and local demonstrations to simulate payment settlement
- * without live blockchain execution.
- */
-export async function simulatePaymentSettlement(
-  request: Request,
-  publicId: string,
-): Promise<Response> {
-  if (!isValidPublicPaymentId(publicId)) {
-    throw new ApiFailure(404, "PAYMENT_REQUEST_NOT_FOUND");
-  }
-
-  let body: {
-    attemptPublicId: string;
-    sourceTxHash?: string;
-    destinationTxHash?: string;
-  };
-  try {
-    body = await request.json();
-  } catch {
-    throw new ApiFailure(400, "INVALID_JSON");
-  }
-
-  const { attemptPublicId, sourceTxHash, destinationTxHash } = body;
-  if (!attemptPublicId || !isValidPaymentAttemptPublicId(attemptPublicId)) {
-    throw new ApiFailure(400, "INVALID_ATTEMPT_PUBLIC_ID");
-  }
-
-  const sTx =
-    sourceTxHash ??
-    `0x${createHash("sha256").update(`${attemptPublicId}-src`).digest("hex")}`;
-  const dTx =
-    destinationTxHash ??
-    `0x${createHash("sha256").update(`${attemptPublicId}-dest`).digest("hex")}`;
-
-  const result = await workerSettlePayment(attemptPublicId, {
-    sourceTxHash: sTx,
-    destinationTxHash: dTx,
-  });
-
-  return reply(200, result);
 }

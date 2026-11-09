@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   assertDoubleEntryBalance,
+  assertMultiCurrencyDoubleEntryBalance,
   generateLedgerJournalPublicId,
   isValidLedgerJournalPublicId,
 } from "../src/domain/ledger.ts";
@@ -30,6 +31,70 @@ describe("domain: ledger double-entry bookkeeping", () => {
     assert.equal(result.isBalanced, true);
     assert.equal(result.totalDebit, 10000000n);
     assert.equal(result.totalCredit, 10000000n);
+  });
+
+  it("validates multi-currency balanced legs per asset and network", () => {
+    const multiCurrencyLines = [
+      // Leg 1: Source asset SOL on Solana
+      {
+        ledgerAccountId: "acct-sol-custody",
+        assetId: "solana-mainnet:SOL",
+        network: "solana-mainnet",
+        entryDirection: "DEBIT" as const,
+        amountAtomic: 1000000000n, // 1 SOL
+      },
+      {
+        ledgerAccountId: "acct-sol-clearing",
+        assetId: "solana-mainnet:SOL",
+        network: "solana-mainnet",
+        entryDirection: "CREDIT" as const,
+        amountAtomic: 1000000000n, // 1 SOL
+      },
+      // Leg 2: Destination asset USDC on Base
+      {
+        ledgerAccountId: "acct-base-clearing",
+        assetId: "base-mainnet:USDC",
+        network: "base-mainnet",
+        entryDirection: "DEBIT" as const,
+        amountAtomic: 180000000n, // 180 USDC
+      },
+      {
+        ledgerAccountId: "acct-base-merchant",
+        assetId: "base-mainnet:USDC",
+        network: "base-mainnet",
+        entryDirection: "CREDIT" as const,
+        amountAtomic: 180000000n, // 180 USDC
+      },
+    ];
+
+    const result = assertMultiCurrencyDoubleEntryBalance(multiCurrencyLines);
+    assert.equal(result.isBalanced, true);
+    assert.equal(result.legs.size, 2);
+  });
+
+  it("rejects cross-currency entries where a single currency leg does not balance", () => {
+    // Attempting to balance 1 SOL (atomic 1000000000) against 1 SOL worth of USDC on Base without clearing legs
+    const invalidLines = [
+      {
+        ledgerAccountId: "acct-sol-custody",
+        assetId: "solana-mainnet:SOL",
+        network: "solana-mainnet",
+        entryDirection: "DEBIT" as const,
+        amountAtomic: 1000000000n,
+      },
+      {
+        ledgerAccountId: "acct-base-merchant",
+        assetId: "base-mainnet:USDC",
+        network: "base-mainnet",
+        entryDirection: "CREDIT" as const,
+        amountAtomic: 1000000000n, // Raw numbers match, but assets differ!
+      },
+    ];
+
+    assert.throws(
+      () => assertMultiCurrencyDoubleEntryBalance(invalidLines),
+      /Unbalanced currency leg/,
+    );
   });
 
   it("rejects unbalanced entries where debits > credits", () => {

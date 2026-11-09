@@ -8534,7 +8534,7 @@ test("database integration: M5 Phase 4 financial ledger double-entry, RLS isolat
         `SELECT * FROM flow.post_balanced_ledger_journal('lj_test_unbalanced_01', 'PAYMENT_SETTLEMENT', 'ref_1', 'test unbalanced', $1::jsonb)`,
         [unbalancedEntries],
       ),
-      /UNBALANCED_JOURNAL_ENTRY/,
+      /UNBALANCED_CURRENCY_LEG/,
     );
 
     // 3. Balanced Journal Posting Test
@@ -8661,6 +8661,89 @@ test("database integration: M5 Phase 4 financial ledger double-entry, RLS isolat
       [prPublicId],
     );
     assert.equal(updatedPr.rows[0]!.status, "COMPLETED");
+
+    // 6. Security & Ledger Integrity Invariant Checks:
+    // a. Ordinary appClient is strictly forbidden from executing worker_settle_payment_attempt
+    await assert.rejects(
+      appClient.query(
+        `SELECT * FROM flow.worker_settle_payment_attempt($1, '0xsource_tx_hash_1', '0xdest_tx_hash_1')`,
+        [attemptPublicId],
+      ),
+      { code: "42501" }, // Permission denied
+    );
+
+    // b. Ordinary appClient is strictly forbidden from executing raw post_balanced_ledger_journal
+    await assert.rejects(
+      appClient.query(
+        `SELECT * FROM flow.post_balanced_ledger_journal('lj_test', 'TEST', 'id', 'desc', '[]'::jsonb)`,
+      ),
+      { code: "42501" }, // Permission denied
+    );
+
+    // c. Multi-currency leg conservation: Unbalanced cross-currency journal throws UNBALANCED_CURRENCY_LEG
+    const solAcct = await workerClient.query<{ id: string }>(
+      `SELECT id FROM flow.ledger_accounts WHERE asset_id = 'ethereum-mainnet:USDC' LIMIT 1`,
+    );
+    if (solAcct.rows.length > 0) {
+      await assert.rejects(
+        workerClient.query(
+          `SELECT * FROM flow.post_balanced_ledger_journal(
+            'lj_unbalanced_test', 'TEST', 'ref', 'Unbalanced cross currency leg test',
+            $1::jsonb
+          )`,
+          [
+            JSON.stringify([
+              {
+                ledger_account_id: solAcct.rows[0]!.id,
+                entry_direction: "DEBIT",
+                amount_atomic: "1000",
+              },
+              {
+                ledger_account_id: solAcct.rows[0]!.id,
+                entry_direction: "CREDIT",
+                amount_atomic: "500",
+              },
+            ]),
+          ],
+        ),
+        /UNBALANCED_CURRENCY_LEG/,
+      );
+    }
+
+    // d. Synthetic deposit address rejection
+    const synPrPublicId = `pr_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+        account_id, public_id, title, destination_network, destination_asset_id,
+        destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount, status
+      ) VALUES (
+        $1, $2, 'Synthetic Check Invoice', 'near-mainnet', 'near-mainnet:NEAR', 'NEAR', 24, 'FIXED', 1000, 'ACTIVE'
+      )`,
+      [tenantAccountId, synPrPublicId],
+    );
+
+    const synAttemptId = `pa_${randomUUID().replace(/-/g, "").slice(0, 32)}`;
+    await workerClient.query(
+      `INSERT INTO flow.payment_attempts (
+        payment_request_id, attempt_public_id, payer_mode, source_network, source_asset_id,
+        source_asset_symbol, source_decimals, route_type, route_status, quoted_source_atomic_amount,
+        quoted_destination_atomic_amount, status, quote_expires_at, verification_tier, is_provider_verified
+      ) VALUES (
+        (SELECT id FROM flow.payment_requests WHERE public_id = $1),
+        $2, 'WALLET', 'near-mainnet', 'near-mainnet:NEAR', 'NEAR', 24,
+        'DIRECT_TRANSFER', 'SUPPORTED_AND_QUOTABLE', 1000, 1000,
+        'QUOTE_OBSERVED', CURRENT_TIMESTAMP + INTERVAL '10 minutes', 'PROVIDER_VERIFIED', true
+      )`,
+      [synPrPublicId, synAttemptId],
+    );
+
+    await assert.rejects(
+      appClient.query(
+        `SELECT * FROM flow.commit_payment_attempt($1, 'flow-synthetic-123.near', NULL, CURRENT_TIMESTAMP + INTERVAL '15 minutes', '{}'::jsonb)`,
+        [synAttemptId],
+      ),
+      /INVALID_PROVIDER_DEPOSIT_ADDRESS/,
+    );
   } finally {
     adminClient.release();
     workerClient.release();
