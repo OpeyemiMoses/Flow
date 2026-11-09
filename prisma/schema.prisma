@@ -633,13 +633,18 @@ model PaymentAttempt {
   providerCorrelationId         String?        @map("provider_correlation_id") @db.VarChar(128)
   providerSignature             String?        @map("provider_signature") @db.Text
   quoteExpiresAt                DateTime?      @map("quote_expires_at") @db.Timestamptz
-  status                        String         @default("INDICATIVE_QUOTE") @db.VarChar(32)
+  status                        String         @default("QUOTE_OBSERVED") @db.VarChar(32)
+  verificationTier              String         @default("UNVERIFIED_OBSERVATION") @map("verification_tier") @db.VarChar(32)
+  isProviderVerified            Boolean        @default(false) @map("is_provider_verified")
+  settledAt                     DateTime?      @map("settled_at") @db.Timestamptz
   createdAt                     DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt                     DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
 
   paymentRequest                PaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade)
 
   @@index([paymentRequestId, createdAt(sort: Desc)])
   @@index([attemptPublicId])
+  @@index([paymentRequestId, status])
   @@map("payment_attempts")
   @@schema("flow")
 }

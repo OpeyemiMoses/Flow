@@ -8226,6 +8226,8 @@ test("database integration: M5 Phase 2 payment_attempts schema, constraints, sec
       attempt_public_id: string;
       route_status: string;
       status: string;
+      verification_tier: string;
+      is_provider_verified: boolean;
     }>(
       `SELECT * FROM flow.record_public_payment_attempt(
          $1, $2, 'WALLET', NULL, 'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
@@ -8238,7 +8240,9 @@ test("database integration: M5 Phase 2 payment_attempts schema, constraints, sec
     assert.equal(recorded.rows.length, 1);
     assert.equal(recorded.rows[0]!.attempt_public_id, validAttemptId);
     assert.equal(recorded.rows[0]!.route_status, "SUPPORTED_AND_QUOTABLE");
-    assert.equal(recorded.rows[0]!.status, "INDICATIVE_QUOTE");
+    assert.equal(recorded.rows[0]!.status, "QUOTE_OBSERVED");
+    assert.equal(recorded.rows[0]!.verification_tier, "UNVERIFIED_OBSERVATION");
+    assert.equal(recorded.rows[0]!.is_provider_verified, false);
 
     // (b) Fails on non-existent payment request
     await assert.rejects(
@@ -8352,6 +8356,128 @@ test("database integration: M5 Phase 2 payment_attempts schema, constraints, sec
       `SELECT * FROM flow.payment_attempts`,
     );
     assert.equal(unauthAttempts.rows.length, 0);
+  } finally {
+    adminClient.release();
+    workerClient.release();
+    appClient.release();
+  }
+});
+
+test("database integration: M5 Phase 3 quote integrity, unprivileged caller boundaries, and settlement idempotency", async () => {
+  const adminClient = await pool.connect();
+  const workerClient = await workerPool.connect();
+  const appClient = await pool.connect();
+
+  try {
+    const owner = await createTestAccount(
+      adminClient,
+      "PERSONAL",
+      "m5p3-db-owner",
+    );
+    const invoicePublicId = "pr_m5p3_integrity_test_invoice";
+
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+         account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount, status
+       ) VALUES ($1, $2, 'Integrity Test Invoice', 'base-mainnet', 'base-mainnet:USDC', 'USDC', 6, 'FIXED', 10000000, 'ACTIVE')`,
+      [owner.accountId, invoicePublicId],
+    );
+
+    // 1. Record an unverified quote observation via record_public_payment_attempt
+    const attemptPublicId1 = "pa_0123456789abcdef0123456789abcdef";
+    const corrId1 = "corr-integrity-1";
+
+    const rec = await appClient.query<{
+      status: string;
+      verification_tier: string;
+      is_provider_verified: boolean;
+    }>(
+      `SELECT * FROM flow.record_public_payment_attempt(
+         $1, $2, 'WALLET', NULL, 'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
+         'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 'EXACT_OUTPUT',
+         116000000::decimal, 10000000::decimal, 22, '{"refundFee":"10000"}'::jsonb,
+         $3, 'signature-forged-test', now() + interval '1 minute'
+       )`,
+      [invoicePublicId, attemptPublicId1, corrId1],
+    );
+
+    assert.equal(rec.rows[0]!.status, "QUOTE_OBSERVED");
+    assert.equal(rec.rows[0]!.verification_tier, "UNVERIFIED_OBSERVATION");
+    assert.equal(rec.rows[0]!.is_provider_verified, false);
+
+    // 2. Adversarial Test: App-role caller cannot execute worker_verify_payment_attempt
+    await assert.rejects(
+      appClient.query(
+        `SELECT * FROM flow.worker_verify_payment_attempt($1, $2)`,
+        [attemptPublicId1, corrId1],
+      ),
+      { code: "42501" }, // permission denied for function worker_verify_payment_attempt
+    );
+
+    // 3. Adversarial Test: App role cannot manufacture SETTLED status or bypass constraint
+    await assert.rejects(
+      appClient.query(
+        `UPDATE flow.payment_attempts SET status = 'SETTLED', is_provider_verified = true WHERE attempt_public_id = $1`,
+        [attemptPublicId1],
+      ),
+      // Either 0 rows affected by RLS or check constraint
+    );
+
+    // Verify row remains unverified
+    const checkRow = await workerClient.query<{
+      status: string;
+      verification_tier: string;
+      is_provider_verified: boolean;
+    }>(
+      `SELECT status, verification_tier, is_provider_verified FROM flow.payment_attempts WHERE attempt_public_id = $1`,
+      [attemptPublicId1],
+    );
+    assert.equal(checkRow.rows[0]!.status, "QUOTE_OBSERVED");
+    assert.equal(checkRow.rows[0]!.verification_tier, "UNVERIFIED_OBSERVATION");
+    assert.equal(checkRow.rows[0]!.is_provider_verified, false);
+
+    // 4. Privileged worker verification succeeds
+    const verified = await workerClient.query<{
+      status: string;
+      verification_tier: string;
+      is_provider_verified: boolean;
+    }>(`SELECT * FROM flow.worker_verify_payment_attempt($1, $2)`, [
+      attemptPublicId1,
+      corrId1,
+    ]);
+    assert.equal(verified.rows.length, 1);
+    assert.equal(verified.rows[0]!.verification_tier, "PROVIDER_VERIFIED");
+    assert.equal(verified.rows[0]!.is_provider_verified, true);
+
+    // 5. Test Settlement Idempotency (Partial Unique Index)
+    // Worker transitions attempt 1 to SETTLING
+    await workerClient.query(
+      `UPDATE flow.payment_attempts SET status = 'SETTLING' WHERE attempt_public_id = $1`,
+      [attemptPublicId1],
+    );
+
+    // Create attempt 2 for the SAME payment request
+    const attemptPublicId2 = "pa_fedcba9876543210fedcba9876543210";
+    await workerClient.query(
+      `INSERT INTO flow.payment_attempts (
+         payment_request_id, attempt_public_id, payer_mode, source_network, source_asset_id,
+         source_asset_symbol, source_decimals, route_type, route_status, status, verification_tier, is_provider_verified
+       ) VALUES (
+         (SELECT id FROM flow.payment_requests WHERE public_id = $1),
+         $2, 'WALLET', 'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
+         'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 'QUOTE_OBSERVED', 'PROVIDER_VERIFIED', true
+       )`,
+      [invoicePublicId, attemptPublicId2],
+    );
+
+    // Attempting to set attempt 2 to SETTLED while attempt 1 is SETTLING MUST FAIL with unique constraint violation
+    await assert.rejects(
+      workerClient.query(
+        `UPDATE flow.payment_attempts SET status = 'SETTLED' WHERE attempt_public_id = $1`,
+        [attemptPublicId2],
+      ),
+      { code: "23505" }, // unique_violation on uq_payment_request_settled_attempt
+    );
   } finally {
     adminClient.release();
     workerClient.release();

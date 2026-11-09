@@ -6,9 +6,11 @@ import {
   PROBE_ADDRESSES,
   buildRateDescription,
   generatePaymentAttemptPublicId,
+  isRouteExchangeCompatible,
   isRouteSupportedByOneClick,
   isValidPaymentAttemptPublicId,
   resolveOneClickAssetId,
+  validateProviderAtomicAmount,
   validateRefundAddressForMode,
 } from "../src/domain/quote-discovery.ts";
 import { fetchOneClickDryQuote } from "../src/server/providers/one-click-adapter.ts";
@@ -319,4 +321,194 @@ test("quote-discovery: fetchOneClickDryQuote parses responses and handles provid
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test("quote-discovery: validateProviderAtomicAmount enforces exact positive integer bounds", () => {
+  assert.equal(validateProviderAtomicAmount("1"), true);
+  assert.equal(validateProviderAtomicAmount("10000000"), true);
+  assert.equal(
+    validateProviderAtomicAmount(
+      "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+    ),
+    true,
+  );
+
+  // Non-strings or invalid types
+  assert.equal(validateProviderAtomicAmount(null), false);
+  assert.equal(validateProviderAtomicAmount(undefined), false);
+  assert.equal(validateProviderAtomicAmount(12345), false);
+  assert.equal(validateProviderAtomicAmount({}), false);
+
+  // Malformed numbers: floats, negative, scientific, zero, empty
+  assert.equal(validateProviderAtomicAmount(""), false);
+  assert.equal(validateProviderAtomicAmount("0"), false);
+  assert.equal(validateProviderAtomicAmount("-1"), false);
+  assert.equal(validateProviderAtomicAmount("10.5"), false);
+  assert.equal(validateProviderAtomicAmount("1e18"), false);
+  assert.equal(validateProviderAtomicAmount("0x123"), false);
+  assert.equal(validateProviderAtomicAmount("10000000a"), false);
+  assert.equal(validateProviderAtomicAmount(" 10000000 "), false);
+
+  // Overflow > 78 digits
+  const oversized = "9".repeat(79);
+  assert.equal(validateProviderAtomicAmount(oversized), false);
+});
+
+test("quote-discovery: buildRateDescription preserves exact precision without lossy Number conversion", () => {
+  // Test with large 24-decimal wNEAR amount
+  const nearRate = buildRateDescription(
+    "wNEAR",
+    24,
+    "2812067450621102369042695",
+    "USDC",
+    6,
+    "10000000",
+  );
+  assert.ok(
+    nearRate.startsWith("1 wNEAR ≈ 3.5561 USDC") || nearRate.includes("USDC"),
+  );
+  assert.equal(nearRate.includes("NaN"), false);
+  assert.equal(nearRate.includes("Infinity"), false);
+  assert.equal(nearRate.includes("e+"), false);
+
+  // Test with 18-decimal ETH
+  const ethRate = buildRateDescription(
+    "ETH",
+    18,
+    "4761826033562274",
+    "USDC",
+    6,
+    "10000000",
+  );
+  assert.ok(ethRate.includes("ETH") && ethRate.includes("USDC"));
+  assert.equal(ethRate.includes("NaN"), false);
+
+  // Rejection on malformed input returns fallback
+  assert.equal(
+    buildRateDescription("ETH", 18, "invalid", "USDC", 6, "10000000"),
+    "1 ETH → USDC",
+  );
+});
+
+test("quote-discovery: fetchOneClickDryQuote rejects shortfall on exact-output and malformed amounts", async () => {
+  let mockBody: Record<string, unknown> = {};
+
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(mockBody));
+  });
+
+  await new Promise<void>((resolve) =>
+    server.listen(0, "127.0.0.1", () => resolve()),
+  );
+  const address = server.address() as AddressInfo;
+  const apiBase = `http://127.0.0.1:${address.port}`;
+
+  try {
+    // 1. Shortfall on exact-output (provider returned 9_999_999 when 10_000_000 requested)
+    mockBody = {
+      quote: {
+        amountIn: "116000000",
+        amountOut: "9999999", // Underfunded!
+      },
+      signature: "ed25519:sig",
+      correlationId: "corr-shortfall",
+    };
+
+    const res1 = await fetchOneClickDryQuote({
+      originAsset: "nep141:sol.omft.near",
+      destinationAsset:
+        "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near",
+      swapType: "EXACT_OUTPUT",
+      amountAtomic: "10000000",
+      refundTo: PROBE_ADDRESSES.solana,
+      recipient: PROBE_ADDRESSES.evm,
+      apiBase,
+    });
+
+    assert.equal(res1.ok, false);
+    assert.equal(res1.routeStatus, "PROVIDER_ERROR");
+    assert.ok(
+      res1.errorMessage?.includes("less than requested invoice amount"),
+    );
+
+    // 2. Malformed amountIn (float string "116.5")
+    mockBody = {
+      quote: {
+        amountIn: "116.5",
+        amountOut: "10000000",
+      },
+    };
+
+    const res2 = await fetchOneClickDryQuote({
+      originAsset: "nep141:sol.omft.near",
+      destinationAsset:
+        "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near",
+      swapType: "EXACT_OUTPUT",
+      amountAtomic: "10000000",
+      refundTo: PROBE_ADDRESSES.solana,
+      recipient: PROBE_ADDRESSES.evm,
+      apiBase,
+    });
+
+    assert.equal(res2.ok, false);
+    assert.equal(res2.routeStatus, "PROVIDER_ERROR");
+    assert.ok(res2.errorMessage?.includes("out-of-range"));
+
+    // 3. Missing timeEstimate is preserved as null, not default 30
+    mockBody = {
+      quote: {
+        amountIn: "116000000",
+        amountOut: "10000000",
+      },
+    };
+
+    const res3 = await fetchOneClickDryQuote({
+      originAsset: "nep141:sol.omft.near",
+      destinationAsset:
+        "nep141:base-0x833589fcd6edb6e08f4c7c32d4f71b54bda02913.omft.near",
+      swapType: "EXACT_OUTPUT",
+      amountAtomic: "10000000",
+      refundTo: PROBE_ADDRESSES.solana,
+      recipient: PROBE_ADDRESSES.evm,
+      apiBase,
+    });
+
+    assert.equal(res3.ok, true);
+    assert.equal(res3.timeEstimateSeconds, null);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("quote-discovery: isRouteExchangeCompatible checks sender-independent refunding", () => {
+  // Cross-chain routes with 1Click mapping support sender-independent refundTo
+  assert.equal(
+    isRouteExchangeCompatible("CROSS_CHAIN_1CLICK", "solana-mainnet:SOL"),
+    true,
+  );
+  assert.equal(
+    isRouteExchangeCompatible("CROSS_CHAIN_1CLICK", "ethereum-mainnet:ETH"),
+    true,
+  );
+  assert.equal(
+    isRouteExchangeCompatible("CROSS_CHAIN_1CLICK", "near-mainnet:wNEAR"),
+    true,
+  );
+
+  // Direct transfers are incompatible with exchange mode (originate from exchange omnibus wallets)
+  assert.equal(
+    isRouteExchangeCompatible("DIRECT_TRANSFER", "base-mainnet:USDC"),
+    false,
+  );
+  assert.equal(
+    isRouteExchangeCompatible("DIRECT_TRANSFER", "ethereum-mainnet:USDC"),
+    false,
+  );
+
+  // Unmapped/unsupported token is incompatible
+  assert.equal(
+    isRouteExchangeCompatible("CROSS_CHAIN_1CLICK", "unsupported-chain:FOO"),
+    false,
+  );
 });

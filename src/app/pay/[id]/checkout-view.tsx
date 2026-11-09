@@ -103,6 +103,20 @@ export function CheckoutView({ request }: CheckoutViewProps) {
       return;
     }
 
+    // In optional amount mode, require explicit positive payer amount
+    if (
+      request.amountMode === "OPTIONAL" &&
+      (!customAmount || customAmount.trim().length === 0)
+    ) {
+      Promise.resolve().then(() => {
+        if (active) {
+          setQuote(null);
+          setLoadingQuote(false);
+        }
+      });
+      return;
+    }
+
     let active = true;
     Promise.resolve().then(() => {
       if (active) {
@@ -226,7 +240,8 @@ export function CheckoutView({ request }: CheckoutViewProps) {
           <IconInfo size={16} className="text-[#2563FF] shrink-0 mt-0.5" />
           <div className="space-y-1">
             <div className="font-medium text-[var(--text-primary)]">
-              M5 Phase 2 Staged Checkout · Real Read-Only Indicative Quotes
+              M5 Phase 3 Staged Checkout · Verified Quote Integrity &amp;
+              Payment Readiness
             </div>
             <div>
               FLOW is running in preview mode (
@@ -616,7 +631,9 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                       <div className="flex justify-between">
                         <span>Estimated Duration:</span>
                         <span className="font-medium text-[var(--text-primary)]">
-                          ~{quote.estimatedDurationSeconds} seconds
+                          {quote.estimatedDurationSeconds !== null
+                            ? `~${quote.estimatedDurationSeconds} seconds`
+                            : "Variable / Unknown"}
                         </span>
                       </div>
                       <div className="flex justify-between">
@@ -626,7 +643,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                         </span>
                       </div>
                       <div className="flex justify-between items-center pt-1 border-t border-[var(--border-subtle)]">
-                        <span>Quote Freshness:</span>
+                        <span>Local Preview Expiry:</span>
                         <div className="flex items-center gap-1.5">
                           <span
                             className={`font-mono ${
@@ -636,7 +653,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                             }`}
                           >
                             {secondsRemaining > 0
-                              ? `Expires in ${secondsRemaining}s`
+                              ? `Refresh in ${secondsRemaining}s`
                               : "Expired"}
                           </span>
                           <button

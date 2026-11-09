@@ -1,7 +1,8 @@
-import type {
-  IndicativeQuoteFeeBreakdown,
-  QuoteSwapType,
-  RouteAvailabilityStatus,
+import {
+  type IndicativeQuoteFeeBreakdown,
+  type QuoteSwapType,
+  type RouteAvailabilityStatus,
+  validateProviderAtomicAmount,
 } from "../../domain/quote-discovery.ts";
 
 export interface OneClickQuoteRequest {
@@ -47,11 +48,13 @@ export interface OneClickDryQuoteResult {
   routeStatus: RouteAvailabilityStatus;
   amountInAtomic?: string;
   amountOutAtomic?: string;
-  timeEstimateSeconds?: number;
+  minAmountOutAtomic?: string;
+  timeEstimateSeconds?: number | null;
   fees?: IndicativeQuoteFeeBreakdown;
   correlationId?: string;
   signature?: string;
-  quoteTimestamp?: string;
+  quoteTimestamp?: string | null;
+  providerDeadline?: string | null;
   errorMessage?: string;
 }
 
@@ -108,10 +111,11 @@ export async function fetchOneClickDryQuote(params: {
 
     if (!response.ok) {
       const msg = data.message ?? data.error ?? `HTTP ${response.status}`;
+      const msgLower = msg.toLowerCase();
       if (
-        msg.toLowerCase().includes("tokenin is not valid") ||
-        msg.toLowerCase().includes("tokenout is not valid") ||
-        msg.toLowerCase().includes("unsupported")
+        msgLower.includes("tokenin is not valid") ||
+        msgLower.includes("tokenout is not valid") ||
+        msgLower.includes("unsupported")
       ) {
         return {
           ok: false,
@@ -119,7 +123,10 @@ export async function fetchOneClickDryQuote(params: {
           errorMessage: msg,
         };
       }
-      if (msg.toLowerCase().includes("no liquidity")) {
+      if (
+        msgLower.includes("no liquidity") ||
+        msgLower.includes("insufficient liquidity")
+      ) {
         return {
           ok: false,
           routeStatus: "TEMPORARILY_UNAVAILABLE",
@@ -138,34 +145,87 @@ export async function fetchOneClickDryQuote(params: {
       return {
         ok: false,
         routeStatus: "PROVIDER_ERROR",
-        errorMessage: "Malformed quote received from provider.",
+        errorMessage: "Malformed quote payload received from provider.",
       };
     }
 
-    const feeDescription =
-      [
-        data.quote.refundFee ? `Refund fee: ${data.quote.refundFee}` : null,
-        data.quote.withdrawFee
-          ? `Withdraw fee: ${data.quote.withdrawFee}`
-          : null,
-      ]
-        .filter(Boolean)
-        .join("; ") || "Network and solver fees included.";
+    // Validate atomic integer amount format and positive bounds (Requirement 6)
+    if (
+      !validateProviderAtomicAmount(data.quote.amountIn) ||
+      !validateProviderAtomicAmount(data.quote.amountOut)
+    ) {
+      return {
+        ok: false,
+        routeStatus: "PROVIDER_ERROR",
+        errorMessage: "Malformed or out-of-range provider atomic amounts.",
+      };
+    }
+
+    // Validate exact-output destination satisfaction (Requirement 7)
+    if (params.swapType === "EXACT_OUTPUT") {
+      const expectedRequested = BigInt(params.amountAtomic);
+      const returnedOut = BigInt(data.quote.amountOut);
+      if (returnedOut < expectedRequested) {
+        return {
+          ok: false,
+          routeStatus: "PROVIDER_ERROR",
+          errorMessage: `Provider quote output amount (${data.quote.amountOut}) is less than requested invoice amount (${params.amountAtomic}).`,
+        };
+      }
+      if (data.quote.minAmountOut) {
+        if (!validateProviderAtomicAmount(data.quote.minAmountOut)) {
+          return {
+            ok: false,
+            routeStatus: "PROVIDER_ERROR",
+            errorMessage: "Provider minAmountOut has invalid atomic format.",
+          };
+        }
+        if (BigInt(data.quote.minAmountOut) < expectedRequested) {
+          return {
+            ok: false,
+            routeStatus: "PROVIDER_ERROR",
+            errorMessage: `Provider minAmountOut (${data.quote.minAmountOut}) is less than requested invoice amount (${params.amountAtomic}).`,
+          };
+        }
+      }
+    }
+
+    const hasProviderFees = Boolean(
+      data.quote.refundFee || data.quote.withdrawFee,
+    );
+    const feeDescription = hasProviderFees
+      ? [
+          data.quote.refundFee ? `Refund fee: ${data.quote.refundFee}` : null,
+          data.quote.withdrawFee
+            ? `Withdraw fee: ${data.quote.withdrawFee}`
+            : null,
+        ]
+          .filter(Boolean)
+          .join("; ")
+      : "Solver and network fees are determined at route execution.";
 
     return {
       ok: true,
       routeStatus: "SUPPORTED_AND_QUOTABLE",
       amountInAtomic: data.quote.amountIn,
       amountOutAtomic: data.quote.amountOut,
-      timeEstimateSeconds: data.quote.timeEstimate ?? 30,
+      minAmountOutAtomic: data.quote.minAmountOut ?? undefined,
+      // Preserve missing fields as null rather than arbitrary defaults (Requirement 8)
+      timeEstimateSeconds:
+        typeof data.quote.timeEstimate === "number" &&
+        data.quote.timeEstimate > 0
+          ? data.quote.timeEstimate
+          : null,
       fees: {
-        refundFeeAtomic: data.quote.refundFee,
-        withdrawFeeAtomic: data.quote.withdrawFee,
+        refundFeeAtomic: data.quote.refundFee ?? null,
+        withdrawFeeAtomic: data.quote.withdrawFee ?? null,
+        isEstimate: !hasProviderFees,
         description: feeDescription,
       },
       correlationId: data.correlationId ?? undefined,
       signature: data.signature ?? undefined,
-      quoteTimestamp: data.timestamp ?? new Date().toISOString(),
+      quoteTimestamp: data.timestamp ?? null,
+      providerDeadline: data.quoteRequest?.deadline ?? payload.deadline,
     };
   } catch (err: unknown) {
     const isTimeout =

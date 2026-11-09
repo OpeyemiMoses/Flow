@@ -1918,3 +1918,150 @@ test("security: M5 Phase 2 real route discovery, read-only quotes, refund valida
     await ctx.close();
   }
 });
+
+test("security: M5 Phase 3 quote integrity, precision overflow, token confusion, optional amount enforcement, and lifecycle boundaries", async () => {
+  const owner = await person("payment-owner-m5p3@example.com");
+  const unauth = await app.createClient();
+
+  // 1. Create an OPTIONAL amount payment request
+  const optCreateRes = await owner.client.post(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Open Consulting Deposit",
+        description: "Payer enters arbitrary settlement amount",
+        destinationNetwork: "base-mainnet",
+        destinationAssetId: "base-mainnet:USDC",
+        amountMode: "OPTIONAL",
+        expiresInHours: 72,
+        payerMemoRequired: false,
+      },
+    },
+  );
+  assert.equal(optCreateRes.status(), 201);
+  const optCreated = await optCreateRes.json();
+
+  // 2. Requirement 5: Reject missing or non-positive amount on optional-amount requests
+  const noAmountRes = await unauth.post(
+    `/api/pay/${optCreated.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "WALLET",
+      },
+    },
+  );
+  assert.equal(noAmountRes.status(), 400);
+  const noAmountErr = await noAmountRes.json();
+  assert.equal(noAmountErr.error, "PAYER_AMOUNT_REQUIRED");
+
+  const zeroAmountRes = await unauth.post(
+    `/api/pay/${optCreated.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "WALLET",
+        payerAmount: "0",
+      },
+    },
+  );
+  assert.equal(zeroAmountRes.status(), 400);
+  assert.equal((await zeroAmountRes.json()).error, "INVALID_PAYER_AMOUNT");
+
+  const negativeAmountRes = await unauth.post(
+    `/api/pay/${optCreated.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "WALLET",
+        payerAmount: "-50.25",
+      },
+    },
+  );
+  assert.equal(negativeAmountRes.status(), 400);
+
+  const invalidTextAmountRes = await unauth.post(
+    `/api/pay/${optCreated.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "WALLET",
+        payerAmount: "not_a_number",
+      },
+    },
+  );
+  assert.equal(invalidTextAmountRes.status(), 400);
+
+  // 3. Valid optional amount query succeeds and verifies unverified observation tier
+  const validOptQuoteRes = await unauth.post(
+    `/api/pay/${optCreated.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "WALLET",
+        payerAmount: "25.0",
+      },
+    },
+  );
+  assert.equal(validOptQuoteRes.status(), 200);
+  const validOptQuote = await validOptQuoteRes.json();
+  assert.equal(validOptQuote.routeStatus, "SUPPORTED_AND_QUOTABLE");
+  assert.equal(validOptQuote.verificationTier, "UNVERIFIED_OBSERVATION");
+  assert.equal(validOptQuote.isProviderVerified, false);
+  assert.equal(validOptQuote.isExchangeCompatible, true);
+  assert.ok(validOptQuote.localPreviewExpiresAt);
+
+  // 4. Requirement 13: Direct transfer route is incompatible with Exchange mode
+  const directExchangeRes = await unauth.post(
+    `/api/pay/${optCreated.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "base-mainnet:USDC",
+        payerMode: "EXCHANGE",
+        payerAmount: "10.0",
+        refundAddress: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+      },
+    },
+  );
+  assert.equal(directExchangeRes.status(), 400);
+  assert.equal(
+    (await directExchangeRes.json()).error,
+    "EXCHANGE_MODE_NOT_SUPPORTED_FOR_ROUTE",
+  );
+
+  // 5. Expired request quoting is rejected with 400
+  const expiredCreateRes = await owner.client.post(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Short-lived Request",
+        destinationNetwork: "base-mainnet",
+        destinationAssetId: "base-mainnet:USDC",
+        amountMode: "FIXED",
+        requestedAmount: "5.0",
+        expiresInHours: 24,
+      },
+    },
+  );
+  assert.equal(expiredCreateRes.status(), 201);
+  const expiredCreated = await expiredCreateRes.json();
+
+  // Expire in database using privileged worker connection
+  const updateRes = await workerDb.query(
+    `UPDATE flow.payment_requests SET expires_at = now() - interval '1 hour' WHERE public_id = $1`,
+    [expiredCreated.publicId],
+  );
+  assert.equal(updateRes.rowCount, 1);
+
+  const expiredQuoteRes = await unauth.post(
+    `/api/pay/${expiredCreated.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "WALLET",
+      },
+    },
+  );
+  assert.equal(expiredQuoteRes.status(), 400);
+  assert.equal((await expiredQuoteRes.json()).error, "PAYMENT_REQUEST_EXPIRED");
+});

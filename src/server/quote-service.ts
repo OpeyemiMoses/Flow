@@ -1,45 +1,46 @@
-import "server-only";
-import {
-  parseDisplayToAtomic,
-  formatAtomicToDisplay,
-} from "../domain/atomic-amounts.ts";
 import {
   type IndicativeQuote,
   type PayerCheckoutMode,
   type QuoteSwapType,
-  PROBE_ADDRESSES,
   buildRateDescription,
   generatePaymentAttemptPublicId,
+  isRouteExchangeCompatible,
+  PROBE_ADDRESSES,
   resolveOneClickAssetId,
   validateRefundAddressForMode,
 } from "../domain/quote-discovery.ts";
+import {
+  formatAtomicToDisplay,
+  parseDisplayToAtomic,
+} from "../domain/atomic-amounts.ts";
+import { isValidPublicPaymentId } from "../domain/payment-requests.ts";
 import { CURATED_SUPPORTED_DEPLOYMENTS } from "../domain/supported-assets-catalog.ts";
-import { runtime, type FlowDb } from "../foundation/prisma.ts";
 import { clientBudget } from "./auth/limits.ts";
 import { ApiFailure, reply } from "./http.ts";
+import { runtime, type FlowDb } from "../foundation/prisma.ts";
 import { fetchOneClickDryQuote } from "./providers/one-click-adapter.ts";
 
-export interface DiscoverQuoteInput {
-  sourceDeploymentId: string;
-  payerMode: PayerCheckoutMode;
-  refundAddress?: string | null;
-  customSourceDisplayAmount?: string | null;
+export interface RequestQuoteInput {
+  readonly sourceDeploymentId: string;
+  readonly payerMode: PayerCheckoutMode;
+  readonly refundAddress?: string | null;
+  readonly payerAmount?: string | null;
+  readonly customSourceDisplayAmount?: string | null;
 }
 
-export async function discoverPaymentQuote(
+export async function requestPaymentQuote(
   request: Request,
   publicId: string,
 ): Promise<Response> {
-  // 1. Rate limiting via durable PostgreSQL auth_throttles
-  const allowed = await clientBudget(request, "public:payment-quote");
-  if (!allowed) {
-    throw new ApiFailure(429, "RATE_LIMIT_EXCEEDED");
+  // 1. Validate Payment Request Public ID format
+  if (!isValidPublicPaymentId(publicId)) {
+    throw new ApiFailure(404, "PAYMENT_REQUEST_NOT_FOUND");
   }
 
-  // 2. Parse body
-  let body: DiscoverQuoteInput;
+  // 2. Parse request body
+  let body: RequestQuoteInput;
   try {
-    body = (await request.json()) as DiscoverQuoteInput;
+    body = (await request.json()) as RequestQuoteInput;
   } catch {
     throw new ApiFailure(400, "INVALID_JSON");
   }
@@ -48,11 +49,12 @@ export async function discoverPaymentQuote(
     sourceDeploymentId,
     payerMode,
     refundAddress,
+    payerAmount,
     customSourceDisplayAmount,
   } = body;
 
-  if (!sourceDeploymentId) {
-    throw new ApiFailure(400, "MISSING_SOURCE_DEPLOYMENT");
+  if (!sourceDeploymentId || typeof sourceDeploymentId !== "string") {
+    throw new ApiFailure(400, "SOURCE_DEPLOYMENT_ID_REQUIRED");
   }
 
   if (payerMode !== "WALLET" && payerMode !== "EXCHANGE") {
@@ -64,26 +66,33 @@ export async function discoverPaymentQuote(
     (d) => d.id === sourceDeploymentId,
   );
   if (!sourceDeployment) {
-    throw new ApiFailure(400, "UNKNOWN_SOURCE_DEPLOYMENT");
+    throw new ApiFailure(400, "UNSUPPORTED_SOURCE_DEPLOYMENT");
   }
 
-  // 4. Validate refund address for payer mode
+  // 4. Validate refund address for the chosen mode and source ecosystem
   const refundCheck = validateRefundAddressForMode(
     payerMode,
     sourceDeployment.ecosystem,
     refundAddress,
   );
   if (!refundCheck.valid) {
-    throw new ApiFailure(400, "INVALID_REFUND_ADDRESS");
+    throw new ApiFailure(400, refundCheck.error ?? "INVALID_REFUND_ADDRESS");
   }
 
-  // 5. Look up public payment request from DB
+  // 5. Durable rate limiting via flow.auth_throttles
+  const allowed = await clientBudget(request, "public:payment-quote");
+  if (!allowed) {
+    throw new ApiFailure(429, "RATE_LIMIT_EXCEEDED");
+  }
+
   const { db } = runtime();
+
+  // Query payment request from database
   const requestRows = await db.$queryRaw<
     Array<{
+      id: string;
       public_id: string;
       title: string;
-      description: string | null;
       destination_network: string;
       destination_asset_id: string;
       destination_asset_symbol: string;
@@ -112,39 +121,78 @@ export async function discoverPaymentQuote(
     throw new ApiFailure(400, "PAYMENT_REQUEST_EXPIRED");
   }
 
-  // 6. Resolve destination token deployment
+  // Check if expires_at is in the past
+  if (pr.expires_at && new Date(pr.expires_at) <= new Date()) {
+    throw new ApiFailure(400, "PAYMENT_REQUEST_EXPIRED");
+  }
+
+  // 6. Resolve destination token deployment with strict exact catalog match (Requirement 4)
   const destDeployment = CURATED_SUPPORTED_DEPLOYMENTS.find(
     (d) =>
       d.networkKey === pr.destination_network &&
-      (d.id === pr.destination_asset_id ||
-        d.symbol === pr.destination_asset_symbol),
-  ) ?? {
-    id: `${pr.destination_network}:${pr.destination_asset_symbol}`,
-    assetKey: pr.destination_asset_symbol.toLowerCase(),
-    symbol: pr.destination_asset_symbol,
-    name: pr.destination_asset_symbol,
-    kind: "STABLECOIN" as const,
-    ecosystem: sourceDeployment.ecosystem,
-    ecosystemLabel: pr.destination_network,
-    networkKey: pr.destination_network,
-    networkName: pr.destination_network,
-    environment: "mainnet" as const,
-    standard: "ERC20" as const,
-    contractIdentifier: pr.destination_asset_id,
-    decimals: pr.destination_decimals,
-    isDbSeeded: false,
-  };
+      d.id === pr.destination_asset_id,
+  );
+
+  if (!destDeployment) {
+    throw new ApiFailure(400, "UNSUPPORTED_DESTINATION_DEPLOYMENT");
+  }
+
+  // Reject mismatched contract, network, standard or decimals (Requirement 4)
+  if (
+    destDeployment.decimals !== pr.destination_decimals ||
+    destDeployment.networkKey !== pr.destination_network ||
+    destDeployment.symbol !== pr.destination_asset_symbol
+  ) {
+    throw new ApiFailure(400, "DESTINATION_DEPLOYMENT_MISMATCH");
+  }
+
+  // 7. Check if optional amount request has an explicit positive payer amount (Requirement 5)
+  let requestedPayerDisplayAmount: string | null = null;
+  if (pr.amount_mode === "OPTIONAL") {
+    const rawPayerAmount = customSourceDisplayAmount ?? payerAmount;
+    if (
+      !rawPayerAmount ||
+      typeof rawPayerAmount !== "string" ||
+      rawPayerAmount.trim().length === 0
+    ) {
+      throw new ApiFailure(400, "PAYER_AMOUNT_REQUIRED");
+    }
+    const trimmed = rawPayerAmount.trim();
+    try {
+      const parsedAtomic = parseDisplayToAtomic(
+        trimmed,
+        sourceDeployment.decimals,
+      );
+      if (parsedAtomic <= 0n) {
+        throw new ApiFailure(400, "INVALID_PAYER_AMOUNT");
+      }
+      requestedPayerDisplayAmount = trimmed;
+    } catch {
+      throw new ApiFailure(400, "INVALID_PAYER_AMOUNT");
+    }
+  }
 
   const isDirectTransfer =
     sourceDeployment.networkKey === destDeployment.networkKey &&
     sourceDeployment.contractIdentifier.toLowerCase() ===
       destDeployment.contractIdentifier.toLowerCase();
 
+  const routeType = isDirectTransfer ? "DIRECT_TRANSFER" : "CROSS_CHAIN_1CLICK";
+
+  // 8. Validate route exchange compatibility (Requirement 13)
+  const isExchangeCompat = isRouteExchangeCompatible(
+    routeType,
+    sourceDeployment.id,
+  );
+  if (isDirectTransfer && payerMode === "EXCHANGE") {
+    throw new ApiFailure(400, "EXCHANGE_MODE_NOT_SUPPORTED_FOR_ROUTE");
+  }
+
   const attemptPublicId = generatePaymentAttemptPublicId();
   const now = new Date();
-  const quoteExpiresAt = new Date(now.getTime() + 60_000); // 60s quote TTL
+  const localPreviewExpiresAt = new Date(now.getTime() + 60_000); // 60s local client preview window
 
-  // 7. Process Direct Transfer vs Cross-Chain 1Click Route
+  // 9. Process Direct Transfer vs Cross-Chain 1Click Route
   if (isDirectTransfer) {
     // Direct Transfer: 1:1 rate, but on-chain execution is disabled
     let sourceAtomic: string;
@@ -154,12 +202,10 @@ export async function discoverPaymentQuote(
       sourceAtomic = pr.requested_atomic_amount;
       destAtomic = pr.requested_atomic_amount;
     } else {
-      const parsed = customSourceDisplayAmount
-        ? parseDisplayToAtomic(
-            customSourceDisplayAmount,
-            sourceDeployment.decimals,
-          )
-        : 10n * BigInt(10 ** sourceDeployment.decimals);
+      const parsed = parseDisplayToAtomic(
+        requestedPayerDisplayAmount!,
+        sourceDeployment.decimals,
+      );
       sourceAtomic = parsed.toString();
       destAtomic = parsed.toString();
     }
@@ -173,7 +219,7 @@ export async function discoverPaymentQuote(
       destDeployment.decimals,
     );
 
-    // Record attempt in PostgreSQL
+    // Record attempt in PostgreSQL via flow.record_public_payment_attempt (untrusted tier)
     await recordPaymentAttemptRow(db, {
       paymentRequestPublicId: pr.public_id,
       attemptPublicId,
@@ -188,11 +234,14 @@ export async function discoverPaymentQuote(
       swapType: pr.amount_mode === "FIXED" ? "EXACT_OUTPUT" : "EXACT_INPUT",
       quotedSourceAtomic: sourceAtomic,
       quotedDestinationAtomic: destAtomic,
-      estimatedDurationSeconds: 15,
-      providerFees: { description: "Zero route fees for direct transfer." },
+      estimatedDurationSeconds: null,
+      providerFees: {
+        isEstimate: true,
+        description: "Zero route fees for direct transfer.",
+      },
       providerCorrelationId: null,
       providerSignature: null,
-      quoteExpiresAt,
+      quoteExpiresAt: localPreviewExpiresAt,
     });
 
     const quote: IndicativeQuote = {
@@ -215,15 +264,20 @@ export async function discoverPaymentQuote(
       sourceDisplayAmount: sourceDisplay,
       destinationAtomicAmount: destAtomic,
       destinationDisplayAmount: destDisplay,
-      estimatedDurationSeconds: 15,
+      estimatedDurationSeconds: null,
       exchangeRateDescription: `1 ${sourceDeployment.symbol} = 1 ${destDeployment.symbol}`,
       fees: {
+        isEstimate: true,
         description:
           "Direct on-chain transfer. Standard network gas fee applies at broadcast.",
       },
       quoteCreatedAt: now.toISOString(),
-      quoteExpiresAt: quoteExpiresAt.toISOString(),
+      localPreviewExpiresAt: localPreviewExpiresAt.toISOString(),
+      providerQuoteExpiresAt: null,
       correlationId: null,
+      verificationTier: "UNVERIFIED_OBSERVATION",
+      isProviderVerified: false,
+      isExchangeCompatible: isExchangeCompat,
       isIndicativeOnly: true,
       executionBlockedNotice:
         "Direct transfer preview only. Live payment execution is disabled (FLOW_EXECUTION=disabled).",
@@ -234,12 +288,12 @@ export async function discoverPaymentQuote(
     return reply(200, quote);
   }
 
-  // 8. Cross-Chain / Cross-Asset Route via 1Click Provider
+  // 10. Cross-Chain / Cross-Asset Route via 1Click Provider
   const sourceOneClickId = resolveOneClickAssetId(sourceDeployment.id);
   const destOneClickId = resolveOneClickAssetId(destDeployment.id);
 
   if (!sourceOneClickId || !destOneClickId) {
-    // Pair not supported by 1Click (e.g. testnet tokens or unmapped assets)
+    // Pair not supported by 1Click
     const quote: IndicativeQuote = {
       attemptPublicId,
       paymentRequestPublicId: pr.public_id,
@@ -265,12 +319,19 @@ export async function discoverPaymentQuote(
             destDeployment.decimals,
           )
         : "0",
-      estimatedDurationSeconds: 0,
+      estimatedDurationSeconds: null,
       exchangeRateDescription: "No route available",
-      fees: { description: "Unsupported cross-chain pair." },
+      fees: {
+        isEstimate: false,
+        description: "Unsupported cross-chain pair.",
+      },
       quoteCreatedAt: now.toISOString(),
-      quoteExpiresAt: quoteExpiresAt.toISOString(),
+      localPreviewExpiresAt: localPreviewExpiresAt.toISOString(),
+      providerQuoteExpiresAt: null,
       correlationId: null,
+      verificationTier: "UNVERIFIED_OBSERVATION",
+      isProviderVerified: false,
+      isExchangeCompatible: isExchangeCompat,
       isIndicativeOnly: true,
       executionBlockedNotice:
         "Route is unsupported by solver network. Live payment execution is disabled (FLOW_EXECUTION=disabled).",
@@ -281,7 +342,7 @@ export async function discoverPaymentQuote(
     return reply(200, quote);
   }
 
-  // 9. Fetch Real Read-Only Dry Quote from 1Click
+  // 11. Fetch Real Read-Only Dry Quote from 1Click
   const swapType: QuoteSwapType =
     pr.amount_mode === "FIXED" ? "EXACT_OUTPUT" : "EXACT_INPUT";
 
@@ -289,21 +350,20 @@ export async function discoverPaymentQuote(
   if (swapType === "EXACT_OUTPUT") {
     amountAtomic = pr.requested_atomic_amount!;
   } else {
-    const parsed = customSourceDisplayAmount
-      ? parseDisplayToAtomic(
-          customSourceDisplayAmount,
-          sourceDeployment.decimals,
-        )
-      : 10n * BigInt(10 ** sourceDeployment.decimals);
+    const parsed = parseDisplayToAtomic(
+      requestedPayerDisplayAmount!,
+      sourceDeployment.decimals,
+    );
     amountAtomic = parsed.toString();
   }
 
-  // Safe fallback probe addresses for dry quote query
+  // Safe fallback probe addresses for dry quote query (Requirement 12)
   const effectiveRefundTo =
     refundAddress && refundAddress.trim().length > 0
       ? refundAddress.trim()
       : PROBE_ADDRESSES[sourceDeployment.ecosystem];
 
+  // Safe probe address for dry quote query (Requirement 12: probe is indicative only)
   const probeRecipient = PROBE_ADDRESSES[destDeployment.ecosystem];
 
   const dryResult = await fetchOneClickDryQuote({
@@ -341,12 +401,19 @@ export async function discoverPaymentQuote(
             destDeployment.decimals,
           )
         : "0",
-      estimatedDurationSeconds: 0,
+      estimatedDurationSeconds: null,
       exchangeRateDescription: "Unavailable",
-      fees: { description: dryResult.errorMessage ?? "Provider error" },
+      fees: {
+        isEstimate: true,
+        description: dryResult.errorMessage ?? "Provider error",
+      },
       quoteCreatedAt: now.toISOString(),
-      quoteExpiresAt: quoteExpiresAt.toISOString(),
+      localPreviewExpiresAt: localPreviewExpiresAt.toISOString(),
+      providerQuoteExpiresAt: null,
       correlationId: null,
+      verificationTier: "UNVERIFIED_OBSERVATION",
+      isProviderVerified: false,
+      isExchangeCompatible: isExchangeCompat,
       isIndicativeOnly: true,
       executionBlockedNotice:
         "Quote discovery failed or route liquidity is temporarily unavailable. Live payment execution is disabled (FLOW_EXECUTION=disabled).",
@@ -356,7 +423,7 @@ export async function discoverPaymentQuote(
     return reply(200, quote);
   }
 
-  // 10. Compute display amounts and format
+  // 12. Compute display amounts and format
   const sourceAtomicAmount = dryResult.amountInAtomic!;
   const destAtomicAmount = dryResult.amountOutAtomic!;
 
@@ -378,7 +445,7 @@ export async function discoverPaymentQuote(
     destAtomicAmount,
   );
 
-  // 11. Record Attempt in PostgreSQL
+  // 13. Record Attempt in PostgreSQL (Untrusted Observation Tier)
   await recordPaymentAttemptRow(db, {
     paymentRequestPublicId: pr.public_id,
     attemptPublicId,
@@ -393,11 +460,11 @@ export async function discoverPaymentQuote(
     swapType,
     quotedSourceAtomic: sourceAtomicAmount,
     quotedDestinationAtomic: destAtomicAmount,
-    estimatedDurationSeconds: dryResult.timeEstimateSeconds ?? 30,
+    estimatedDurationSeconds: dryResult.timeEstimateSeconds ?? null,
     providerFees: dryResult.fees ?? {},
     providerCorrelationId: dryResult.correlationId ?? null,
     providerSignature: dryResult.signature ?? null,
-    quoteExpiresAt,
+    quoteExpiresAt: localPreviewExpiresAt,
   });
 
   const quote: IndicativeQuote = {
@@ -420,14 +487,19 @@ export async function discoverPaymentQuote(
     sourceDisplayAmount,
     destinationAtomicAmount: destAtomicAmount,
     destinationDisplayAmount: destDisplayAmount,
-    estimatedDurationSeconds: dryResult.timeEstimateSeconds ?? 30,
+    estimatedDurationSeconds: dryResult.timeEstimateSeconds ?? null,
     exchangeRateDescription,
     fees: dryResult.fees ?? {
+      isEstimate: true,
       description: "Solver and cross-chain settlement fees included.",
     },
     quoteCreatedAt: now.toISOString(),
-    quoteExpiresAt: quoteExpiresAt.toISOString(),
+    localPreviewExpiresAt: localPreviewExpiresAt.toISOString(),
+    providerQuoteExpiresAt: dryResult.providerDeadline ?? null,
     correlationId: dryResult.correlationId ?? null,
+    verificationTier: "UNVERIFIED_OBSERVATION",
+    isProviderVerified: false,
+    isExchangeCompatible: isExchangeCompat,
     isIndicativeOnly: true,
     executionBlockedNotice:
       "Indicative quote only. Live deposit address issuance and payment execution are disabled (FLOW_EXECUTION=disabled).",
@@ -452,7 +524,7 @@ async function recordPaymentAttemptRow(
     swapType: string;
     quotedSourceAtomic: string;
     quotedDestinationAtomic: string;
-    estimatedDurationSeconds: number;
+    estimatedDurationSeconds: number | null;
     providerFees: unknown;
     providerCorrelationId: string | null;
     providerSignature: string | null;
@@ -474,7 +546,7 @@ async function recordPaymentAttemptRow(
       ${input.swapType},
       ${input.quotedSourceAtomic}::decimal,
       ${input.quotedDestinationAtomic}::decimal,
-      ${input.estimatedDurationSeconds},
+      ${input.estimatedDurationSeconds}::integer,
       ${JSON.stringify(input.providerFees)}::jsonb,
       ${input.providerCorrelationId},
       ${input.providerSignature},
@@ -482,3 +554,5 @@ async function recordPaymentAttemptRow(
     )
   `;
 }
+
+export const discoverPaymentQuote = requestPaymentQuote;
