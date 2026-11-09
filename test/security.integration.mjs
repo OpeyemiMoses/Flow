@@ -1693,3 +1693,228 @@ test("m5 phase 1: payment requests & public guest checkout — authorization, cr
     await ctx.close();
   }
 });
+
+test("security: M5 Phase 2 real route discovery, read-only quotes, refund validation, and public checkout integration", async () => {
+  const owner = await person("payment-owner-m5p2@example.com");
+  const unauth = await app.createClient();
+
+  // 1. Create a Base Mainnet payment request for 10.00 USDC
+  const createRes = await owner.client.post(
+    `/api/accounts/${owner.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Cross-Chain Services Retainer",
+        description:
+          "Payment collection via any supported chain (SOL, ETH, or NEAR)",
+        destinationNetwork: "base-mainnet",
+        destinationAssetId: "base-mainnet:USDC",
+        amountMode: "FIXED",
+        requestedAmount: "10.00",
+        expiresInHours: 48,
+        payerMemoRequired: false,
+      },
+    },
+  );
+  assert.equal(createRes.status(), 201);
+  const created = await createRes.json();
+  assert.ok(created.publicId.startsWith("pr_"));
+
+  // 2. Unauthenticated POST to /api/pay/[id]/quote in WALLET mode
+  // Route: Solana Mainnet SOL -> Base Mainnet USDC
+  const solQuoteRes = await unauth.post(`/api/pay/${created.publicId}/quote`, {
+    data: {
+      sourceDeploymentId: "solana-mainnet:SOL",
+      payerMode: "WALLET",
+    },
+  });
+  assert.equal(solQuoteRes.status(), 200);
+  const solQuote = await solQuoteRes.json();
+
+  assert.ok(solQuote.attemptPublicId.startsWith("pa_"));
+  assert.equal(solQuote.paymentRequestPublicId, created.publicId);
+  assert.equal(solQuote.sourceNetwork, "solana-mainnet");
+  assert.equal(solQuote.sourceAssetSymbol, "SOL");
+  assert.equal(solQuote.destinationNetwork, "base-mainnet");
+  assert.equal(solQuote.destinationAssetSymbol, "USDC");
+  assert.equal(solQuote.payerMode, "WALLET");
+  assert.equal(solQuote.isIndicativeOnly, true);
+  assert.ok(
+    solQuote.executionBlockedNotice.includes("FLOW_EXECUTION=disabled"),
+  );
+
+  // If live provider responded or offline fallback:
+  if (solQuote.routeStatus === "SUPPORTED_AND_QUOTABLE") {
+    assert.equal(solQuote.destinationAtomicAmount, "10000000"); // 10.00 USDC exact!
+    assert.ok(BigInt(solQuote.sourceAtomicAmount) > 0n);
+    assert.ok(solQuote.exchangeRateDescription.includes("SOL"));
+    assert.ok(solQuote.estimatedDurationSeconds > 0);
+  }
+
+  // 3. Test EXCHANGE mode refund address validation
+  // (a) Missing refund address in EXCHANGE mode -> 400
+  const missingRefundRes = await unauth.post(
+    `/api/pay/${created.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "EXCHANGE",
+      },
+    },
+  );
+  assert.equal(missingRefundRes.status(), 400);
+
+  // (b) Mismatched refund address (EVM 0x on Solana) -> 400
+  const wrongNetworkRefundRes = await unauth.post(
+    `/api/pay/${created.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "EXCHANGE",
+        refundAddress: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+      },
+    },
+  );
+  assert.equal(wrongNetworkRefundRes.status(), 400);
+
+  // (c) Valid Solana refund address in EXCHANGE mode -> 200
+  const validExchangeQuoteRes = await unauth.post(
+    `/api/pay/${created.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "EXCHANGE",
+        refundAddress: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      },
+    },
+  );
+  assert.equal(validExchangeQuoteRes.status(), 200);
+  const validExchangeQuote = await validExchangeQuoteRes.json();
+  assert.equal(validExchangeQuote.payerMode, "EXCHANGE");
+  assert.equal(
+    validExchangeQuote.refundAddress,
+    "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+  );
+
+  // 4. Test Direct Transfer Route (Base Mainnet USDC -> Base Mainnet USDC)
+  const directQuoteRes = await unauth.post(
+    `/api/pay/${created.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "base-mainnet:USDC",
+        payerMode: "WALLET",
+      },
+    },
+  );
+  assert.equal(directQuoteRes.status(), 200);
+  const directQuote = await directQuoteRes.json();
+  assert.equal(directQuote.routeType, "DIRECT_TRANSFER");
+  assert.equal(directQuote.routeStatus, "NOT_YET_ENABLED_FOR_PAYMENT");
+  assert.equal(directQuote.destinationAtomicAmount, "10000000");
+  assert.equal(directQuote.sourceAtomicAmount, "10000000");
+
+  // 5. Test Unsupported Pair (e.g. Base Sepolia testnet token)
+  const unsupportedQuoteRes = await unauth.post(
+    `/api/pay/${created.publicId}/quote`,
+    {
+      data: {
+        sourceDeploymentId: "base-sepolia:USDC",
+        payerMode: "WALLET",
+      },
+    },
+  );
+  assert.equal(unsupportedQuoteRes.status(), 200);
+  const unsupportedQuote = await unsupportedQuoteRes.json();
+  assert.equal(unsupportedQuote.routeStatus, "UNSUPPORTED_PAIR");
+
+  // 6. Non-existent payment request ID -> 404
+  const notFoundQuoteRes = await unauth.post(
+    `/api/pay/pr_non_existent_token_1234567890/quote`,
+    {
+      data: {
+        sourceDeploymentId: "solana-mainnet:SOL",
+        payerMode: "WALLET",
+      },
+    },
+  );
+  assert.equal(notFoundQuoteRes.status(), 404);
+
+  // 7. Browser Integration Verification with Playwright
+  const ctx = await app.browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 1440, height: 900 },
+  });
+
+  const brainArtifactDir =
+    process.env.FLOW_CAPTURE_SCREENSHOTS_DIR ||
+    "/Users/user/.gemini/antigravity/brain/799cfa99-869c-4a92-b3b0-b81a38ecce2b";
+  const canCapture = Boolean(brainArtifactDir && existsSync(brainArtifactDir));
+
+  try {
+    const page = await ctx.newPage();
+    const payUrl = `${app.origin}/pay/${created.publicId}`;
+
+    await page.goto(payUrl);
+    await page
+      .getByRole("heading", { name: "Cross-Chain Services Retainer" })
+      .waitFor();
+
+    // Select Solana ecosystem
+    await page.getByRole("button", { name: "Solana" }).click();
+    await page.getByText("SOL").first().click();
+
+    // Wait for Indicative Quote card to render
+    await page.getByText("Indicative Route Quote").waitFor();
+    await page.waitForTimeout(1500);
+
+    // Verify Indicative Preview notice and disabled action button
+    assert.ok(await page.getByText("Indicative Preview Only:").isVisible());
+    assert.ok(
+      await page
+        .getByRole("button", { name: "Pay Now (Payment Execution Disabled)" })
+        .isDisabled(),
+    );
+
+    // Capture screenshot: 16-public-guest-checkout-quote.png
+    if (canCapture) {
+      await page.screenshot({
+        path: `${brainArtifactDir}/16-public-guest-checkout-quote.png`,
+      });
+    }
+
+    // Switch to Exchange mode and verify mandatory refund validation
+    await page.getByRole("button", { name: "Exchange Withdrawal" }).click();
+    assert.ok(
+      await page
+        .getByText("A valid self-custody refund address is required")
+        .first()
+        .isVisible(),
+    );
+
+    // Type invalid EVM address for Solana refund
+    const refundInput = page.getByPlaceholder(
+      "Enter 0x... or Solana Base58 or NEAR account",
+    );
+    await refundInput.fill("0x1234567890123456789012345678901234567890");
+    await page.waitForTimeout(300);
+    assert.ok(
+      await page
+        .getByText("Solana refund address must be a valid Base58 public key")
+        .isVisible(),
+    );
+
+    // Now switch to Ethereum & Base and select cbETH (unsupported pair in 1Click solvers)
+    await page.getByRole("button", { name: "Ethereum & Base" }).click();
+    await page.getByText("cbETH").first().click();
+    await page.waitForTimeout(800);
+    assert.ok(await page.getByText("UNSUPPORTED PAIR").isVisible());
+
+    // Capture screenshot: 17-public-guest-checkout-unsupported.png
+    if (canCapture) {
+      await page.screenshot({
+        path: `${brainArtifactDir}/17-public-guest-checkout-unsupported.png`,
+      });
+    }
+  } finally {
+    await ctx.close();
+  }
+});

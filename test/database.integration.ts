@@ -8159,3 +8159,202 @@ test("M5 Phase 1: flow.payment_requests row-level security, adversarial tenant i
     appClient.release();
   }
 });
+
+test("database integration: M5 Phase 2 payment_attempts schema, constraints, security definer and tenant RLS isolation", async () => {
+  const adminClient = await pool.connect();
+  const workerClient = await workerPool.connect();
+  const appClient = await pool.connect();
+
+  try {
+    // 1. Setup victim and attacker tenants
+    const victim = await createTestAccount(
+      adminClient,
+      "PERSONAL",
+      "m5p2-victim",
+    );
+    const victimSessionToken = await createTestSession(
+      adminClient,
+      victim.authUserId,
+    );
+
+    const attacker = await createTestAccount(
+      adminClient,
+      "PERSONAL",
+      "m5p2-attacker",
+    );
+    const attackerSessionToken = await createTestSession(
+      adminClient,
+      attacker.authUserId,
+    );
+
+    // 2. Create victim payment requests
+    const victimActivePr = "pr_m5p2_victim_active_123456789";
+    const victimExpiredPr = "pr_m5p2_victim_expired_12345678";
+    const victimDisabledPr = "pr_m5p2_victim_disabled_1234567";
+
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+         account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount, status
+       ) VALUES ($1, $2, 'Active Request', 'base-mainnet', 'base-mainnet:USDC', 'USDC', 6, 'FIXED', 10000000, 'ACTIVE')`,
+      [victim.accountId, victimActivePr],
+    );
+
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+         account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount, status, expires_at
+       ) VALUES ($1, $2, 'Expired Request', 'base-mainnet', 'base-mainnet:USDC', 'USDC', 6, 'FIXED', 10000000, 'ACTIVE', now() + interval '1 second')`,
+      [victim.accountId, victimExpiredPr],
+    );
+    await workerClient.query(
+      `UPDATE flow.payment_requests SET expires_at = now() - interval '1 hour' WHERE public_id = $1`,
+      [victimExpiredPr],
+    );
+
+    await workerClient.query(
+      `INSERT INTO flow.payment_requests (
+         account_id, public_id, title, destination_network, destination_asset_id, destination_asset_symbol, destination_decimals, amount_mode, requested_atomic_amount, status
+       ) VALUES ($1, $2, 'Disabled Request', 'base-mainnet', 'base-mainnet:USDC', 'USDC', 6, 'FIXED', 10000000, 'DISABLED')`,
+      [victim.accountId, victimDisabledPr],
+    );
+
+    // 3. Test flow.record_public_payment_attempt Security Definer function
+    const validAttemptId = "pa_m5p2_valid_attempt_123456789";
+
+    // (a) Success on active request
+    const recorded = await appClient.query<{
+      id: string;
+      attempt_public_id: string;
+      route_status: string;
+      status: string;
+    }>(
+      `SELECT * FROM flow.record_public_payment_attempt(
+         $1, $2, 'WALLET', NULL, 'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
+         'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 'EXACT_OUTPUT',
+         116868899::decimal, 10000000::decimal, 22, '{"refundFee":"115314"}'::jsonb,
+         'corr-12345', 'sig-test', now() + interval '1 minute'
+       )`,
+      [victimActivePr, validAttemptId],
+    );
+    assert.equal(recorded.rows.length, 1);
+    assert.equal(recorded.rows[0]!.attempt_public_id, validAttemptId);
+    assert.equal(recorded.rows[0]!.route_status, "SUPPORTED_AND_QUOTABLE");
+    assert.equal(recorded.rows[0]!.status, "INDICATIVE_QUOTE");
+
+    // (b) Fails on non-existent payment request
+    await assert.rejects(
+      appClient.query(
+        `SELECT * FROM flow.record_public_payment_attempt(
+           'pr_non_existent_12345678901234', 'pa_attempt_fail_1234567890123', 'WALLET', NULL,
+           'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
+           'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 'EXACT_OUTPUT',
+           100::decimal, 100::decimal, 10, '{}'::jsonb, NULL, NULL, now() + interval '1 minute'
+         )`,
+      ),
+      { message: /PAYMENT_REQUEST_NOT_FOUND/ },
+    );
+
+    // (c) Fails on disabled payment request
+    await assert.rejects(
+      appClient.query(
+        `SELECT * FROM flow.record_public_payment_attempt(
+           $1, 'pa_attempt_fail_disabled_123', 'WALLET', NULL,
+           'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
+           'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 'EXACT_OUTPUT',
+           100::decimal, 100::decimal, 10, '{}'::jsonb, NULL, NULL, now() + interval '1 minute'
+         )`,
+        [victimDisabledPr],
+      ),
+      { message: /PAYMENT_REQUEST_INACTIVE/ },
+    );
+
+    // (d) Fails on expired payment request
+    await assert.rejects(
+      appClient.query(
+        `SELECT * FROM flow.record_public_payment_attempt(
+           $1, 'pa_attempt_fail_expired_1234', 'WALLET', NULL,
+           'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
+           'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 'EXACT_OUTPUT',
+           100::decimal, 100::decimal, 10, '{}'::jsonb, NULL, NULL, now() + interval '1 minute'
+         )`,
+        [victimExpiredPr],
+      ),
+      { message: /PAYMENT_REQUEST_EXPIRED/ },
+    );
+
+    // 4. Test Constraints on flow.payment_attempts table
+    // (a) Invalid payer_mode
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.payment_attempts (
+           payment_request_id, attempt_public_id, payer_mode, source_network, source_asset_id,
+           source_asset_symbol, source_decimals, route_type, route_status
+         ) VALUES (
+           (SELECT id FROM flow.payment_requests WHERE public_id = $1),
+           'pa_invalid_mode_12345678901234', 'INVALID_MODE', 'solana-mainnet', 'solana-mainnet:SOL',
+           'SOL', 9, 'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE'
+         )`,
+        [victimActivePr],
+      ),
+      { code: "23514" }, // check constraint violation
+    );
+
+    // (b) Invalid attempt_public_id format
+    await assert.rejects(
+      workerClient.query(
+        `INSERT INTO flow.payment_attempts (
+           payment_request_id, attempt_public_id, payer_mode, source_network, source_asset_id,
+           source_asset_symbol, source_decimals, route_type, route_status
+         ) VALUES (
+           (SELECT id FROM flow.payment_requests WHERE public_id = $1),
+           'invalid_prefix_pa_12345678901', 'WALLET', 'solana-mainnet', 'solana-mainnet:SOL',
+           'SOL', 9, 'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE'
+         )`,
+        [victimActivePr],
+      ),
+      { code: "23514" },
+    );
+
+    // 5. Test Multi-Tenant RLS Isolation on flow.payment_attempts
+    // Victim can select attempts for their own payment request
+    await appClient.query("BEGIN");
+    await appClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [victimSessionToken],
+    );
+    const victimAttempts = await appClient.query<{ attempt_public_id: string }>(
+      `SELECT attempt_public_id FROM flow.payment_attempts`,
+    );
+    assert.equal(victimAttempts.rows.length, 1);
+    assert.equal(victimAttempts.rows[0]!.attempt_public_id, validAttemptId);
+    await appClient.query("ROLLBACK");
+
+    // Attacker CANNOT see victim's payment attempts (RLS filters out)
+    await appClient.query("BEGIN");
+    await appClient.query(
+      `SELECT set_config('flow.current_session_token', $1, true)`,
+      [attackerSessionToken],
+    );
+    const attackerAttempts = await appClient.query(
+      `SELECT * FROM flow.payment_attempts`,
+    );
+    assert.equal(attackerAttempts.rows.length, 0);
+
+    // Attacker cannot select even by direct attempt_public_id
+    const crossAttemptSelect = await appClient.query(
+      `SELECT * FROM flow.payment_attempts WHERE attempt_public_id = $1`,
+      [validAttemptId],
+    );
+    assert.equal(crossAttemptSelect.rows.length, 0);
+    await appClient.query("ROLLBACK");
+
+    // Unauthenticated query sees 0 rows
+    const unauthAttempts = await appClient.query(
+      `SELECT * FROM flow.payment_attempts`,
+    );
+    assert.equal(unauthAttempts.rows.length, 0);
+  } finally {
+    adminClient.release();
+    workerClient.release();
+    appClient.release();
+  }
+});

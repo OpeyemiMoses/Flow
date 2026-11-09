@@ -82,6 +82,27 @@ globalThis.fetch = async (input, init) => {
     );
     return Response.json({ id: "fixture-delivery" });
   }
+  if (url.href === "https://1click.chaindefuser.com/v0/quote") {
+    const request = new Request(input, init);
+    const body = await request.json();
+    return Response.json({
+      quote: {
+        amountIn: "50000000",
+        amountInFormatted: "0.05",
+        amountInUsd: "10.00",
+        amountOut: body.amount || "10000000",
+        amountOutFormatted: "10.00",
+        amountOutUsd: "10.00",
+        timeEstimate: 30,
+        refundFee: "0",
+        withdrawFee: "0",
+      },
+      quoteRequest: body,
+      signature: "0x1clickfixturesignature",
+      timestamp: new Date().toISOString(),
+      correlationId: "fixture-1click-corr-id",
+    });
+  }
   if (["127.0.0.1", "localhost", "[::1]"].includes(url.hostname))
     return fetchThrough(input, init);
   throw new Error("Unexpected external fetch in provider fixture.");

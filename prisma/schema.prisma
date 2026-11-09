@@ -605,10 +605,42 @@ model PaymentRequest {
   updatedAt              DateTime             @default(now()) @updatedAt @map("updated_at") @db.Timestamptz
 
   account                FlowAccount          @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  attempts               PaymentAttempt[]
 
   @@index([accountId, status])
   @@index([publicId])
   @@map("payment_requests")
+  @@schema("flow")
+}
+
+model PaymentAttempt {
+  id                            String         @id @default(uuid()) @db.Uuid
+  paymentRequestId              String         @map("payment_request_id") @db.Uuid
+  attemptPublicId               String         @unique @map("attempt_public_id") @db.VarChar(64)
+  payerMode                     String         @map("payer_mode") @db.VarChar(32)
+  payerRefundAddress            String?        @map("payer_refund_address") @db.VarChar(128)
+  sourceNetwork                 String         @map("source_network") @db.VarChar(64)
+  sourceAssetId                 String         @map("source_asset_id") @db.VarChar(128)
+  sourceAssetSymbol             String         @map("source_asset_symbol") @db.VarChar(32)
+  sourceDecimals                Int            @map("source_decimals")
+  routeType                     String         @map("route_type") @db.VarChar(32)
+  routeStatus                   String         @map("route_status") @db.VarChar(32)
+  swapType                      String         @default("EXACT_OUTPUT") @map("swap_type") @db.VarChar(32)
+  quotedSourceAtomicAmount      Decimal?       @map("quoted_source_atomic_amount") @db.Decimal(78, 0)
+  quotedDestinationAtomicAmount Decimal?       @map("quoted_destination_atomic_amount") @db.Decimal(78, 0)
+  estimatedDurationSeconds      Int?           @map("estimated_duration_seconds")
+  providerFees                  Json           @default("{}") @map("provider_fees") @db.JsonB
+  providerCorrelationId         String?        @map("provider_correlation_id") @db.VarChar(128)
+  providerSignature             String?        @map("provider_signature") @db.Text
+  quoteExpiresAt                DateTime?      @map("quote_expires_at") @db.Timestamptz
+  status                        String         @default("INDICATIVE_QUOTE") @db.VarChar(32)
+  createdAt                     DateTime       @default(now()) @map("created_at") @db.Timestamptz
+
+  paymentRequest                PaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade)
+
+  @@index([paymentRequestId, createdAt(sort: Desc)])
+  @@index([attemptPublicId])
+  @@map("payment_attempts")
   @@schema("flow")
 }
 

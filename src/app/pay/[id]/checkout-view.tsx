@@ -1,10 +1,11 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   EligibleSourceRoute,
   PublicPaymentRequest,
 } from "../../../domain/payment-requests.ts";
+import type { IndicativeQuote } from "../../../domain/quote-discovery.ts";
 import { FlowLogo } from "../../../components/flow-logo.tsx";
 import { ThemeToggle } from "../../../components/theme-toggle.tsx";
 import {
@@ -34,6 +35,12 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   const [refundAddress, setRefundAddress] = useState<string>("");
   const [copiedLink, setCopiedLink] = useState(false);
 
+  // Indicative Quote State
+  const [quote, setQuote] = useState<IndicativeQuote | null>(null);
+  const [loadingQuote, setLoadingQuote] = useState<boolean>(false);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
+  const [secondsRemaining, setSecondsRemaining] = useState<number>(60);
+
   // Group eligible routes by ecosystem
   const ecosystemRoutes = useMemo(() => {
     return request.eligibleSourceRoutes.filter(
@@ -58,6 +65,112 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   };
 
   const isExpired = request.status === "EXPIRED" || request.isExpired;
+
+  // Validate refund address in Exchange mode
+  const refundValidationMessage = useMemo(() => {
+    if (payerMode !== "EXCHANGE") return null;
+    const trimmed = refundAddress.trim();
+    if (!trimmed) {
+      return "A valid self-custody refund address is required for exchange withdrawals.";
+    }
+    if (selectedEcosystem === "evm" && !/^0x[0-9a-fA-F]{40}$/.test(trimmed)) {
+      return "Ethereum & Base refund address must be a valid 42-character 0x address.";
+    }
+    if (
+      selectedEcosystem === "solana" &&
+      !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)
+    ) {
+      return "Solana refund address must be a valid Base58 public key.";
+    }
+    if (
+      selectedEcosystem === "near" &&
+      !/^[0-9a-f]{64}$/.test(trimmed) &&
+      !/^(?=.{2,64}$)[a-z0-9_-]+(\.[a-z0-9_-]+)+$/.test(trimmed)
+    ) {
+      return "NEAR refund address must be a valid named account (e.g. alice.near) or 64-char hex.";
+    }
+    return null;
+  }, [payerMode, refundAddress, selectedEcosystem]);
+
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  // Trigger quote discovery when route, mode, or amount changes
+  useEffect(() => {
+    if (!activeRoute || isExpired) return;
+
+    // In exchange mode, do not quote if refund address is invalid
+    if (payerMode === "EXCHANGE" && refundValidationMessage) {
+      return;
+    }
+
+    let active = true;
+    Promise.resolve().then(() => {
+      if (active) {
+        setLoadingQuote(true);
+        setQuoteError(null);
+      }
+    });
+
+    fetch(`/api/pay/${request.publicId}/quote`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sourceDeploymentId: activeRoute.id,
+        payerMode,
+        refundAddress: refundAddress.trim() || undefined,
+        customSourceDisplayAmount:
+          request.amountMode === "OPTIONAL" ? customAmount : undefined,
+      }),
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!active) return;
+        if (!res.ok) {
+          setQuoteError(data.error?.message ?? "Failed to retrieve quote");
+          setQuote(null);
+        } else {
+          setQuote(data);
+          setSecondsRemaining(60);
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        setQuoteError("Network error while discovering quote");
+        setQuote(null);
+      })
+      .finally(() => {
+        if (active) setLoadingQuote(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [
+    activeRoute,
+    customAmount,
+    isExpired,
+    payerMode,
+    refundAddress,
+    refundValidationMessage,
+    refreshTrigger,
+    request.amountMode,
+    request.publicId,
+  ]);
+
+  // Countdown timer for quote expiry
+  useEffect(() => {
+    if (!quote) return;
+    const interval = setInterval(() => {
+      setSecondsRemaining((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [quote]);
 
   return (
     <div className="min-h-screen bg-[var(--bg-app)] text-[var(--text-primary)] transition-colors">
@@ -113,14 +226,13 @@ export function CheckoutView({ request }: CheckoutViewProps) {
           <IconInfo size={16} className="text-[#2563FF] shrink-0 mt-0.5" />
           <div className="space-y-1">
             <div className="font-medium text-[var(--text-primary)]">
-              M5 Phase 1 Staged Checkout · Zero Funds Movement
+              M5 Phase 2 Staged Checkout · Real Read-Only Indicative Quotes
             </div>
             <div>
               FLOW is running in preview mode (
-              <code className="text-xs">FLOW_EXECUTION=disabled</code>). You can
-              configure your source asset, inspect verified routes, and preview
-              checkout stages. No deposit address will be issued, and no real
-              funds will be moved.
+              <code className="text-xs">FLOW_EXECUTION=disabled</code>). Quotes
+              are dynamically discovered from real provider solvers without
+              authorizing deposit addresses or financial mutations.
             </div>
           </div>
         </div>
@@ -193,17 +305,17 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                     ? `${request.displayAmount} ${request.destinationAssetSymbol}`
                     : "Payer Specified"}
                 </div>
-                <span className="text-2xl text-[var(--text-muted)] text-[11px] block">
+                <span className="text-[11px] text-[var(--text-muted)] block">
                   Settles directly into recipient&apos;s verified FLOW custody
                   wallet
                 </span>
               </div>
             </div>
 
-            {/* Checkout Protocol Stages Card */}
+            {/* Checkout Progression Stages Card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-5 shadow-sm space-y-3">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                Staged Checkout Progression
+                Checkout Protocol Progress
               </h3>
               <ol className="space-y-2.5 text-xs">
                 <li className="flex items-center gap-2.5 text-[#34D8B2] font-medium">
@@ -212,41 +324,35 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                   </span>
                   1. View Request & Recipient
                 </li>
-                <li className="flex items-center gap-2.5 text-[#2563FF] font-medium">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#2563FF]/20 text-[10px]">
-                    2
+                <li className="flex items-center gap-2.5 text-[#34D8B2] font-medium">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#34D8B2]/20 text-[10px]">
+                    ✓
                   </span>
                   2. Choose Source Asset & Network
                 </li>
-                <li className="flex items-center gap-2.5 text-[var(--text-secondary)]">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--border-subtle)] text-[10px]">
+                <li className="flex items-center gap-2.5 text-[#2563FF] font-medium">
+                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#2563FF]/20 text-[10px]">
                     3
                   </span>
-                  3. Check Route Availability
+                  3. Real Indicative Quote Discovery (M5 Phase 2)
                 </li>
                 <li className="flex items-center gap-2.5 text-[var(--text-muted)]">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--border-subtle)] text-[10px]">
                     4
                   </span>
-                  4. Review Quote (M6)
+                  4. Deposit Address Issuance (M6)
                 </li>
                 <li className="flex items-center gap-2.5 text-[var(--text-muted)]">
                   <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--border-subtle)] text-[10px]">
                     5
                   </span>
-                  5. Payment Instructions & Deposit (M6)
-                </li>
-                <li className="flex items-center gap-2.5 text-[var(--text-muted)]">
-                  <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--border-subtle)] text-[10px]">
-                    6
-                  </span>
-                  6. Verified Cross-Chain Settlement
+                  5. Cross-Chain Settlement
                 </li>
               </ol>
             </div>
           </div>
 
-          {/* Right Column: Payer Source Configuration (7 cols) */}
+          {/* Right Column: Payer Source Configuration & Quote Card (7 cols) */}
           <div className="md:col-span-7 space-y-5">
             {/* Payment Method & Payer Mode Card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-card)] p-5 shadow-sm space-y-5">
@@ -255,8 +361,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                   Pay From Your Wallet or Exchange
                 </h2>
                 <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-                  You choose the network and asset you want to pay with. No FLOW
-                  account needed.
+                  Choose your network and asset. No FLOW account required.
                 </p>
               </div>
 
@@ -288,32 +393,36 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                 </button>
               </div>
 
-              {/* Mode Notice */}
+              {/* Mode Notice & Refund Address Input */}
               {payerMode === "WALLET" ? (
                 <div className="rounded-lg bg-slate-500/5 p-3 text-xs text-[var(--text-secondary)]">
                   Compatible with MetaMask, OKX Wallet, Phantom, Coinbase
                   Wallet, Rainbow, or any standard self-custody wallet.
                 </div>
               ) : (
-                <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-3 text-xs text-amber-700 dark:text-amber-400 space-y-1.5">
+                <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-3 text-xs text-amber-700 dark:text-amber-400 space-y-2">
                   <div className="font-semibold">Exchange Withdrawal Mode</div>
                   <div>
-                    Compatible with Binance, Coinbase, Kraken, or OKX
-                    withdrawals. Because exchange transfers originate from
-                    pooled hot wallets, an explicit self-custody refund address
-                    is mandatory.
+                    Because exchange transfers originate from pooled hot
+                    wallets, an explicit self-custody refund address is
+                    mandatory for safety.
                   </div>
-                  <div className="pt-2">
-                    <label className="block text-[11px] font-medium text-[var(--text-primary)] mb-1">
-                      Your Personal Refund Address (Required for Exchange Mode):
+                  <div className="pt-1">
+                    <label className="block text-[11px] font-semibold text-[var(--text-primary)] mb-1">
+                      Your Personal Refund Address:
                     </label>
                     <input
                       type="text"
                       value={refundAddress}
                       onChange={(e) => setRefundAddress(e.target.value)}
-                      placeholder="0x... or Solana Base58 or NEAR account"
+                      placeholder="Enter 0x... or Solana Base58 or NEAR account"
                       className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-card)] px-3 py-1.5 text-xs text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:border-[#2563FF] focus:outline-none"
                     />
+                    {refundValidationMessage && (
+                      <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1 font-medium">
+                        ⚠️ {refundValidationMessage}
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
@@ -434,41 +543,149 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                 </div>
               )}
 
-              {/* Route Summary & Terms Preview */}
-              {activeRoute && (
-                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-app)] p-4 space-y-3">
-                  <div className="flex justify-between items-center text-xs">
-                    <span className="font-semibold text-[var(--text-primary)]">
-                      Route Configuration
+              {/* Indicative Quote Card (M5 Phase 2) */}
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-app)] p-4 space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-bold text-[var(--text-primary)]">
+                    Indicative Route Quote
+                  </span>
+                  {/* Status Badge */}
+                  {loadingQuote ? (
+                    <span className="text-[11px] text-[var(--text-muted)] animate-pulse">
+                      Discovering solvers...
                     </span>
-                    <span className="text-[11px] font-mono text-[var(--text-muted)]">
-                      {activeRoute.routeType}
+                  ) : quote ? (
+                    <span
+                      className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border ${
+                        quote.routeStatus === "SUPPORTED_AND_QUOTABLE"
+                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30"
+                          : quote.routeStatus === "UNSUPPORTED_PAIR"
+                            ? "bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/30"
+                            : quote.routeStatus ===
+                                "NOT_YET_ENABLED_FOR_PAYMENT"
+                              ? "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/30"
+                              : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30"
+                      }`}
+                    >
+                      {quote.routeStatus.replace(/_/g, " ")}
                     </span>
-                  </div>
-
-                  <div className="text-xs space-y-1.5 text-[var(--text-secondary)]">
-                    <div className="flex justify-between">
-                      <span>Source Asset:</span>
-                      <span className="font-medium text-[var(--text-primary)]">
-                        {activeRoute.assetName} ({activeRoute.assetSymbol}) on{" "}
-                        {activeRoute.networkName}
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span>Destination Settlement:</span>
-                      <span className="font-medium text-[var(--text-primary)]">
-                        {request.destinationAssetSymbol} on{" "}
-                        {request.destinationNetwork}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-700 dark:text-amber-400">
-                    <strong>Route Staging Notice:</strong>{" "}
-                    {activeRoute.availabilityNotice}
-                  </div>
+                  ) : quoteError ? (
+                    <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-rose-500/10 text-rose-600 border border-rose-500/30">
+                      PROVIDER ERROR
+                    </span>
+                  ) : null}
                 </div>
-              )}
+
+                {/* Quote Content */}
+                {loadingQuote ? (
+                  <div className="py-6 text-center text-xs text-[var(--text-muted)] animate-pulse">
+                    Querying read-only provider solvers for live cross-chain
+                    quote...
+                  </div>
+                ) : quote && quote.routeStatus === "SUPPORTED_AND_QUOTABLE" ? (
+                  <div className="space-y-3 text-xs">
+                    {/* Amounts breakdown */}
+                    <div className="p-3 rounded-lg bg-[var(--bg-card)] border border-[var(--border-subtle)] space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-[var(--text-secondary)]">
+                          You Pay:
+                        </span>
+                        <span className="font-bold text-sm text-[var(--text-primary)]">
+                          {quote.sourceDisplayAmount} {quote.sourceAssetSymbol}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[var(--text-secondary)]">
+                          Recipient Gets:
+                        </span>
+                        <span className="font-bold text-sm text-[#2563FF] dark:text-[#3876FF]">
+                          {quote.destinationDisplayAmount}{" "}
+                          {quote.destinationAssetSymbol}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Routing Details */}
+                    <div className="space-y-1.5 text-[var(--text-secondary)] text-[11px]">
+                      <div className="flex justify-between">
+                        <span>Exchange Rate:</span>
+                        <span className="font-medium text-[var(--text-primary)]">
+                          {quote.exchangeRateDescription}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Estimated Duration:</span>
+                        <span className="font-medium text-[var(--text-primary)]">
+                          ~{quote.estimatedDurationSeconds} seconds
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Fees & Slippage:</span>
+                        <span className="font-medium text-[var(--text-primary)]">
+                          {quote.fees.description}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center pt-1 border-t border-[var(--border-subtle)]">
+                        <span>Quote Freshness:</span>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`font-mono ${
+                              secondsRemaining < 15
+                                ? "text-amber-500 font-bold"
+                                : "text-[var(--text-muted)]"
+                            }`}
+                          >
+                            {secondsRemaining > 0
+                              ? `Expires in ${secondsRemaining}s`
+                              : "Expired"}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setRefreshTrigger((n) => n + 1)}
+                            className="text-[#2563FF] hover:underline font-semibold"
+                          >
+                            Refresh
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : quote &&
+                  quote.routeStatus === "NOT_YET_ENABLED_FOR_PAYMENT" ? (
+                  <div className="space-y-2 text-xs">
+                    <div className="p-3 rounded-lg bg-purple-500/10 border border-purple-500/20 text-purple-800 dark:text-purple-300">
+                      <strong>Direct Transfer:</strong> 1:1 direct on-chain
+                      transfer on {quote.destinationNetwork}. Live execution is
+                      disabled for safety.
+                    </div>
+                  </div>
+                ) : quote && quote.routeStatus === "UNSUPPORTED_PAIR" ? (
+                  <div className="p-3 rounded-lg bg-slate-500/10 border border-slate-500/20 text-xs text-[var(--text-secondary)] space-y-1">
+                    <div className="font-semibold text-[var(--text-primary)]">
+                      Unsupported Route Pair
+                    </div>
+                    <div>
+                      {quote.statusMessage ??
+                        "No automated solver routes currently support this token pair."}
+                    </div>
+                  </div>
+                ) : quoteError ? (
+                  <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-600 dark:text-rose-400">
+                    <strong>Quote Discovery Error:</strong> {quoteError}
+                  </div>
+                ) : (
+                  <div className="py-3 text-center text-xs text-[var(--text-muted)]">
+                    Select a source asset to discover live solver quotes.
+                  </div>
+                )}
+
+                {/* Staging & Execution Disabled Notice */}
+                <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-700 dark:text-amber-400">
+                  <strong>Indicative Preview Only:</strong>{" "}
+                  {quote?.executionBlockedNotice ??
+                    "Live deposit address issuance and payment execution are disabled (FLOW_EXECUTION=disabled)."}
+                </div>
+              </div>
 
               {/* Disabled Action Button with Clear Reason */}
               <div className="space-y-2 pt-2">
@@ -477,11 +694,11 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                   disabled
                   className="w-full cursor-not-allowed rounded-xl bg-[var(--border-subtle)] py-3 px-4 text-center text-xs font-semibold text-[var(--text-muted)]"
                 >
-                  Generate Deposit Address (Disabled in M5 Phase 1)
+                  Pay Now (Payment Execution Disabled)
                 </button>
                 <p className="text-center text-[11px] text-[var(--text-muted)]">
-                  Live deposit address issuance is blocked until M6 integration.
-                  No real payments are accepted.
+                  Payment instruction and deposit address generation is disabled
+                  under FLOW_EXECUTION=disabled. No real funds are moved.
                 </p>
               </div>
             </div>

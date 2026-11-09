@@ -14,6 +14,7 @@ import {
 import { CURATED_SUPPORTED_DEPLOYMENTS } from "../domain/supported-assets-catalog.ts";
 import { runtime, type FlowDb } from "../foundation/prisma.ts";
 import { access, principal } from "./accounts.ts";
+import { clientBudget } from "./auth/limits.ts";
 import { ApiFailure, reply } from "./http.ts";
 
 export interface CreatePaymentRequestInput {
@@ -31,25 +32,6 @@ export interface UpdatePaymentRequestInput {
   status?: PaymentRequestStatus;
   title?: string;
   description?: string | null;
-}
-
-// In-memory sliding-window rate limiter for unauthenticated public requests
-const publicIpWindow = new Map<string, { count: number; resetAt: number }>();
-const MAX_PUBLIC_REQUESTS_PER_MINUTE = 60;
-
-function checkPublicRateLimit(ipKey: string): void {
-  const now = Date.now();
-  const current = publicIpWindow.get(ipKey);
-
-  if (!current || now > current.resetAt) {
-    publicIpWindow.set(ipKey, { count: 1, resetAt: now + 60_000 });
-    return;
-  }
-
-  current.count++;
-  if (current.count > MAX_PUBLIC_REQUESTS_PER_MINUTE) {
-    throw new ApiFailure(429, "RATE_LIMIT_EXCEEDED");
-  }
 }
 
 export async function createPaymentRequest(
@@ -519,10 +501,11 @@ export async function readPublicPaymentRequest(
     throw new ApiFailure(404, "PAYMENT_REQUEST_NOT_FOUND");
   }
 
-  // Rate limiting to resist token enumeration
-  const forwardedFor = request.headers.get("x-forwarded-for");
-  const clientIp = forwardedFor ? forwardedFor.split(",")[0]!.trim() : "local";
-  checkPublicRateLimit(clientIp);
+  // Durable rate limiting to resist token enumeration
+  const allowed = await clientBudget(request, "public:payment-request");
+  if (!allowed) {
+    throw new ApiFailure(429, "RATE_LIMIT_EXCEEDED");
+  }
 
   const { db } = runtime();
   const origin = new URL(request.url).origin;
