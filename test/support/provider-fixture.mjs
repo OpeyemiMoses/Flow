@@ -206,6 +206,15 @@ globalThis.fetch = async (input, init) => {
   if (url.href === "https://1click.chaindefuser.com/v0/quote") {
     const request = new Request(input, init);
     const body = await request.json();
+    if (
+      body.originAsset ===
+      "nep141:eth-0xdac17f958d2ee523a2206206994597c13d831ec7.omft.near"
+    ) {
+      return Response.json(
+        { message: "tokenIn is not valid: unsupported asset" },
+        { status: 400 },
+      );
+    }
     const depositAddress =
       body.dry === false
         ? "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"

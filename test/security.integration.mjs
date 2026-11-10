@@ -1458,19 +1458,16 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
       })
       .waitFor();
     const registryText = await page.locator("table").innerText();
-    for (const token of [
-      "ETH",
-      "USDC",
-      "cbETH",
-      "SOL",
-      "mSOL",
-      "JUP",
-      "NEAR",
-      "wNEAR",
-    ]) {
+    for (const token of ["ETH", "USDC", "USDT", "SOL", "NEAR"]) {
       assert.ok(
         registryText.includes(token),
         `Expected curated registry to include ${token}`,
+      );
+    }
+    for (const forbidden of ["cbETH", "mSOL", "JUP", "wNEAR", "USDC.e"]) {
+      assert.ok(
+        !registryText.includes(forbidden),
+        `Forbidden non-canonical token ${forbidden} found in registry`,
       );
     }
     await snap(page, "05-wallets-and-assets.png");
@@ -1971,9 +1968,9 @@ test("security: M5 Phase 2 real route discovery, read-only quotes, refund valida
         .isVisible(),
     );
 
-    // Now switch to Ethereum & Base and select cbETH (unsupported pair in 1Click solvers)
+    // Now switch to Ethereum & Base and select USDT (unsupported pair in 1Click solvers)
     await page.getByRole("button", { name: /Ethereum & Base/i }).click();
-    await page.getByText("cbETH").first().click();
+    await page.getByText("USDT").first().click();
     await page.waitForTimeout(800);
     assert.ok(await page.getByText("UNSUPPORTED PAIR").isVisible());
 
