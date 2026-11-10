@@ -29,6 +29,29 @@ describe("supported-assets-catalog — five-asset canonical registry & address v
       "solana-mainnet",
     ]);
 
+    // Verify helper lookup functions
+    assert.deepEqual(getSupportedNetworksForAsset("USDT"), [
+      "ethereum-mainnet",
+      "solana-mainnet",
+      "near-mainnet",
+    ]);
+    assert.deepEqual(getSupportedNetworksForAsset("USDC"), [
+      "ethereum-mainnet",
+      "base-mainnet",
+      "solana-mainnet",
+      "near-mainnet",
+    ]);
+    assert.equal(getCanonicalDeploymentsForAsset("USDT").length, 3);
+    assert.equal(getCanonicalDeploymentsForAsset("USDC").length, 4);
+    assert.equal(getCanonicalDeploymentsForAsset("ETH").length, 2);
+    assert.equal(getCanonicalDeploymentsForAsset("SOL").length, 1);
+    assert.equal(getCanonicalDeploymentsForAsset("NEAR").length, 1);
+
+    // Verify ecosystem metadata defines EVM, Solana, and NEAR
+    assert.ok(ECOSYSTEM_METADATA.evm);
+    assert.ok(ECOSYSTEM_METADATA.solana);
+    assert.ok(ECOSYSTEM_METADATA.near);
+
     const mainnetDeployments = CURATED_SUPPORTED_DEPLOYMENTS.filter(
       (d) => d.environment === "mainnet",
     );
