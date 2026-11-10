@@ -206,8 +206,14 @@ globalThis.fetch = async (input, init) => {
   if (url.href === "https://1click.chaindefuser.com/v0/quote") {
     const request = new Request(input, init);
     const body = await request.json();
+    const depositAddress =
+      body.dry === false
+        ? "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin"
+        : undefined;
     return Response.json({
+      depositAddress,
       quote: {
+        depositAddress,
         amountIn: "50000000",
         amountInFormatted: "0.05",
         amountInUsd: "10.00",
@@ -217,6 +223,7 @@ globalThis.fetch = async (input, init) => {
         timeEstimate: 30,
         refundFee: "0",
         withdrawFee: "0",
+        deadline: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
       },
       quoteRequest: body,
       signature: "0x1clickfixturesignature",

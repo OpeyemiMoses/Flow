@@ -12,6 +12,7 @@ export function createDatabasePool(
   connectionUrl.search = "";
   const pool = new pg.Pool({
     connectionString: connectionUrl.href,
+    options: "-c timezone=UTC",
     ssl: target.tls ? { rejectUnauthorized: true } : false,
     application_name: `flow-${purpose}`,
     connectionTimeoutMillis: 1_500,

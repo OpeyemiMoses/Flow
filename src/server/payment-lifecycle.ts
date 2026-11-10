@@ -8,7 +8,12 @@ import {
 } from "../domain/quote-discovery.ts";
 import { formatAtomicToDisplay } from "../domain/atomic-amounts.ts";
 import { isValidPublicPaymentId } from "../domain/payment-requests.ts";
-import { isFinancialExecutionDisabled } from "../domain/custody.ts";
+import {
+  isFinancialExecutionDisabled,
+  isValidEvmAddress,
+  isValidNearAddress,
+  isValidSolanaAddress,
+} from "../domain/custody.ts";
 import { getPrismaClient, runtime } from "../foundation/prisma.ts";
 import { fetchOneClickCommittedQuote } from "./providers/one-click-adapter.ts";
 import { clientBudget } from "./auth/limits.ts";
@@ -31,14 +36,6 @@ export async function commitPaymentAttempt(
   request: Request,
   publicId: string,
 ): Promise<Response> {
-  // Requirement 8: Execution guardrail
-  if (isFinancialExecutionDisabled()) {
-    throw new ApiFailure(
-      403,
-      "PAYMENT_EXECUTION_DISABLED: Payment execution and deposit commitment are disabled (FLOW_EXECUTION=disabled).",
-    );
-  }
-
   if (!isValidPublicPaymentId(publicId)) {
     throw new ApiFailure(404, "PAYMENT_REQUEST_NOT_FOUND");
   }
@@ -53,6 +50,12 @@ export async function commitPaymentAttempt(
 
   const { attemptPublicId } = body;
   if (!attemptPublicId || !isValidPaymentAttemptPublicId(attemptPublicId)) {
+    if (isFinancialExecutionDisabled()) {
+      throw new ApiFailure(
+        403,
+        "PAYMENT_EXECUTION_DISABLED: Payment execution and deposit commitment are disabled (FLOW_EXECUTION=disabled).",
+      );
+    }
     throw new ApiFailure(400, "INVALID_ATTEMPT_PUBLIC_ID");
   }
 
@@ -63,6 +66,19 @@ export async function commitPaymentAttempt(
   }
 
   const { db } = runtime();
+
+  // If financial execution is disabled, check if an active, unconsumed rehearsal authorization exists
+  if (isFinancialExecutionDisabled()) {
+    const authRows = await db.$queryRaw<Array<{ res_auth_id: string }>>`
+      SELECT res_auth_id FROM flow.check_active_payment_rehearsal_authorization(${publicId})
+    `;
+    if (authRows.length === 0 || !authRows[0]?.res_auth_id) {
+      throw new ApiFailure(
+        403,
+        "PAYMENT_EXECUTION_DISABLED: Payment execution and deposit commitment are disabled (FLOW_EXECUTION=disabled).",
+      );
+    }
+  }
 
   // Query attempt details to generate instructions
   const attempts = await db.$queryRaw<
@@ -109,6 +125,12 @@ export async function commitPaymentAttempt(
   `;
 
   if (attempts.length === 0) {
+    if (isFinancialExecutionDisabled()) {
+      throw new ApiFailure(
+        403,
+        "PAYMENT_EXECUTION_DISABLED: Payment execution and deposit commitment are disabled (FLOW_EXECUTION=disabled).",
+      );
+    }
     throw new ApiFailure(404, "PAYMENT_ATTEMPT_NOT_FOUND");
   }
 
@@ -137,73 +159,168 @@ export async function commitPaymentAttempt(
     : new Date(Date.now() + 15 * 60 * 1000);
 
   if (!depositAddress) {
-    const isDirect = attempt.source_network === attempt.destination_network;
-    if (isDirect) {
-      // Direct same-chain transfer path (Requirement 4)
-      const recipientRows = await db.$queryRaw<Array<{ address: string }>>`
-        SELECT wa.address
-        FROM flow.wallet_addresses wa
-        JOIN flow.wallets w ON w.id = wa.wallet_id
-        JOIN flow.payment_requests pr ON pr.account_id = w.account_id
-        JOIN flow.payment_attempts pa ON pa.payment_request_id = pr.id
-        WHERE pa.attempt_public_id = ${attemptPublicId}
-          AND wa.network = ${attempt.destination_network}
-        LIMIT 1
-      `;
-      if (recipientRows.length === 0 || !recipientRows[0]?.address) {
+    // 1. Fetch recipient wallet details with full custody, chain ID, and capability checks via SECURITY DEFINER (Blocker 1)
+    const recipientDetails = await db.$queryRaw<
+      Array<{
+        payment_request_id: string;
+        attempt_id: string;
+        destination_asset_id: string;
+        payer_refund_address: string | null;
+        recipient_address: string | null;
+        recipient_network: string | null;
+        recipient_chain_id: string | null;
+        wallet_environment: string | null;
+        wallet_status: string | null;
+        can_receive: boolean | null;
+      }>
+    >`
+      SELECT *
+      FROM flow.get_payment_attempt_commitment_details(${publicId}, ${attemptPublicId})
+      LIMIT 1
+    `;
+
+    if (
+      recipientDetails.length === 0 ||
+      !recipientDetails[0]?.recipient_address
+    ) {
+      throw new ApiFailure(
+        400,
+        "RECIPIENT_WALLET_UNAVAILABLE: Recipient account has no registered wallet address for destination network.",
+      );
+    }
+
+    const row = recipientDetails[0]!;
+    const recipientAddress = row.recipient_address!;
+
+    // Recipient wallet readiness validation (Blocker 1)
+    if (row.wallet_status !== "ACTIVE") {
+      throw new ApiFailure(
+        400,
+        `RECIPIENT_WALLET_NOT_ACTIVE: Recipient wallet status is ${row.wallet_status}, must be ACTIVE.`,
+      );
+    }
+
+    if (!row.can_receive) {
+      throw new ApiFailure(
+        400,
+        "RECIPIENT_RECEIVE_DISABLED: Recipient wallet does not have receive capability enabled.",
+      );
+    }
+
+    if (attempt.destination_network.toLowerCase().includes("base")) {
+      if (row.recipient_chain_id !== "8453") {
         throw new ApiFailure(
           400,
-          "RECIPIENT_WALLET_UNAVAILABLE: Recipient account has no registered wallet address for destination network.",
+          `RECIPIENT_CHAIN_ID_MISMATCH: Base mainnet chain ID must be 8453, got ${row.recipient_chain_id}. Testnet (84532) wallets are strictly prohibited.`,
         );
       }
-      depositAddress = recipientRows[0].address;
-    } else {
-      // Cross-chain 1Click committed quote path (Requirements 1, 2, 3)
-      const attemptDetails = await db.$queryRaw<
-        Array<{
-          recipient_address: string;
-          payer_refund_address: string | null;
-          source_asset_id: string;
-          destination_asset_id: string;
-        }>
-      >`
-        SELECT
-          wa.address AS recipient_address,
-          pa.payer_refund_address,
-          pa.source_asset_id,
-          pr.destination_asset_id
-        FROM flow.wallet_addresses wa
-        JOIN flow.wallets w ON w.id = wa.wallet_id
-        JOIN flow.payment_requests pr ON pr.account_id = w.account_id
-        JOIN flow.payment_attempts pa ON pa.payment_request_id = pr.id
-        WHERE pa.attempt_public_id = ${attemptPublicId}
-          AND wa.network = ${attempt.destination_network}
-        LIMIT 1
-      `;
-
+      if (row.wallet_environment !== "mainnet") {
+        throw new ApiFailure(
+          400,
+          `RECIPIENT_ENVIRONMENT_MISMATCH: Recipient wallet environment must be mainnet, got ${row.wallet_environment}.`,
+        );
+      }
       if (
-        attemptDetails.length === 0 ||
-        !attemptDetails[0]?.recipient_address
+        !isValidEvmAddress(recipientAddress) ||
+        Object.values(PROBE_ADDRESSES).includes(recipientAddress)
       ) {
         throw new ApiFailure(
           400,
-          "RECIPIENT_WALLET_UNAVAILABLE: Recipient account has no registered wallet address for destination network.",
+          "RECIPIENT_ADDRESS_INVALID: Recipient Base address must be a verified, valid non-probe EVM address.",
+        );
+      }
+    }
+
+    // 2. Strict Rehearsal Authorization & Execution Guardrail (Blocker 2 & 3)
+    if (isFinancialExecutionDisabled()) {
+      const quotedAmtStr =
+        attempt.quoted_destination_atomic_amount ??
+        attempt.quoted_source_atomic_amount ??
+        "0";
+
+      const authConsumption = await db.$queryRaw<
+        Array<{
+          res_auth_id: string;
+          res_operator_auth_id: string;
+          res_max_atomic_amount: string;
+          res_consumed_at: Date;
+        }>
+      >`
+        SELECT *
+        FROM flow.consume_payment_rehearsal_authorization(
+          ${row.payment_request_id}::uuid,
+          ${attempt.id}::uuid,
+          ${attempt.source_network},
+          ${attempt.source_asset_id},
+          ${attempt.destination_network},
+          ${row.destination_asset_id},
+          ${quotedAmtStr}::numeric,
+          ${row.payer_refund_address},
+          ${recipientAddress}
+        )
+      `.catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new ApiFailure(403, `REHEARSAL_AUTHORIZATION_FAILED: ${msg}`);
+      });
+
+      if (authConsumption.length === 0 || !authConsumption[0]?.res_auth_id) {
+        throw new ApiFailure(
+          403,
+          "PAYMENT_EXECUTION_DISABLED: Global financial execution is disabled and no valid, unconsumed rehearsal authorization exists for this payment request.",
+        );
+      }
+    }
+
+    const isDirect = attempt.source_network === attempt.destination_network;
+    if (isDirect) {
+      depositAddress = recipientAddress;
+    } else {
+      // Cross-chain 1Click committed quote path (Requirements 1, 2, 3)
+      if (
+        !row.payer_refund_address ||
+        row.payer_refund_address.trim().length === 0 ||
+        Object.values(PROBE_ADDRESSES).includes(row.payer_refund_address)
+      ) {
+        throw new ApiFailure(
+          400,
+          "PAYER_REFUND_ADDRESS_REQUIRED: A valid payer refund address is strictly required before committing a cross-chain payment. Fallback probe addresses are prohibited.",
         );
       }
 
-      const row = attemptDetails[0]!;
-      const sourceOneClickId = resolveOneClickAssetId(row.source_asset_id);
+      if (
+        attempt.source_network.toLowerCase().includes("solana") &&
+        !isValidSolanaAddress(row.payer_refund_address)
+      ) {
+        throw new ApiFailure(
+          400,
+          "PAYER_REFUND_ADDRESS_INVALID: Source network is Solana but refund address is not a valid Solana address.",
+        );
+      }
+      if (
+        (attempt.source_network.toLowerCase().includes("base") ||
+          attempt.source_network.toLowerCase().includes("ethereum")) &&
+        !isValidEvmAddress(row.payer_refund_address)
+      ) {
+        throw new ApiFailure(
+          400,
+          "PAYER_REFUND_ADDRESS_INVALID: Source network is EVM but refund address is not a valid EVM address.",
+        );
+      }
+      if (
+        attempt.source_network.toLowerCase().includes("near") &&
+        !isValidNearAddress(row.payer_refund_address)
+      ) {
+        throw new ApiFailure(
+          400,
+          "PAYER_REFUND_ADDRESS_INVALID: Source network is NEAR but refund address is not a valid NEAR address.",
+        );
+      }
+
+      const sourceOneClickId = resolveOneClickAssetId(attempt.source_asset_id);
       const destOneClickId = resolveOneClickAssetId(row.destination_asset_id);
       if (!sourceOneClickId || !destOneClickId) {
         throw new ApiFailure(400, "UNSUPPORTED_ONE_CLICK_ASSET_PAIR");
       }
-
-      const eco = attempt.source_network.startsWith("solana")
-        ? "solana"
-        : attempt.source_network.startsWith("near")
-          ? "near"
-          : "evm";
-      const refundTo = row.payer_refund_address ?? PROBE_ADDRESSES[eco];
 
       const committedRes = await fetchOneClickCommittedQuote({
         originAsset: sourceOneClickId,
@@ -213,8 +330,8 @@ export async function commitPaymentAttempt(
           attempt.quoted_destination_atomic_amount ??
           attempt.quoted_source_atomic_amount ??
           "0",
-        refundTo,
-        recipient: row.recipient_address,
+        refundTo: row.payer_refund_address,
+        recipient: recipientAddress,
       });
 
       if (!committedRes.ok || !committedRes.depositAddress) {

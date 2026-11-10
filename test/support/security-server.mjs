@@ -173,7 +173,11 @@ export async function securityServer() {
     );
     for (const output of [child.stdout, child.stderr])
       output.on("data", (data) => {
-        serverLogs += data.toString();
+        const text = data.toString();
+        serverLogs += text;
+        if (text.includes("API 503") || text.includes("UNHANDLED")) {
+          process.stderr.write(text);
+        }
       });
     const createClient = async (options = {}) => {
       const client = await request.newContext({

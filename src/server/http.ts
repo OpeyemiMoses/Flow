@@ -39,9 +39,19 @@ export async function api(action: () => Promise<Response>): Promise<Response> {
     return await action();
   } catch (error) {
     const requestId = randomUUID();
-    if (error instanceof ApiFailure) {
-      return reply(error.status, { error: error.code, requestId });
+    if (
+      error instanceof ApiFailure ||
+      (typeof error === "object" &&
+        error !== null &&
+        "status" in error &&
+        typeof (error as Record<string, unknown>).status === "number" &&
+        "code" in error &&
+        typeof (error as Record<string, unknown>).code === "string")
+    ) {
+      const err = error as ApiFailure;
+      return reply(err.status, { error: err.code, requestId });
     }
+    console.error("API 503 INTERNAL ERROR:", error);
     log("error", "request_failed", { requestId, code: "INTERNAL_ERROR" });
     return reply(503, { error: "UNAVAILABLE", requestId });
   }

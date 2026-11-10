@@ -2832,3 +2832,265 @@ test("phase 6 end-to-end acceptance scenarios A–G: live OutLayer wallet provis
     await ctx.close();
   }
 });
+
+test("security: scoped single-use rehearsal authorization lifecycle, isolation, and fail-closed bounds", async () => {
+  const merchant = await person("rehearsal-merchant@flow.local");
+  const operatorPerson = await person("rehearsal-operator@flow.local");
+  const unauth = await app.createClient();
+
+  const opUserRows = await app.db.query(
+    `SELECT id FROM flow.auth_users WHERE email = $1`,
+    [operatorPerson.email],
+  );
+  const operatorAuthId = opUserRows.rows[0].id;
+
+  // 1. Configure merchant wallet for Base Mainnet (8453)
+  const walletRows = await workerDb.query(
+    `SELECT id FROM flow.wallets WHERE account_id = $1 LIMIT 1`,
+    [merchant.account.id],
+  );
+  let walletId;
+  if (walletRows.rows.length > 0) {
+    walletId = walletRows.rows[0].id;
+    await workerDb.query(
+      `UPDATE flow.wallets
+       SET status = 'ACTIVE'::flow.wallet_status,
+           environment = 'mainnet',
+           policy_state = 'stored',
+           controller_account_id = 'flow-custody.near'
+       WHERE id = $1`,
+      [walletId],
+    );
+  } else {
+    walletId = randomUUID();
+    await workerDb.query(
+      `INSERT INTO flow.wallets (
+         id, account_id, provider, environment, provider_wallet_id,
+         near_account_id, encrypted_credential, key_id, key_digest, status,
+         policy_state, controller_account_id
+       ) VALUES (
+         $1::uuid, $2::uuid, 'OUTLAYER', 'mainnet',
+         $3, 'rehearsal-owner.near', 'enc_cred', 'v1', 'digest_1',
+         'ACTIVE'::flow.wallet_status, 'stored', 'flow-custody.near'
+       )`,
+      [walletId, merchant.account.id, `pw_${walletId}`],
+    );
+  }
+
+  const verifiedRecipient = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+  const verifiedPayerRefund = "4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw";
+
+  await workerDb.query(
+    `INSERT INTO flow.wallet_addresses (wallet_id, network, chain_id, address, public_key)
+     VALUES ($1, 'base-mainnet', '8453', $2, '0x00')
+     ON CONFLICT (wallet_id, network) DO UPDATE
+     SET chain_id = '8453', address = $2`,
+    [walletId, verifiedRecipient],
+  );
+
+  await workerDb.query(
+    `INSERT INTO flow.wallet_capabilities (wallet_id, network, can_derive_address, can_receive, can_sign_transfer, broadcast_mode)
+     VALUES ($1, 'base-mainnet', true, true, false, 'caller_broadcast')
+     ON CONFLICT (wallet_id, network) DO UPDATE
+     SET can_receive = true, can_sign_transfer = false`,
+    [walletId],
+  );
+
+  // 2. Create Payment Request for Base Mainnet USDC (1.00 USDC = 1,000,000 atomic)
+  const prRes = await merchant.client.post(
+    `/api/accounts/${merchant.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Rehearsal Isolation Test",
+        destinationNetwork: "base-mainnet",
+        destinationAssetId: "base-mainnet:USDC",
+        amountMode: "FIXED",
+        requestedAmount: "1.0",
+        expiresInHours: 24,
+      },
+    },
+  );
+  assert.equal(prRes.status(), 201);
+  const paymentReq = await prRes.json();
+
+  // 3. Guest discovers quote for Solana SOL -> Base USDC
+  const quoteRes1 = await unauth.post(`/api/pay/${paymentReq.publicId}/quote`, {
+    data: {
+      sourceDeploymentId: "solana-mainnet:SOL",
+      payerMode: "WALLET",
+      refundAddress: verifiedPayerRefund,
+    },
+  });
+  assert.equal(quoteRes1.status(), 200);
+  const quote1 = await quoteRes1.json();
+  const attemptPublicId1 = quote1.attemptPublicId;
+
+  // 4. Adversarial Check 1: Commit without authorization fails closed with 403
+  const unauthCommitRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/commit`,
+    {
+      data: { attemptPublicId: attemptPublicId1 },
+    },
+  );
+  assert.equal(unauthCommitRes.status(), 403);
+  const unauthErr = await unauthCommitRes.json();
+  assert.match(unauthErr.error, /PAYMENT_EXECUTION_DISABLED/);
+
+  // 5. Adversarial Check 2: Expired authorization fails closed
+  const expiredAuthRows = await workerDb.query(
+    `INSERT INTO flow.payment_rehearsal_authorizations (
+       payment_request_id, operator_auth_id, environment,
+       source_network, source_asset_id, destination_network, destination_asset_id,
+       max_atomic_amount, allowed_recipient_address, allowed_payer_refund_address,
+       expires_at
+     ) VALUES (
+       $1, $2, 'mainnet',
+       'solana-mainnet', 'solana-mainnet:SOL', 'base-mainnet', 'base-mainnet:USDC',
+       5000000, $3, $4, CURRENT_TIMESTAMP - interval '10 minutes'
+     ) RETURNING id`,
+    [paymentReq.id, operatorAuthId, verifiedRecipient, verifiedPayerRefund],
+  );
+  assert.ok(expiredAuthRows.rows.length > 0);
+
+  const expiredCommitRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/commit`,
+    {
+      data: { attemptPublicId: attemptPublicId1 },
+    },
+  );
+  assert.equal(expiredCommitRes.status(), 403);
+
+  // Delete expired test auth
+  await workerDb.query(
+    `DELETE FROM flow.payment_rehearsal_authorizations WHERE id = $1`,
+    [expiredAuthRows.rows[0].id],
+  );
+
+  // 6. Adversarial Check 3: Amount bound enforcement (max 500 atomic < 1000000 quoted)
+  const lowBoundAuth = await workerDb.query(
+    `INSERT INTO flow.payment_rehearsal_authorizations (
+       payment_request_id, operator_auth_id, environment,
+       source_network, source_asset_id, destination_network, destination_asset_id,
+       max_atomic_amount, allowed_recipient_address, allowed_payer_refund_address,
+       expires_at
+     ) VALUES (
+       $1, $2, 'mainnet',
+       'solana-mainnet', 'solana-mainnet:SOL', 'base-mainnet', 'base-mainnet:USDC',
+       500, $3, $4, CURRENT_TIMESTAMP + interval '30 minutes'
+     ) RETURNING id`,
+    [paymentReq.id, operatorAuthId, verifiedRecipient, verifiedPayerRefund],
+  );
+
+  const lowBoundCommitRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/commit`,
+    {
+      data: { attemptPublicId: attemptPublicId1 },
+    },
+  );
+  assert.equal(lowBoundCommitRes.status(), 403);
+  const lowBoundErr = await lowBoundCommitRes.json();
+  assert.match(
+    lowBoundErr.error,
+    /REHEARSAL_AMOUNT_EXCEEDS_MAX_BOUND|REHEARSAL_AUTHORIZATION_FAILED/,
+  );
+
+  // Delete low bound auth
+  await workerDb.query(
+    `DELETE FROM flow.payment_rehearsal_authorizations WHERE id = $1`,
+    [lowBoundAuth.rows[0].id],
+  );
+
+  // 7. Adversarial Check 4: Recipient mismatch enforcement
+  const wrongRecipientAuth = await workerDb.query(
+    `INSERT INTO flow.payment_rehearsal_authorizations (
+       payment_request_id, operator_auth_id, environment,
+       source_network, source_asset_id, destination_network, destination_asset_id,
+       max_atomic_amount, allowed_recipient_address, allowed_payer_refund_address,
+       expires_at
+     ) VALUES (
+       $1, $2, 'mainnet',
+       'solana-mainnet', 'solana-mainnet:SOL', 'base-mainnet', 'base-mainnet:USDC',
+       5000000, '0x0000000000000000000000000000000000000001', $3,
+       CURRENT_TIMESTAMP + interval '30 minutes'
+     ) RETURNING id`,
+    [paymentReq.id, operatorAuthId, verifiedPayerRefund],
+  );
+
+  const wrongRecipCommitRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/commit`,
+    {
+      data: { attemptPublicId: attemptPublicId1 },
+    },
+  );
+  assert.equal(wrongRecipCommitRes.status(), 403);
+  const wrongRecipErr = await wrongRecipCommitRes.json();
+  assert.match(
+    wrongRecipErr.error,
+    /REHEARSAL_RECIPIENT_MISMATCH|REHEARSAL_AUTHORIZATION_FAILED/,
+  );
+
+  await workerDb.query(
+    `DELETE FROM flow.payment_rehearsal_authorizations WHERE id = $1`,
+    [wrongRecipientAuth.rows[0].id],
+  );
+
+  // 8. Legitimate Single-Use Authorization: Valid, matching parameters
+  const validAuthRows = await workerDb.query(
+    `INSERT INTO flow.payment_rehearsal_authorizations (
+       payment_request_id, operator_auth_id, environment,
+       source_network, source_asset_id, destination_network, destination_asset_id,
+       max_atomic_amount, allowed_recipient_address, allowed_payer_refund_address,
+       expires_at
+     ) VALUES (
+       $1, $2, 'mainnet',
+       'solana-mainnet', 'solana-mainnet:SOL', 'base-mainnet', 'base-mainnet:USDC',
+       5000000, $3, $4, CURRENT_TIMESTAMP + interval '30 minutes'
+     ) RETURNING id`,
+    [paymentReq.id, operatorAuthId, verifiedRecipient, verifiedPayerRefund],
+  );
+  const validAuthId = validAuthRows.rows[0].id;
+
+  // 9. Legitimate Commitment: Valid single-use authorization allows commitment
+  const commitSuccessRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/commit`,
+    {
+      data: { attemptPublicId: attemptPublicId1 },
+    },
+  );
+  assert.equal(commitSuccessRes.status(), 200);
+  const instructions = await commitSuccessRes.json();
+  assert.equal(instructions.status, "DEPOSIT_COMMITTED");
+  assert.ok(instructions.depositAddress);
+  assert.ok(instructions.depositDeadline);
+
+  // 10. Verify Authorization was Atomically Consumed in Database
+  const consumedAuthRows = await workerDb.query(
+    `SELECT consumed_at, consumed_by_attempt_id
+     FROM flow.payment_rehearsal_authorizations
+     WHERE id = $1`,
+    [validAuthId],
+  );
+  assert.ok(consumedAuthRows.rows[0].consumed_at !== null);
+
+  // 11. Adversarial Replay Check: Second attempt CANNOT reuse consumed authorization
+  const quoteRes2 = await unauth.post(`/api/pay/${paymentReq.publicId}/quote`, {
+    data: {
+      sourceDeploymentId: "solana-mainnet:SOL",
+      payerMode: "WALLET",
+      refundAddress: verifiedPayerRefund,
+    },
+  });
+  assert.equal(quoteRes2.status(), 200);
+  const quote2 = await quoteRes2.json();
+  const attemptPublicId2 = quote2.attemptPublicId;
+
+  const replayCommitRes = await unauth.post(
+    `/api/pay/${paymentReq.publicId}/commit`,
+    {
+      data: { attemptPublicId: attemptPublicId2 },
+    },
+  );
+  assert.equal(replayCommitRes.status(), 403);
+  const replayErr = await replayCommitRes.json();
+  assert.match(replayErr.error, /PAYMENT_EXECUTION_DISABLED/);
+});
