@@ -28,6 +28,8 @@
     "db:status": "prisma migrate status",
     "db:check": "node --env-file-if-exists=.env scripts/check-database.ts",
     "check:integration": "node --env-file-if-exists=.env scripts/check-integration.ts",
+    "check:outlayer": "node --env-file-if-exists=.env scripts/check-outlayer-connectivity.ts",
+    "activate:mainnet-wallet": "node --env-file-if-exists=.env scripts/activate-first-mainnet-wallet.ts",
     "authorize:testnet": "node --env-file-if-exists=.env scripts/rehearse-testnet-registration.ts --create-authorization",
     "rehearse:testnet": "node --env-file-if-exists=.env scripts/rehearse-testnet-registration.ts",
     "prepare:testnet-account": "node --env-file-if-exists=.env scripts/prepare-testnet-account.ts",
