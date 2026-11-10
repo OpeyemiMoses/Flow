@@ -40,17 +40,46 @@ describe("supported-assets-catalog — five-asset canonical registry & address v
       "base-mainnet",
       "solana-mainnet",
       "near-mainnet",
+      "base-sepolia",
+      "solana-devnet",
+      "near-testnet",
     ]);
-    assert.equal(getCanonicalDeploymentsForAsset("USDT").length, 3);
-    assert.equal(getCanonicalDeploymentsForAsset("USDC").length, 4);
-    assert.equal(getCanonicalDeploymentsForAsset("ETH").length, 2);
-    assert.equal(getCanonicalDeploymentsForAsset("SOL").length, 1);
-    assert.equal(getCanonicalDeploymentsForAsset("NEAR").length, 1);
+    assert.equal(
+      getCanonicalDeploymentsForAsset("USDT").filter(
+        (d) => d.environment === "mainnet",
+      ).length,
+      3,
+    );
+    assert.equal(
+      getCanonicalDeploymentsForAsset("USDC").filter(
+        (d) => d.environment === "mainnet",
+      ).length,
+      4,
+    );
+    assert.equal(
+      getCanonicalDeploymentsForAsset("ETH").filter(
+        (d) => d.environment === "mainnet",
+      ).length,
+      2,
+    );
+    assert.equal(
+      getCanonicalDeploymentsForAsset("SOL").filter(
+        (d) => d.environment === "mainnet",
+      ).length,
+      1,
+    );
+    assert.equal(
+      getCanonicalDeploymentsForAsset("NEAR").filter(
+        (d) => d.environment === "mainnet",
+      ).length,
+      1,
+    );
 
     // Verify ecosystem metadata defines EVM, Solana, and NEAR
-    assert.ok(ECOSYSTEM_METADATA.evm);
-    assert.ok(ECOSYSTEM_METADATA.solana);
-    assert.ok(ECOSYSTEM_METADATA.near);
+    const families = ECOSYSTEM_METADATA.map((e) => e.family);
+    assert.ok(families.includes("evm"));
+    assert.ok(families.includes("solana"));
+    assert.ok(families.includes("near"));
 
     const mainnetDeployments = CURATED_SUPPORTED_DEPLOYMENTS.filter(
       (d) => d.environment === "mainnet",
