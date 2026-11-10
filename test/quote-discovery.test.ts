@@ -136,7 +136,7 @@ test("quote-discovery: validateRefundAddressForMode strictly enforces address ru
     validateRefundAddressForMode(
       "EXCHANGE",
       "evm",
-      "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+      "0x2424242424242424242424242424242424242424",
     ).valid,
     true,
   );
@@ -150,7 +150,7 @@ test("quote-discovery: validateRefundAddressForMode strictly enforces address ru
     validateRefundAddressForMode(
       "EXCHANGE",
       "solana",
-      "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+      "4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw",
     ).valid,
     true,
   );
@@ -158,7 +158,7 @@ test("quote-discovery: validateRefundAddressForMode strictly enforces address ru
     validateRefundAddressForMode(
       "EXCHANGE",
       "solana",
-      "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+      "0x2424242424242424242424242424242424242424",
     ).valid,
     false,
     "EVM address must be rejected for Solana ecosystem refund",

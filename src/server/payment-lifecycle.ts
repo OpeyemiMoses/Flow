@@ -4,7 +4,7 @@ import {
   type PaymentDepositInstructions,
   isValidPaymentAttemptPublicId,
   resolveOneClickAssetId,
-  PROBE_ADDRESSES,
+  isBannedIllustrativeAddress,
 } from "../domain/quote-discovery.ts";
 import { formatAtomicToDisplay } from "../domain/atomic-amounts.ts";
 import { isValidPublicPaymentId } from "../domain/payment-requests.ts";
@@ -222,11 +222,11 @@ export async function commitPaymentAttempt(
       }
       if (
         !isValidEvmAddress(recipientAddress) ||
-        Object.values(PROBE_ADDRESSES).includes(recipientAddress)
+        isBannedIllustrativeAddress(recipientAddress)
       ) {
         throw new ApiFailure(
           400,
-          "RECIPIENT_ADDRESS_INVALID: Recipient Base address must be a verified, valid non-probe EVM address.",
+          "RECIPIENT_ADDRESS_INVALID: Recipient Base address must be a verified, valid non-probe EVM address. Illustrative probe addresses are strictly prohibited.",
         );
       }
     }
@@ -279,11 +279,11 @@ export async function commitPaymentAttempt(
       if (
         !row.payer_refund_address ||
         row.payer_refund_address.trim().length === 0 ||
-        Object.values(PROBE_ADDRESSES).includes(row.payer_refund_address)
+        isBannedIllustrativeAddress(row.payer_refund_address)
       ) {
         throw new ApiFailure(
           400,
-          "PAYER_REFUND_ADDRESS_REQUIRED: A valid payer refund address is strictly required before committing a cross-chain payment. Fallback probe addresses are prohibited.",
+          "PAYER_REFUND_ADDRESS_REQUIRED: A valid payer refund address is strictly required before committing a cross-chain payment. Illustrative and synthetic probe addresses are prohibited.",
         );
       }
 

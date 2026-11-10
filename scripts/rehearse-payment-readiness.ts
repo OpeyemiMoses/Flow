@@ -6,7 +6,7 @@ import {
   isValidSolanaAddress,
   toEip55ChecksumAddress,
 } from "../src/domain/custody.ts";
-import { PROBE_ADDRESSES } from "../src/domain/quote-discovery.ts";
+import { isBannedIllustrativeAddress } from "../src/domain/quote-discovery.ts";
 import { fetchOneClickDryQuote } from "../src/server/providers/one-click-adapter.ts";
 import { checkAllBlockchainRpcs } from "../src/server/custody/blockchain-connectivity.ts";
 import { callJsonRpc } from "../src/server/assets/connectors/rpc-client.ts";
@@ -53,30 +53,17 @@ export async function runOperationalRehearsal(options: RehearsalOptions = {}) {
   // Step 2: Validate Addresses & Prohibit Hardcoded Bypasses (Blockers 1, 5, 9)
   console.log("STEP 2: Recipient & Payer Address Verification");
 
-  let payerRefundSol =
+  const payerRefundSol =
     options.payerRefundAddress || process.env.FLOW_REHEARSAL_PAYER_REFUND_SOL;
-  let recipientBaseUsdc =
+  const recipientBaseUsdc =
     options.recipientAddress || process.env.FLOW_REHEARSAL_RECIPIENT_BASE;
 
-  if (options.strict) {
-    if (!payerRefundSol || !recipientBaseUsdc) {
-      throw new Error(
-        "Strict mode requires explicit --payer-refund-address and --recipient-address.",
-      );
-    }
-  }
-
-  // Fallback defaults for informational dry preflight check only
-  if (!payerRefundSol) {
-    payerRefundSol = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
-    console.log(
-      `  [INFO] Using default verification probe for Solana payer: ${payerRefundSol}`,
-    );
-  }
-  if (!recipientBaseUsdc) {
-    recipientBaseUsdc = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
-    console.log(
-      `  [INFO] Using default verification probe for Base recipient: ${recipientBaseUsdc}`,
+  if (!payerRefundSol || !recipientBaseUsdc) {
+    throw new Error(
+      "Operational rehearsal requires explicit --payer-refund-address and --recipient-address " +
+        "(or FLOW_REHEARSAL_PAYER_REFUND_SOL and FLOW_REHEARSAL_RECIPIENT_BASE). " +
+        "Illustrative addresses (such as vitalik.eth / 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 and probe addresses) " +
+        "have been completely removed from live execution defaults per owner security requirements.",
     );
   }
 
@@ -92,18 +79,16 @@ export async function runOperationalRehearsal(options: RehearsalOptions = {}) {
     );
   }
 
-  // Check for forbidden Sepolia or probe addresses in strict mode
-  if (options.strict) {
-    if (Object.values(PROBE_ADDRESSES).includes(payerRefundSol)) {
-      throw new Error(
-        `Payer refund address cannot be a synthetic probe address: ${payerRefundSol}`,
-      );
-    }
-    if (Object.values(PROBE_ADDRESSES).includes(recipientBaseUsdc)) {
-      throw new Error(
-        `Recipient address cannot be a synthetic probe address: ${recipientBaseUsdc}`,
-      );
-    }
+  // Strictly reject synthetic probe and illustrative addresses
+  if (isBannedIllustrativeAddress(payerRefundSol)) {
+    throw new Error(
+      `Payer refund address cannot be an illustrative or synthetic probe address: ${payerRefundSol}`,
+    );
+  }
+  if (isBannedIllustrativeAddress(recipientBaseUsdc)) {
+    throw new Error(
+      `Recipient address cannot be an illustrative or synthetic probe address: ${recipientBaseUsdc}`,
+    );
   }
 
   const checksummedRecipient = toEip55ChecksumAddress(recipientBaseUsdc);

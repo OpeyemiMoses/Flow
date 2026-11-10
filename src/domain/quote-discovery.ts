@@ -98,6 +98,30 @@ export const PROBE_ADDRESSES: Readonly<Record<EcosystemFamily, string>> = {
   near: "0000000000000000000000000000000000000000000000000000000000000001",
 };
 
+/**
+ * Known illustrative, synthetic probe or public demo addresses that are strictly prohibited
+ * from financial commitment, authorization or execution.
+ */
+export const BANNED_ILLUSTRATIVE_ADDRESSES: ReadonlySet<string> = new Set([
+  "0xd8da6bf26964af9d7eed9e03e53415d37aa96045", // vitalik.eth / illustrative public demo
+  "0x1111111111111111111111111111111111111111",
+  "0x0000000000000000000000000000000000000000",
+  "7xkxtg2cw87d97txjsdpbd5jbkhetqa83tzrujosgasu",
+  "0000000000000000000000000000000000000000000000000000000000000001",
+]);
+
+export function isBannedIllustrativeAddress(
+  address: string | null | undefined,
+): boolean {
+  if (!address) return false;
+  const normalized = address.trim().toLowerCase();
+  if (BANNED_ILLUSTRATIVE_ADDRESSES.has(normalized)) return true;
+  for (const probe of Object.values(PROBE_ADDRESSES)) {
+    if (probe.toLowerCase() === normalized) return true;
+  }
+  return false;
+}
+
 export function resolveOneClickAssetId(deploymentId: string): string | null {
   return ONE_CLICK_ASSET_MAPPINGS[deploymentId] ?? null;
 }

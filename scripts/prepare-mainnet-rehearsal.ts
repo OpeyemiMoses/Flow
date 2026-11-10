@@ -7,7 +7,7 @@ import {
   toEip55ChecksumAddress,
 } from "../src/domain/custody.ts";
 import { generatePublicPaymentId } from "../src/domain/payment-requests.ts";
-import { PROBE_ADDRESSES } from "../src/domain/quote-discovery.ts";
+import { isBannedIllustrativeAddress } from "../src/domain/quote-discovery.ts";
 import { getPrismaClient } from "../src/foundation/prisma.ts";
 import { callJsonRpc } from "../src/server/assets/connectors/rpc-client.ts";
 
@@ -41,33 +41,37 @@ export async function prepareMainnetRehearsal(
     );
   }
 
-  const recipient =
-    options.recipientAddress ||
-    process.env.FLOW_REHEARSAL_RECIPIENT_BASE ||
-    "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045";
+  // Step 1: Target Parameters & Safety Verification
+  const payerRefund =
+    options.payerRefundAddress || process.env.FLOW_REHEARSAL_PAYER_REFUND_SOL;
 
-  if (
-    !isValidEvmAddress(recipient) ||
-    Object.values(PROBE_ADDRESSES).includes(recipient)
-  ) {
+  if (!payerRefund) {
     throw new Error(
-      `Invalid or synthetic Base recipient address: ${recipient}`,
+      "Payer Solana refund address must be explicitly provided via --payer-refund-address or FLOW_REHEARSAL_PAYER_REFUND_SOL. Synthetic defaults have been eliminated.",
     );
   }
-  const checksummedRecipient = toEip55ChecksumAddress(recipient);
-
-  const payerRefund =
-    options.payerRefundAddress ||
-    process.env.FLOW_REHEARSAL_PAYER_REFUND_SOL ||
-    "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
 
   if (
     !isValidSolanaAddress(payerRefund) ||
-    Object.values(PROBE_ADDRESSES).includes(payerRefund)
+    isBannedIllustrativeAddress(payerRefund)
   ) {
     throw new Error(
-      `Invalid or synthetic Solana refund address: ${payerRefund}`,
+      `Invalid or illustrative Solana refund address: ${payerRefund}`,
     );
+  }
+
+  const recipient =
+    options.recipientAddress || process.env.FLOW_REHEARSAL_RECIPIENT_BASE;
+
+  if (recipient) {
+    if (
+      !isValidEvmAddress(recipient) ||
+      isBannedIllustrativeAddress(recipient)
+    ) {
+      throw new Error(
+        `Invalid or illustrative Base recipient address: ${recipient}`,
+      );
+    }
   }
 
   const invoiceAmountUsdc = options.invoiceUsdc || "1.00";
@@ -77,7 +81,15 @@ export async function prepareMainnetRehearsal(
   const durationSeconds = options.durationSeconds || 3600;
 
   console.log("STEP 1: Target Rehearsal Parameters");
-  console.log(`  - Merchant Base Mainnet Address: ${checksummedRecipient}`);
+  if (recipient) {
+    console.log(
+      `  - Specified Base Mainnet Address: ${toEip55ChecksumAddress(recipient)}`,
+    );
+  } else {
+    console.log(
+      "  - Base Mainnet Address: To be resolved from merchant's verified wallet",
+    );
+  }
   console.log(`  - Payer Solana Refund Address:   ${payerRefund}`);
   console.log(
     `  - Rehearsal Invoice Amount:       ${invoiceAmountUsdc} USDC (${invoiceAtomic.toString()} atomic)`,
@@ -89,38 +101,10 @@ export async function prepareMainnetRehearsal(
     `  - Authorization Duration:        ${durationSeconds} seconds (1 hour)\n`,
   );
 
-  // Step 2: Introspect Base Mainnet Contract & Balance
-  console.log("STEP 2: Base Mainnet On-Chain Verification");
-  const baseRpcUrl =
-    process.env.FLOW_BASE_RPC_URL || "https://mainnet.base.org";
-  const cleanRecipient = checksummedRecipient.toLowerCase().replace(/^0x/, "");
-  const paddedRecipient = cleanRecipient.padStart(64, "0");
-  const balanceOfData = `0x70a08231${paddedRecipient}`;
-
-  try {
-    const balanceRes = await callJsonRpc<string>(baseRpcUrl, "eth_call", [
-      {
-        to: BASE_USDC_CONTRACT,
-        data: balanceOfData,
-      },
-      "latest",
-    ]);
-
-    const usdcRawBalance = balanceRes.response.result
-      ? BigInt(balanceRes.response.result)
-      : 0n;
-    console.log(
-      `  - Merchant Current Base USDC Balance: ${formatAtomicToDisplay(usdcRawBalance, 6)} USDC`,
-    );
-  } catch (err) {
-    console.log(
-      `  - [WARN] Could not verify starting balance via RPC: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  console.log("  [PASS] Base Mainnet RPC and USDC contract verified online.\n");
-
-  // Step 3: Database Registration & Rehearsal Link Scaffolding
-  console.log("STEP 3: Database Tenant & Custody Provisioning");
+  // Step 2: Database Tenant & Custody Provisioning Verification
+  console.log(
+    "STEP 2: Database Tenant & Recipient Wallet Ownership Verification",
+  );
   const db = getPrismaClient("worker");
 
   try {
@@ -144,78 +128,137 @@ export async function prepareMainnetRehearsal(
       console.log(`  - Using account: ${accounts[0]!.name} (${accountId})`);
     }
 
-    // 2. Ensure Mainnet Wallet with Base Mainnet (8453) address
-    const existingWallets = await db.$queryRaw<Array<{ id: string }>>`
-      SELECT id
-      FROM flow.wallets
-      WHERE account_id = ${accountId}::uuid
+    // 2. Query registered Base Mainnet wallet for merchant
+    const registeredWallets = await db.$queryRaw<
+      Array<{
+        id: string;
+        status: string;
+        environment: string;
+        provider: string;
+        near_account_id: string | null;
+        address: string | null;
+        chain_id: string | null;
+        can_receive: boolean | null;
+      }>
+    >`
+      SELECT
+        w.id,
+        w.status,
+        w.environment,
+        w.provider,
+        w.near_account_id,
+        wa.address,
+        wa.chain_id,
+        wc.can_receive
+      FROM flow.wallets w
+      LEFT JOIN flow.wallet_addresses wa ON wa.wallet_id = w.id AND wa.network = 'base-mainnet'
+      LEFT JOIN flow.wallet_capabilities wc ON wc.wallet_id = w.id AND wc.network = wa.network
+      WHERE w.account_id = ${accountId}::uuid
       LIMIT 1
     `;
 
-    let walletId: string;
-    if (existingWallets.length === 0) {
-      const newWallet = await db.$queryRaw<Array<{ id: string }>>`
-        INSERT INTO flow.wallets (
-          account_id, provider, provider_wallet_id, near_account_id,
-          status, policy_state, controller_account_id, environment, created_at, updated_at
-        ) VALUES (
-          ${accountId}::uuid, 'OUTLAYER', gen_random_uuid()::text, 'flow-rehearsal-merchant.near',
-          'ACTIVE'::flow.wallet_status, 'stored', 'flow-rehearsal-merchant.near', 'mainnet',
-          CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-        )
-        RETURNING id
-      `;
-      walletId = newWallet[0]!.id;
-    } else {
-      walletId = existingWallets[0]!.id;
-      await db.$executeRaw`
-        UPDATE flow.wallets
-        SET
-          status = 'ACTIVE'::flow.wallet_status,
-          environment = 'mainnet',
-          policy_state = 'stored',
-          controller_account_id = COALESCE(controller_account_id, 'flow-rehearsal-merchant.near'),
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ${walletId}::uuid
-      `;
+    const walletRecord = registeredWallets[0];
+
+    // Check OutLayer mainnet credentials availability
+    const outlayerUrl = process.env.FLOW_OUTLAYER_API_URL;
+    const isMainnetOutlayerConfigured =
+      outlayerUrl &&
+      !outlayerUrl.includes("testnet") &&
+      process.env.FLOW_WALLET_PROVIDER === "outlayer";
+
+    if (
+      !walletRecord ||
+      !walletRecord.address ||
+      walletRecord.status !== "ACTIVE" ||
+      !walletRecord.can_receive
+    ) {
+      if (!isMainnetOutlayerConfigured) {
+        console.error(
+          "\n=================================================================",
+        );
+        console.error(
+          " BLOCKER: OUTLAYER MAINNET CUSTODY CREDENTIALS UNAVAILABLE",
+        );
+        console.error(
+          "=================================================================\n",
+        );
+        console.error(
+          `Merchant account ${accountId} does not have an active Base mainnet wallet.`,
+        );
+        console.error(
+          `Current OutLayer API URL: ${outlayerUrl ?? "not configured"} (testnet only).`,
+        );
+        console.error(
+          "Simulating mainnet activation or inserting synthetic wallet records is strictly prohibited.",
+        );
+        console.error(
+          "To proceed, owner must configure genuine OutLayer mainnet credentials",
+        );
+        console.error(
+          "or register an authenticated, verified, owner-controlled Base mainnet wallet.\n",
+        );
+
+        throw new Error(
+          "OUTLAYER_MAINNET_CREDENTIALS_UNAVAILABLE: OutLayer mainnet custody credentials are not configured in the environment. " +
+            "Simulating activation or inserting synthetic wallet records is strictly prohibited.",
+        );
+      }
     }
 
-    // 3. Attach/Update Base Mainnet address (chain_id = '8453')
-    await db.$executeRaw`
-      INSERT INTO flow.wallet_addresses (
-        wallet_id, network, chain_id, address, public_key, created_at, updated_at
-      ) VALUES (
-        ${walletId}::uuid, 'base-mainnet', '8453', ${checksummedRecipient}, '0x00', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-      )
-      ON CONFLICT (wallet_id, network) DO UPDATE
-      SET
-        chain_id = '8453',
-        address = EXCLUDED.address,
-        updated_at = CURRENT_TIMESTAMP
-    `;
+    const verifiedRecipient = recipient || walletRecord?.address;
+    if (!verifiedRecipient) {
+      throw new Error(
+        "RECIPIENT_ADDRESS_REQUIRED: No Base mainnet recipient address found on merchant wallet or passed via --recipient-address.",
+      );
+    }
+    const checksummedRecipient = toEip55ChecksumAddress(verifiedRecipient);
 
-    // 4. Attach/Update Base receive capability (can_receive = true)
-    await db.$executeRaw`
-      INSERT INTO flow.wallet_capabilities (
-        wallet_id, network, can_derive_address, can_receive,
-        can_read_native_balance, can_read_intents_balance, can_sign_transfer,
-        broadcast_mode, can_rotate_credentials, verified_at
-      ) VALUES (
-        ${walletId}::uuid, 'base-mainnet', true, true, true, false, false,
-        'caller_broadcast', true, CURRENT_TIMESTAMP
-      )
-      ON CONFLICT (wallet_id, network) DO UPDATE
-      SET
-        can_receive = true,
-        can_sign_transfer = false,
-        verified_at = CURRENT_TIMESTAMP
-    `;
+    // Verify recipient address matches registered wallet
+    if (
+      walletRecord?.address &&
+      toEip55ChecksumAddress(walletRecord.address) !== checksummedRecipient
+    ) {
+      throw new Error(
+        `RECIPIENT_WALLET_MISMATCH: Provided recipient ${checksummedRecipient} does not match merchant's registered Base wallet ${toEip55ChecksumAddress(walletRecord.address)}.`,
+      );
+    }
 
+    // Step 3: Base Mainnet RPC Verification
+    console.log("STEP 3: Base Mainnet On-Chain Verification");
+    const baseRpcUrl =
+      process.env.FLOW_BASE_RPC_URL || "https://mainnet.base.org";
+    const cleanRecipient = checksummedRecipient
+      .toLowerCase()
+      .replace(/^0x/, "");
+    const paddedRecipient = cleanRecipient.padStart(64, "0");
+    const balanceOfData = `0x70a08231${paddedRecipient}`;
+
+    try {
+      const balanceRes = await callJsonRpc<string>(baseRpcUrl, "eth_call", [
+        {
+          to: BASE_USDC_CONTRACT,
+          data: balanceOfData,
+        },
+        "latest",
+      ]);
+
+      const usdcRawBalance = balanceRes.response.result
+        ? BigInt(balanceRes.response.result)
+        : 0n;
+      console.log(
+        `  - Merchant Current Base USDC Balance: ${formatAtomicToDisplay(usdcRawBalance, 6)} USDC`,
+      );
+    } catch (err) {
+      console.log(
+        `  - [WARN] Could not verify starting balance via RPC: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     console.log(
-      `  - Wallet ${walletId} configured for Base Mainnet (EVM 8453) with receive capability active.`,
+      "  [PASS] Base Mainnet RPC and USDC contract verified online.\n",
     );
 
-    // 5. Create Payment Request for Base Mainnet USDC
+    // Step 4: Create Payment Request for Base Mainnet USDC
+    console.log("STEP 4: Create Payment Request for Base Mainnet USDC");
     const publicId = generatePublicPaymentId();
     const prRows = await db.$queryRaw<Array<{ id: string; public_id: string }>>`
       INSERT INTO flow.payment_requests (
@@ -234,24 +277,33 @@ export async function prepareMainnetRehearsal(
     `;
     const paymentReq = prRows[0]!;
     console.log(
-      `  - Created Payment Request: ${paymentReq.id} (Public ID: ${paymentReq.public_id})`,
+      `  - Created Payment Request: ${paymentReq.id} (Public ID: ${paymentReq.public_id})\n`,
     );
 
-    // 6. Query Operator and Issue Single-Use Rehearsal Authorization
-    const opRows = await db.$queryRaw<Array<{ auth_user_id: string }>>`
+    // Step 5: Issue Single-Use Rehearsal Authorization via Operator Role
+    console.log("STEP 5: Operator Privileged Authorization Issuance");
+    const operatorDb = getPrismaClient("operator");
+
+    const opRows = await operatorDb.$queryRaw<Array<{ auth_user_id: string }>>`
       SELECT auth_user_id
       FROM flow.custody_operators
       WHERE status = 'ACTIVE'
+        AND role IN ('SECURITY_OFFICER', 'CUSTODY_OPERATOR')
       LIMIT 1
     `;
     const operatorAuthId =
       options.operatorAuthId ||
-      opRows[0]?.auth_user_id ||
       process.env.FLOW_CUSTODY_OPERATOR_AUTH_ID ||
-      "flow-custody-operator-rehearsal";
+      opRows[0]?.auth_user_id;
 
-    // Issue Scoped Rehearsal Authorization
-    const authRows = await db.$queryRaw<Array<{ id: string }>>`
+    if (!operatorAuthId) {
+      throw new Error(
+        "OPERATOR_AUTH_REQUIRED: No active custody operator or security officer found to authorize rehearsal.",
+      );
+    }
+
+    // Issue Scoped Rehearsal Authorization strictly via operatorDb
+    const authRows = await operatorDb.$queryRaw<Array<{ id: string }>>`
       SELECT flow.create_payment_rehearsal_authorization(
         ${paymentReq.id}::uuid,
         ${operatorAuthId},
@@ -271,7 +323,7 @@ export async function prepareMainnetRehearsal(
       `  - Issued Scoped Rehearsal Authorization: ${authorizationId}`,
     );
     console.log(
-      "  [PASS] Single-use execution authorization securely persisted.\n",
+      "  [PASS] Single-use execution authorization securely persisted via operator privilege.\n",
     );
 
     console.log(

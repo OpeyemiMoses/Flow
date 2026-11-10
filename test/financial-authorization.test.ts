@@ -24,7 +24,7 @@ const BASE_VALID_INTENT: FinancialTransferIntent = {
   initiatorUserId: "usr-1",
   assetId: "base-mainnet:USDC",
   network: "eip155:8453",
-  recipientAddress: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+  recipientAddress: "0x2424242424242424242424242424242424242424",
   atomicAmount: 50_000_000n, // 50 USDC
   requestedAt: new Date().toISOString(),
   userConfirmationProof: {
@@ -38,7 +38,7 @@ test("validateRecipientAddress: checks valid EVM, Solana, and NEAR addresses", (
   // 1. Valid EVM checksum
   const evmRes = validateRecipientAddress(
     "eip155:8453",
-    "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+    "0x2424242424242424242424242424242424242424",
   );
   assert.equal(evmRes.valid, true);
 
