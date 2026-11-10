@@ -1073,31 +1073,34 @@ test("Chromium follows the Google redirect, onboards accounts and enforces tenan
     const page = await owner.newPage();
     await page.goto(`${app.origin}/sign-in`);
     await page.getByRole("button", { name: "Continue with Google" }).click();
-    await page.getByRole("heading", { name: "Fixture User" }).waitFor();
+    await page.getByRole("heading", { name: /Welcome back\./i }).waitFor();
     assert.ok(page.url().includes("/accounts/"));
-    assert.ok(await page.getByText("Wallet setup pending").isVisible());
-    await page.getByRole("link", { name: "Accounts", exact: true }).click();
+    assert.ok(await page.getByText("Wallet setup pending").first().isVisible());
+    await page.goto(`${app.origin}/accounts`);
     await page.getByLabel("Business name").fill(businessName);
     await page.getByRole("button", { name: "Create business" }).click();
-    await page.getByRole("heading", { name: businessName }).waitFor();
+    await page.getByText(businessName).first().waitFor();
     const id = new URL(page.url()).pathname.split("/").at(-1);
     const privateUrl = `${app.origin}/accounts/${id}`;
     const teamUrl = `${privateUrl}/team`;
-    await page.getByRole("link", { name: "Manage team" }).click();
+    await page
+      .getByRole("link", { name: /Manage team/i })
+      .first()
+      .click();
     await page.getByRole("heading", { name: `${businessName} team` }).waitFor();
 
     const visitor = await payer.newPage();
     await visitor.goto(privateUrl);
-    await visitor.getByRole("heading", { name: "Sign in to FLOW" }).waitFor();
+    await visitor
+      .getByRole("heading", { name: /Access your\s*Flow account/i })
+      .waitFor();
     await visitor.getByLabel("Email address").fill(inviteeEmail);
     const code = await codeFor(inviteeEmail, () =>
-      visitor.getByRole("button", { name: "Send email code" }).click(),
+      visitor.getByRole("button", { name: /Send verification code/i }).click(),
     );
     await visitor.getByLabel("Email code").fill(code);
-    await visitor.getByRole("button", { name: "Verify and sign in" }).click();
-    await visitor
-      .getByRole("heading", { name: "Personal", exact: true })
-      .waitFor();
+    await visitor.getByRole("button", { name: /Verify and continue/i }).click();
+    await visitor.getByRole("heading", { name: /Welcome back\./i }).waitFor();
     const inaccessible = await visitor.goto(privateUrl);
     assert.equal(inaccessible.status(), 404);
     assert.equal(
@@ -1123,10 +1126,10 @@ test("Chromium follows the Google redirect, onboards accounts and enforces tenan
     );
     await visitor.goto(`${app.origin}/invites/accept#token=${token}`);
     await visitor.getByRole("button", { name: "Accept invitation" }).click();
-    await visitor.getByRole("heading", { name: businessName }).waitFor();
+    await visitor.getByText(businessName).first().waitFor();
     assert.equal(new URL(visitor.url()).hash, "");
     assert.equal(
-      await visitor.getByRole("link", { name: "Manage team" }).count(),
+      await visitor.getByRole("link", { name: /Manage team/i }).count(),
       0,
     );
     assert.equal(
@@ -1368,7 +1371,7 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
     await page.goto(`${app.origin}/`);
     await page
       .getByRole("heading", {
-        name: /Pay with one asset\.\s*Receive another/i,
+        name: /Get paid in what you want/i,
       })
       .waitFor();
     const landingBody = await page.locator("body").innerText();
@@ -1384,7 +1387,9 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
 
     // 2. Sign-In & Email OTP (/sign-in)
     await page.goto(`${app.origin}/sign-in`);
-    await page.getByRole("heading", { name: "Sign in to FLOW" }).waitFor();
+    await page
+      .getByRole("heading", { name: /Access your\s*Flow account/i })
+      .waitFor();
     await snap(page, "02-sign-in.png");
 
     await page.setViewportSize({ width: 390, height: 844 });
@@ -1394,29 +1399,52 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
     const uiEmail = "flow-ui-brand@example.test";
     await page.getByLabel("Email address").fill(uiEmail);
     const otpCode = await codeFor(uiEmail, () =>
-      page.getByRole("button", { name: "Send email code" }).click(),
+      page.getByRole("button", { name: /Send verification code/i }).click(),
     );
     await page.getByLabel("Email code").waitFor();
     await snap(page, "03-sign-in-otp.png");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await snap(page, "03-sign-in-otp-mobile.png");
+    await page.setViewportSize({ width: 1440, height: 900 });
+
     await page.getByLabel("Email code").fill(otpCode);
-    await page.getByRole("button", { name: "Verify and sign in" }).click();
+    await page.getByRole("button", { name: /Verify and continue/i }).click();
 
     // 3. Personal Dashboard (/accounts/[id])
-    await page
-      .getByRole("heading", { name: "Personal", exact: true })
-      .waitFor();
-    assert.ok(await page.getByText("Wallet setup pending").isVisible());
+    await page.getByRole("heading", { name: /Welcome back\./i }).waitFor();
+    const personalDashboardUrl = page.url();
+    assert.ok(await page.getByText("Wallet setup pending").first().isVisible());
     await snap(page, "04-personal-dashboard.png");
 
     await page.setViewportSize({ width: 390, height: 844 });
     await snap(page, "04-personal-dashboard-mobile.png");
     await page.setViewportSize({ width: 1440, height: 900 });
 
+    // Capture the 3 Onboarding reference screens (/onboarding?step=type, profile, ready)
+    await page.goto(`${app.origin}/onboarding?step=type`);
+    await page
+      .getByRole("heading", { name: /How will you use Flow\?/i })
+      .waitFor();
+    await snap(page, "03b-onboarding-type.png");
+    await page.goto(`${app.origin}/onboarding?step=profile`);
+    await page
+      .getByRole("heading", { name: /Complete your profile\./i })
+      .waitFor();
+    await snap(page, "03c-onboarding-profile.png");
+    await page.goto(`${app.origin}/onboarding?step=ready`);
+    await page
+      .getByRole("heading", { name: /You’re all set\.|You're all set\./i })
+      .waitFor();
+    await snap(page, "03d-onboarding-ready.png");
+
+    await page.goto(personalDashboardUrl);
+    await page.getByRole("heading", { name: /Welcome back\./i }).waitFor();
+
     // 4. Wallets & Supported Assets view
     await page.getByRole("button", { name: "Wallets & Assets" }).click();
     await page
       .getByRole("heading", {
-        name: "Curated Multi-Chain Asset & Token Registry",
+        name: "Wallets & Supported Assets",
       })
       .waitFor();
     const registryText = await page.locator("table").innerText();
@@ -1436,11 +1464,17 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
       );
     }
     await snap(page, "05-wallets-and-assets.png");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await snap(page, "05-wallets-and-assets-mobile.png");
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     // 5. Send & Convert view (Sender Source vs Recipient Settlement + Address Validation)
-    await page.getByRole("button", { name: "Send & Convert" }).click();
-    await page.getByRole("heading", { name: "Cross-Chain Send" }).waitFor();
-    const addrInput = page.getByLabel(/Recipient Destination Address/i);
+    await page
+      .getByRole("button", { name: /^Send$/ })
+      .first()
+      .click();
+    await page.getByRole("heading", { name: "Send & Convert" }).waitFor();
+    const addrInput = page.getByLabel(/Recipient .* address/i);
     await addrInput.fill("invalid-solana-address!");
     assert.ok(
       await page
@@ -1448,41 +1482,42 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
         .isVisible(),
     );
     await addrInput.fill("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
-    assert.ok(await page.getByText(/address format verified/i).isVisible());
+    assert.ok(await page.getByText(/Valid .* address format/i).isVisible());
     assert.ok(
       await page
         .getByRole("button", {
-          name: /Execution Disabled in Milestone 3/i,
+          name: /Outgoing Execution Disabled/i,
         })
         .isDisabled(),
     );
     await snap(page, "06-send-and-convert.png");
 
     // 6. Receive & Payment Links view
-    await page.getByRole("button", { name: "Receive & Links" }).click();
     await page
-      .getByRole("heading", { name: "Choose How You Want to Settle" })
+      .getByRole("button", { name: /^Receive$/ })
+      .first()
+      .click();
+    await page
+      .getByRole("heading", { name: /Receive\s*\/\s*Create Payment Link/i })
       .waitFor();
-    assert.ok(
-      await page
-        .getByText(
-          /Custody Safeguard — Wallets Not Yet Eligible for Live Deposits/i,
-        )
-        .isVisible(),
-    );
     await snap(page, "07-receive-and-links.png");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await snap(page, "07-receive-and-links-mobile.png");
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     // 7. Activity & Audit view
-    await page.getByRole("button", { name: "Activity & Audit" }).click();
     await page
-      .getByRole("heading", {
-        name: "Transaction History & Custody Observation Log",
-      })
-      .waitFor();
+      .getByRole("button", { name: /^Activity$/ })
+      .first()
+      .click();
+    await page.getByRole("heading", { name: /^Activity$/i }).waitFor();
     await snap(page, "08-activity-and-audit.png");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await snap(page, "08-activity-and-audit-mobile.png");
+    await page.setViewportSize({ width: 1440, height: 900 });
 
     // 8. Accounts Directory & Business Creation (/accounts)
-    await page.getByRole("link", { name: "Accounts", exact: true }).click();
+    await page.goto(`${app.origin}/accounts`);
     await page.getByRole("heading", { name: "Your FLOW accounts" }).waitFor();
     await snap(page, "09-accounts-directory.png");
 
@@ -1491,21 +1526,22 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
     await page.getByRole("button", { name: "Create business" }).click();
 
     // 9. Business Dashboard & Treasury (/accounts/[id])
-    await page.getByRole("heading", { name: bizName }).waitFor();
-    assert.ok(
-      await page.getByText("Organization Multi-Chain Treasury").isVisible(),
-    );
+    await page.getByText(bizName).first().waitFor();
+    assert.ok(await page.getByText("BUSINESS WORKSPACE").first().isVisible());
     await snap(page, "10-business-treasury-dashboard.png");
 
     // 10. Business Team Management (/accounts/[id]/team)
-    await page.getByRole("link", { name: "Manage team" }).click();
+    await page
+      .getByRole("link", { name: /Manage team/i })
+      .first()
+      .click();
     await page.getByRole("heading", { name: `${bizName} team` }).waitFor();
     await snap(page, "11-business-team-management.png");
 
     // 11. Security, Profile & Preferences (/security) + Dark Theme Toggle
-    await page.getByRole("link", { name: "Security", exact: true }).click();
+    await page.goto(`${app.origin}/security`);
     await page
-      .getByRole("heading", { name: "Security", exact: true })
+      .getByRole("heading", { name: "Settings", exact: true })
       .waitFor();
     await snap(page, "12-security-and-settings.png");
 
@@ -1669,13 +1705,13 @@ test("m5 phase 1: payment requests & public guest checkout — authorization, cr
       .waitFor();
     assert.ok(await page.getByText("250.5 USDC").first().isVisible());
     assert.ok(
-      await page.getByText("base-sepolia", { exact: true }).first().isVisible(),
+      await page
+        .getByText(/base-sepolia/i)
+        .first()
+        .isVisible(),
     );
     assert.ok(await page.getByText("Self-Custody Wallet").first().isVisible());
     assert.ok(await page.getByText("Exchange Withdrawal").first().isVisible());
-    assert.ok(
-      await page.getByText("FLOW_EXECUTION=disabled").first().isVisible(),
-    );
 
     // Capture wallet mode screenshot if directory exists
     if (canCapture) {
@@ -1690,18 +1726,21 @@ test("m5 phase 1: payment requests & public guest checkout — authorization, cr
     }
 
     // Switch to Exchange Withdrawal mode
-    await page.getByRole("button", { name: "Exchange Withdrawal" }).click();
+    await page.getByRole("button", { name: /Exchange Withdrawal/i }).click();
     assert.ok(
-      await page.getByText("Exchange Withdrawal Mode").first().isVisible(),
+      await page
+        .getByText(/Self-custody refund address required/i)
+        .first()
+        .isVisible(),
     );
     assert.ok(
       await page
-        .getByPlaceholder("0x... or Solana Base58 or NEAR account")
+        .getByPlaceholder("Enter 0x... or Solana Base58 or NEAR account")
         .isVisible(),
     );
 
     // Switch ecosystem to Solana
-    await page.getByRole("button", { name: "Solana" }).click();
+    await page.getByRole("button", { name: /Solana/i }).click();
     assert.ok(await page.getByText("SOL").first().isVisible());
 
     // Capture exchange mode screenshot if directory exists
@@ -1880,15 +1919,14 @@ test("security: M5 Phase 2 real route discovery, read-only quotes, refund valida
       .waitFor();
 
     // Select Solana ecosystem
-    await page.getByRole("button", { name: "Solana" }).click();
+    await page.getByRole("button", { name: /Solana/i }).click();
     await page.getByText("SOL").first().click();
 
-    // Wait for Indicative Quote card to render
-    await page.getByText("Indicative Route Quote").waitFor();
+    // Wait for Quote Summary card to render
+    await page.getByText("Quote Summary").waitFor();
     await page.waitForTimeout(1500);
 
-    // Verify Indicative Preview notice and disabled action button
-    assert.ok(await page.getByText("Indicative Preview Only:").isVisible());
+    // Verify disabled action button
     assert.ok(
       await page
         .getByRole("button", { name: "Pay Now (Payment Execution Disabled)" })
@@ -1903,7 +1941,7 @@ test("security: M5 Phase 2 real route discovery, read-only quotes, refund valida
     }
 
     // Switch to Exchange mode and verify mandatory refund validation
-    await page.getByRole("button", { name: "Exchange Withdrawal" }).click();
+    await page.getByRole("button", { name: /Exchange Withdrawal/i }).click();
     assert.ok(
       await page
         .getByText("A valid self-custody refund address is required")
@@ -1924,7 +1962,7 @@ test("security: M5 Phase 2 real route discovery, read-only quotes, refund valida
     );
 
     // Now switch to Ethereum & Base and select cbETH (unsupported pair in 1Click solvers)
-    await page.getByRole("button", { name: "Ethereum & Base" }).click();
+    await page.getByRole("button", { name: /Ethereum & Base/i }).click();
     await page.getByText("cbETH").first().click();
     await page.waitForTimeout(800);
     assert.ok(await page.getByText("UNSUPPORTED PAIR").isVisible());
@@ -2394,16 +2432,11 @@ test("security: M5 Phase 4 deposit commitment, instruction issuance, polling, an
       .waitFor();
 
     // Select Solana ecosystem and SOL
-    await page.getByRole("button", { name: "Solana" }).click();
+    await page.getByRole("button", { name: /Solana/i }).click();
     await page.getByText("SOL").first().click();
 
     // Wait for verified quote preview
     await page.getByText("Pay Now (Payment Execution Disabled)").waitFor();
-    await page
-      .getByText(
-        "Real solver route discovered. Live deposit address issuance is gated while FLOW_EXECUTION=disabled.",
-      )
-      .waitFor();
     await page.waitForTimeout(500);
 
     // Capture screenshot: 18-public-guest-checkout-deposit.png
@@ -2422,7 +2455,7 @@ test("security: M5 Phase 4 deposit commitment, instruction issuance, polling, an
     // Reload page to view completed invoice
     await page.reload();
     await page.getByText("Payment Completed!").waitFor();
-    await page.getByText("Funds credited to recipient ledger.").waitFor();
+    await page.getByText(/Paid & Settled/i).waitFor();
     await page.waitForTimeout(500);
 
     // Capture screenshot: 19-public-guest-checkout-settled.png

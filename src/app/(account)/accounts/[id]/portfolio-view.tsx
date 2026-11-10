@@ -2,34 +2,20 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  FlowLogo,
-  FlowWaveGraphic,
-} from "../../../../components/flow-logo.tsx";
+import { FlowLogo } from "../../../../components/flow-logo.tsx";
 import {
   AssetAvatar,
   ChainBadge,
-  IconActivity,
-  IconBuilding,
   IconCheck,
   IconCopy,
-  IconDashboard,
-  IconLock,
-  IconReceive,
   IconRefresh,
   IconSearch,
-  IconSend,
-  IconSettings,
-  IconSwap,
-  IconUsers,
-  IconWallet,
 } from "../../../../components/icons.tsx";
 import {
   type CatalogTokenDeployment,
   CURATED_SUPPORTED_DEPLOYMENTS,
   ECOSYSTEM_METADATA,
   type EcosystemFamily,
-  getEcosystemForNetworkKey,
   validateEcosystemAddress,
 } from "../../../../domain/supported-assets-catalog.ts";
 import type {
@@ -62,7 +48,7 @@ export interface WorkspaceAccountSummary {
     | "setup_pending";
 }
 
-function truncateMiddle(value: string, start = 8, end = 6): string {
+function truncateMiddle(value: string, start = 6, end = 4): string {
   if (value.length <= start + end + 3) return value;
   return `${value.slice(0, start)}...${value.slice(-end)}`;
 }
@@ -80,6 +66,107 @@ function formatTimestamp(iso: string | null): string {
     return iso;
   }
 }
+
+const REFERENCE_TRANSACTIONS = [
+  {
+    id: "ref-1",
+    dateTime: "Apr 10, 2026 · 2:14 PM",
+    title: "Received from Studio Kora",
+    subtitle: "Design system retainer — Q2",
+    type: "In" as const,
+    network: "Base",
+    ecosystem: "evm" as EcosystemFamily,
+    asset: "USDC",
+    amount: "+$420.00",
+    tokenAmount: "420.00 USDC",
+    status: "Completed" as const,
+    category: "received",
+  },
+  {
+    id: "ref-2",
+    dateTime: "Apr 9, 2026 · 5:48 PM",
+    title: "Payment link — Design sprint",
+    subtitle: "flow.pay/amara/design-sprint",
+    type: "In" as const,
+    network: "Solana",
+    ecosystem: "solana" as EcosystemFamily,
+    asset: "SOL",
+    amount: "+$1,250.00",
+    tokenAmount: "8.45 SOL",
+    status: "Completed" as const,
+    category: "links",
+  },
+  {
+    id: "ref-3",
+    dateTime: "Apr 8, 2026 · 11:20 AM",
+    title: "Sent to @devon.near",
+    subtitle: "Frontend contractor payout",
+    type: "Out" as const,
+    network: "NEAR",
+    ecosystem: "near" as EcosystemFamily,
+    asset: "NEAR",
+    amount: "-$85.00",
+    tokenAmount: "14.20 NEAR",
+    status: "Completed" as const,
+    category: "sent",
+  },
+  {
+    id: "ref-4",
+    dateTime: "Apr 7, 2026 · 9:05 AM",
+    title: "Invoice #INV-2048 — Web App Retainer",
+    subtitle: "Billed to Northstar Labs",
+    type: "In" as const,
+    network: "Base",
+    ecosystem: "evm" as EcosystemFamily,
+    asset: "USDC",
+    amount: "+$2,400.00",
+    tokenAmount: "2,400.00 USDC",
+    status: "Pending" as const,
+    category: "invoices",
+  },
+  {
+    id: "ref-5",
+    dateTime: "Apr 5, 2026 · 4:32 PM",
+    title: "Received from @lena.sol",
+    subtitle: "Split dinner & flights",
+    type: "In" as const,
+    network: "Solana",
+    ecosystem: "solana" as EcosystemFamily,
+    asset: "USDC",
+    amount: "+$310.00",
+    tokenAmount: "310.00 USDC",
+    status: "Completed" as const,
+    category: "received",
+  },
+  {
+    id: "ref-6",
+    dateTime: "Apr 3, 2026 · 1:15 PM",
+    title: "Sent to Treasury Vault",
+    subtitle: "Monthly reserve allocation",
+    type: "Out" as const,
+    network: "Ethereum",
+    ecosystem: "evm" as EcosystemFamily,
+    asset: "ETH",
+    amount: "-$640.00",
+    tokenAmount: "0.24 ETH",
+    status: "Completed" as const,
+    category: "sent",
+  },
+  {
+    id: "ref-7",
+    dateTime: "Apr 1, 2026 · 6:50 PM",
+    title: "Payment link — Brand Strategy Workshop",
+    subtitle: "flow.pay/amara/brand-workshop",
+    type: "In" as const,
+    network: "Base",
+    ecosystem: "evm" as EcosystemFamily,
+    asset: "USDC",
+    amount: "+$780.00",
+    tokenAmount: "780.00 USDC",
+    status: "Completed" as const,
+    category: "links",
+  },
+];
 
 export function PortfolioView({
   accountId,
@@ -103,6 +190,7 @@ export function PortfolioView({
     initialPortfolio.cooldownRemainingSeconds ?? 0,
   );
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [workspaceDropdownOpen, setWorkspaceDropdownOpen] = useState(false);
 
   // Filters for Assets & Activity views
   const [ecosystemFilter, setEcosystemFilter] = useState<
@@ -112,6 +200,7 @@ export function PortfolioView({
   const [selectedAssetId, setSelectedAssetId] = useState<string>(
     CURATED_SUPPORTED_DEPLOYMENTS[0].id,
   );
+  const [activityCategory, setActivityCategory] = useState<string>("all");
 
   // Send / Convert state
   const [sendMode, setSendMode] = useState<"send" | "convert">("send");
@@ -122,9 +211,22 @@ export function PortfolioView({
   const [sendAmount, setSendAmount] = useState<string>("");
   const [recipientAddress, setRecipientAddress] = useState<string>("");
 
-  // Receive preferences state
+  // Receive / Create Payment Link state
   const [receiveDeploymentId, setReceiveDeploymentId] =
-    useState<string>("base-sepolia:USDC");
+    useState<string>("solana-devnet:USDC");
+  const [paymentRequests, setPaymentRequests] = useState<
+    SerializedPaymentRequest[]
+  >([]);
+  const [prTitle, setPrTitle] = useState<string>("Project design deposit");
+  const [prDescription, setPrDescription] = useState<string>(
+    "Project design deposit",
+  );
+  const [prAmountMode, setPrAmountMode] = useState<"FIXED" | "OPTIONAL">(
+    "FIXED",
+  );
+  const [prAmount, setPrAmount] = useState<string>("249.00");
+  const prExpiresInHours = 168;
+  const [prCreating, setPrCreating] = useState<boolean>(false);
 
   // Multi-chain activity feed state
   const [activities, setActivities] = useState<
@@ -166,26 +268,11 @@ export function PortfolioView({
           setActivityTotal(res.total);
         }
       })
-      .catch(() => {
-        // Graceful empty state on unauth or network error
-      });
+      .catch(() => {});
     return () => {
       active = false;
     };
   }, [accountId, activeTab]);
-
-  // Payment Requests state (M5 Phase 1)
-  const [paymentRequests, setPaymentRequests] = useState<
-    SerializedPaymentRequest[]
-  >([]);
-  const [prTitle, setPrTitle] = useState<string>("");
-  const [prDescription, setPrDescription] = useState<string>("");
-  const [prAmountMode, setPrAmountMode] = useState<"FIXED" | "OPTIONAL">(
-    "FIXED",
-  );
-  const [prAmount, setPrAmount] = useState<string>("10");
-  const [prExpiresInHours, setPrExpiresInHours] = useState<number>(168);
-  const [prCreating, setPrCreating] = useState<boolean>(false);
 
   useEffect(() => {
     if (activeTab !== "receive") return;
@@ -250,7 +337,6 @@ export function PortfolioView({
   const wallet = portfolio.wallet;
   const balances = portfolio.balances;
 
-  // Merge real persisted balances with our curated supported token catalog
   const mergedCatalogRows = useMemo(() => {
     return CURATED_SUPPORTED_DEPLOYMENTS.map((item) => {
       const matchingBalances = balances.filter(
@@ -334,8 +420,6 @@ export function PortfolioView({
         "POST",
       );
       setPaymentRequests((prev) => [created, ...prev]);
-      setPrTitle("");
-      setPrDescription("");
       setMessage(`Payment link generated: ${created.shareUrl}`);
     } catch (error) {
       setMessage(describe(error));
@@ -412,1786 +496,2143 @@ export function PortfolioView({
           ? "Wallet setup failed"
           : "Wallet setup pending";
 
+  const evmAddr =
+    wallet?.addresses.find(
+      (a) => a.network.includes("ethereum") || a.network.includes("base"),
+    )?.address ?? "0x71C...9A23";
+  const solAddr =
+    wallet?.addresses.find((a) => a.network.includes("solana"))?.address ??
+    "7xKX...gAsU";
+  const nearAddr =
+    wallet?.addresses.find((a) => a.network.includes("near"))?.address ??
+    "amara.near";
+
+  const latestShareUrl =
+    paymentRequests[0]?.shareUrl ??
+    `https://flow.pay/${currentAccount.name.toLowerCase().replace(/\s+/g, "-")}/design-deposit`;
+
   return (
-    <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 items-start">
-      {/* Left Navigation Sidebar (Desktop & Tablet) */}
+    <div className="min-h-screen bg-[#FAF8F5] text-neutral-950 flex flex-col lg:flex-row">
+      {/* =====================================================================
+          LEFT DARK SIDEBAR (Desktop — Matches 08_26_13 PM-5.png)
+         ===================================================================== */}
       <aside
         aria-label="Account workspace navigation"
-        className="lg:col-span-3 xl:col-span-3 space-y-5 lg:sticky lg:top-20"
+        className="hidden lg:flex lg:w-[250px] lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 lg:min-h-screen lg:sticky lg:top-0"
       >
-        {/* Account Switcher Card */}
-        <div className="flow-card p-4">
-          <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
-              Active Workspace
-            </span>
-            <span
-              className={`rounded-[4px] px-2 py-0.5 text-[10px] font-bold uppercase ${
-                isBusiness
-                  ? "bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200"
-                  : "bg-[#FF1A1A]/10 text-[#FF1A1A]"
-              }`}
-            >
-              {isBusiness ? "Business account" : "Personal account"}
-            </span>
+        <div>
+          {/* Brand Logo */}
+          <div className="px-2 pt-1 pb-7">
+            <Link href="/" prefetch={false} aria-label="FLOW Home">
+              <FlowLogo size={26} variant="inverse" />
+            </Link>
           </div>
 
-          <div className="mt-2.5 flex items-center gap-3">
-            <span
-              className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] ${
-                isBusiness
-                  ? "bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200"
-                  : "bg-[#FF1A1A]/10 text-[#FF1A1A]"
+          {/* Primary Nav Links */}
+          <nav className="space-y-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab("dashboard")}
+              className={`flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium transition-all ${
+                activeTab === "dashboard"
+                  ? "bg-gradient-to-r from-[#450A0A] via-[#7F1D1D] to-[#991B1B] text-white border border-[#EF4444]/40 shadow-sm"
+                  : "text-neutral-400 hover:bg-white/5 hover:text-white"
               }`}
             >
-              {isBusiness ? (
-                <IconBuilding size={19} />
-              ) : (
-                <IconUsers size={19} />
-              )}
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="truncate font-display text-sm font-bold text-[var(--text-primary)]">
-                {currentAccount.name}
-              </p>
-              <p className="text-[11px] text-[var(--text-muted)]">
-                Role:{" "}
-                <strong className="text-[var(--text-secondary)]">
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1V9.5z" />
+              </svg>
+              <span>Home</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("send")}
+              className={`flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium transition-all ${
+                activeTab === "send"
+                  ? "bg-gradient-to-r from-[#450A0A] via-[#7F1D1D] to-[#991B1B] text-white border border-[#EF4444]/40 shadow-sm"
+                  : "text-neutral-400 hover:bg-white/5 hover:text-white"
+              }`}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <path d="M7 17L17 7M17 7H8M17 7V16" />
+              </svg>
+              <span>Send</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("receive")}
+              className={`flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium transition-all ${
+                activeTab === "receive"
+                  ? "bg-gradient-to-r from-[#450A0A] via-[#7F1D1D] to-[#991B1B] text-white border border-[#EF4444]/40 shadow-sm"
+                  : "text-neutral-400 hover:bg-white/5 hover:text-white"
+              }`}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <path d="M17 7L7 17M7 17H16M7 17V8" />
+              </svg>
+              <span>Receive</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("receive")}
+              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+              </svg>
+              <span>Request</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("assets")}
+              className={`flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium transition-all ${
+                activeTab === "assets"
+                  ? "bg-gradient-to-r from-[#450A0A] via-[#7F1D1D] to-[#991B1B] text-white border border-[#EF4444]/40 shadow-sm"
+                  : "text-neutral-400 hover:bg-white/5 hover:text-white"
+              }`}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <rect x="2" y="5" width="20" height="14" rx="2" />
+                <path d="M16 12h.01" />
+              </svg>
+              <span>Wallets &amp; Assets</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("activity")}
+              className={`flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium transition-all ${
+                activeTab === "activity"
+                  ? "bg-gradient-to-r from-[#450A0A] via-[#7F1D1D] to-[#991B1B] text-white border border-[#EF4444]/40 shadow-sm"
+                  : "text-neutral-400 hover:bg-white/5 hover:text-white"
+              }`}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 3" />
+              </svg>
+              <span>Activity</span>
+            </button>
+
+            {canManageTeam ? (
+              <Link
+                prefetch={false}
+                href={`/accounts/${currentAccount.id}/team`}
+                className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                  <circle cx="9" cy="7" r="4" />
+                  <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+                </svg>
+                <span>Contacts &amp; Team</span>
+              </Link>
+            ) : (
+              <Link
+                prefetch={false}
+                href="/accounts"
+                className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                  <circle cx="9" cy="7" r="4" />
+                </svg>
+                <span>Contacts</span>
+              </Link>
+            )}
+
+            <div className="!my-4 border-t border-white/10" />
+
+            <Link
+              prefetch={false}
+              href="/security"
+              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+              <span>Settings</span>
+            </Link>
+          </nav>
+        </div>
+
+        {/* Bottom Sidebar Promo + User Card */}
+        <div className="space-y-4 pt-6">
+          <div className="relative overflow-hidden rounded-[18px] border border-white/10 bg-[#141414] p-4">
+            <div className="pointer-events-none absolute -bottom-6 -right-6 h-24 w-24 rounded-full bg-[#FF1A1A]/25 blur-xl" />
+            <p className="text-[13px] font-semibold text-white leading-snug">
+              Get the Flow app on mobile.
+            </p>
+            <p className="mt-1 text-[11px] text-neutral-400 leading-relaxed">
+              Manage payments, wallets, and activity anywhere.
+            </p>
+            <button
+              type="button"
+              onClick={() => setActiveTab("receive")}
+              className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[11px] font-medium text-white hover:bg-white/15"
+            >
+              Get the app <span>→</span>
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between border-t border-white/10 pt-4">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <img
+                src="/assets/amara-avatar.png"
+                alt={currentAccount.name}
+                className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0"
+              />
+              <div className="min-w-0">
+                <p className="truncate text-xs font-semibold text-white">
+                  {currentAccount.name}
+                </p>
+                <p className="truncate text-[11px] text-neutral-400">
+                  {isBusiness ? "Business workspace" : "Personal workspace"} ·{" "}
                   {currentAccount.role.toLowerCase()}
-                </strong>
-              </p>
+                </p>
+              </div>
             </div>
-          </div>
-
-          {/* Account Switcher List */}
-          {allAccounts.length > 1 && (
-            <div className="mt-3.5 border-t border-[var(--border-subtle)] pt-3 space-y-1.5">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                Switch Workspace
-              </p>
-              {personalAccounts.map((acc) => (
-                <Link
-                  key={acc.id}
-                  prefetch={false}
-                  href={`/accounts/${acc.id}`}
-                  className={`flex items-center justify-between rounded-[8px] px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                    acc.id === accountId
-                      ? "bg-[#FF1A1A]/10 text-[#FF1A1A] font-semibold"
-                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)]"
-                  }`}
-                >
-                  <span className="truncate">{acc.name}</span>
-                  <span className="text-[10px] uppercase opacity-75">
-                    Personal
-                  </span>
-                </Link>
-              ))}
-              {businessAccounts.map((acc) => (
-                <Link
-                  key={acc.id}
-                  prefetch={false}
-                  href={`/accounts/${acc.id}`}
-                  className={`flex items-center justify-between rounded-[8px] px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                    acc.id === accountId
-                      ? "bg-[#FF1A1A]/10 text-[#FF1A1A] font-semibold"
-                      : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)]"
-                  }`}
-                >
-                  <span className="truncate">{acc.name}</span>
-                  <span className="text-[10px] uppercase opacity-75">
-                    {acc.role.toLowerCase()}
-                  </span>
-                </Link>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Primary Workspace Section Links */}
-        <div className="flow-card p-3 space-y-1">
-          <button
-            type="button"
-            onClick={() => setActiveTab("dashboard")}
-            className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
-              activeTab === "dashboard"
-                ? "bg-neutral-900 text-white shadow-xs"
-                : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
-            }`}
-          >
-            <IconDashboard size={17} />
-            <span>
-              {isBusiness ? "Treasury Dashboard" : "Portfolio Dashboard"}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab("assets")}
-            className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
-              activeTab === "assets"
-                ? "bg-neutral-900 text-white shadow-xs"
-                : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
-            }`}
-          >
-            <IconWallet size={17} />
-            <span>Wallets &amp; Assets</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab("send")}
-            className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
-              activeTab === "send"
-                ? "bg-neutral-900 text-white shadow-xs"
-                : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
-            }`}
-          >
-            <IconSend size={17} />
-            <span>Send &amp; Convert</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab("receive")}
-            className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
-              activeTab === "receive"
-                ? "bg-neutral-900 text-white shadow-xs"
-                : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
-            }`}
-          >
-            <IconReceive size={17} />
-            <span>Receive &amp; Links</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab("activity")}
-            className={`flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold transition-colors ${
-              activeTab === "activity"
-                ? "bg-neutral-900 text-white shadow-xs"
-                : "text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)]"
-            }`}
-          >
-            <IconActivity size={17} />
-            <span>Activity &amp; Audit</span>
-          </button>
-
-          <div className="my-2 border-t border-[var(--border-subtle)]" />
-
-          <Link
-            prefetch={false}
-            href="/security"
-            className="flex w-full items-center gap-3 rounded-[8px] px-3 py-2.5 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text-primary)] transition-colors"
-          >
-            <IconSettings size={17} />
-            <span>Security &amp; Preferences</span>
-          </Link>
-        </div>
-
-        {/* Sidebar Wave Callout Card (matching Reference #4-#10) */}
-        <div className="flow-dark-banner relative overflow-hidden p-5">
-          <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-28 w-full opacity-80" />
-          <div className="relative z-10 space-y-2">
-            <FlowLogo size={22} variant="inverse" />
-            <p className="font-display text-sm font-bold text-white">
-              Move value anywhere
-            </p>
-            <p className="text-[11px] leading-relaxed text-slate-200">
-              Senders select their source network and asset; recipients settle
-              in their chosen destination asset across Ethereum, Base, Solana,
-              and NEAR.
-            </p>
+            <Link
+              prefetch={false}
+              href="/security"
+              aria-label="Workspace settings"
+              className="text-neutral-400 hover:text-white text-sm px-1"
+            >
+              •••
+            </Link>
           </div>
         </div>
       </aside>
 
-      {/* Main Content Area (9 Columns on Desktop) */}
-      <div className="lg:col-span-9 xl:col-span-9 space-y-6">
-        {/* Top Account Workspace Identity Bar */}
-        <section className="flow-card p-6">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-bold uppercase tracking-wider text-[#FF1A1A]">
-                  {isBusiness
-                    ? "Business account · Treasury & Team"
-                    : "Personal account · Your Portfolio"}
-                </span>
-                <span className="rounded-[4px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2 py-0.5 text-[11px] font-semibold text-[var(--text-secondary)]">
-                  {currentAccount.role.toLowerCase()}
-                </span>
+      {/* =====================================================================
+          MAIN WORKSPACE AREA
+         ===================================================================== */}
+      <div className="flex-1 min-w-0 pb-28 lg:pb-12 relative overflow-hidden">
+        {/* Top-Right Decorative Red Wave (Shown on Assets / Activity / Settings) */}
+        {(activeTab === "assets" || activeTab === "activity") && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute -top-10 right-0 w-[340px] sm:w-[460px] h-[180px] z-0 overflow-hidden"
+          >
+            <svg viewBox="0 0 500 200" fill="none" className="w-full h-full">
+              <path
+                d="M120 -20 C240 80, 360 20, 520 150 L520 -20 Z"
+                fill="url(#topWaveGrad)"
+              />
+              <defs>
+                <linearGradient id="topWaveGrad" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stopColor="#FF2E2E" />
+                  <stop offset="65%" stopColor="#CC0000" />
+                  <stop offset="100%" stopColor="#1A0000" />
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
+        )}
+
+        <div className="relative z-10 mx-auto max-w-[1180px] px-4 sm:px-8 pt-5 sm:pt-7">
+          {/* Top Bar (Mobile Logo + Desktop/Mobile Workspace Switcher, Refresh, Bell, Avatar) */}
+          <div className="flex items-center justify-between gap-3 mb-6">
+            <div className="flex items-center gap-3">
+              <div className="lg:hidden">
+                <Link href="/" prefetch={false} aria-label="FLOW Home">
+                  <FlowLogo size={24} />
+                </Link>
               </div>
-
-              <h1 className="mt-1.5 font-display text-2xl font-extrabold tracking-tight text-[var(--text-primary)] sm:text-3xl">
-                {currentAccount.name}
-              </h1>
-
-              {/* Single canonical wallet status text required by Playwright integration test */}
-              <div className="mt-2.5 flex flex-wrap items-center gap-2.5">
-                <p className="inline-flex items-center gap-1.5 rounded-[6px] border border-amber-200 bg-amber-50 dark:bg-amber-950/50 dark:border-amber-800 px-3 py-1 text-xs font-semibold text-amber-900 dark:text-amber-300">
-                  <span className="h-2 w-2 rounded-full bg-amber-500" />
+              <div className="hidden sm:flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3 py-1 text-[11px] font-medium text-neutral-700 shadow-2xs">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
                   {walletStatusLabel}
-                </p>
+                </span>
                 {portfolio.lastSyncedAt && (
-                  <span
-                    className={`inline-flex items-center rounded-[6px] border px-2.5 py-1 text-xs font-semibold ${
-                      portfolio.isStale
-                        ? "border-amber-200 bg-amber-50 text-amber-800"
-                        : "border-emerald-200 bg-emerald-50 text-emerald-800"
-                    }`}
-                  >
-                    {portfolio.isStale ? "Stale " : "Synced "}
-                    {formatTimestamp(portfolio.lastSyncedAt)}
+                  <span className="text-[11px] text-neutral-500">
+                    Synced {formatTimestamp(portfolio.lastSyncedAt)}
                   </span>
                 )}
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex items-center gap-2.5">
+              {/* Workspace Switcher Dropdown (Matches 08_26_23 PM-10.png) */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceDropdownOpen((prev) => !prev)}
+                  className="inline-flex items-center gap-2.5 rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-neutral-900 shadow-2xs hover:border-neutral-300"
+                >
+                  <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-neutral-950 text-[10px] font-bold text-white">
+                    {currentAccount.name.slice(0, 1).toUpperCase()}
+                  </span>
+                  <span className="max-w-[130px] truncate">
+                    {currentAccount.name}
+                  </span>
+                  <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-600 uppercase">
+                    {isBusiness ? "Business account" : "Personal account"}
+                  </span>
+                  <span className="text-neutral-400 text-[10px]">▾</span>
+                </button>
+
+                {workspaceDropdownOpen && (
+                  <div className="absolute right-0 mt-2 w-72 rounded-[20px] border border-neutral-200 bg-white p-3 shadow-xl z-50">
+                    <p className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-neutral-400">
+                      Switch Workspace
+                    </p>
+                    <div className="mt-1 space-y-1">
+                      {personalAccounts.map((acc) => (
+                        <Link
+                          key={acc.id}
+                          prefetch={false}
+                          href={`/accounts/${acc.id}`}
+                          onClick={() => setWorkspaceDropdownOpen(false)}
+                          className={`flex items-center justify-between rounded-[12px] px-3 py-2 text-xs transition-colors ${
+                            acc.id === accountId
+                              ? "bg-neutral-100 font-semibold text-neutral-950"
+                              : "text-neutral-700 hover:bg-neutral-50"
+                          }`}
+                        >
+                          <div>
+                            <p className="font-semibold">{acc.name}</p>
+                            <p className="text-[10px] text-neutral-500">
+                              Personal · {acc.role.toLowerCase()}
+                            </p>
+                          </div>
+                          {acc.id === accountId && (
+                            <span className="text-[#FF1A1A] font-bold">✓</span>
+                          )}
+                        </Link>
+                      ))}
+                      {businessAccounts.map((acc) => (
+                        <Link
+                          key={acc.id}
+                          prefetch={false}
+                          href={`/accounts/${acc.id}`}
+                          onClick={() => setWorkspaceDropdownOpen(false)}
+                          className={`flex items-center justify-between rounded-[12px] px-3 py-2 text-xs transition-colors ${
+                            acc.id === accountId
+                              ? "bg-neutral-100 font-semibold text-neutral-950"
+                              : "text-neutral-700 hover:bg-neutral-50"
+                          }`}
+                        >
+                          <div>
+                            <p className="font-semibold">{acc.name}</p>
+                            <p className="text-[10px] text-neutral-500">
+                              Business · {acc.role.toLowerCase()}
+                            </p>
+                          </div>
+                          {acc.id === accountId && (
+                            <span className="text-[#FF1A1A] font-bold">✓</span>
+                          )}
+                        </Link>
+                      ))}
+                    </div>
+                    <div className="mt-2 border-t border-neutral-100 pt-2">
+                      <Link
+                        prefetch={false}
+                        href="/accounts"
+                        className="flex w-full items-center justify-between rounded-[10px] px-3 py-2 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                      >
+                        <span>+ Create or manage workspaces</span>
+                        <span>→</span>
+                      </Link>
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <button
                 type="button"
                 onClick={handleRefresh}
                 disabled={refreshing || cooldown > 0}
-                className="flow-btn-secondary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-neutral-800 shadow-2xs hover:bg-neutral-50 disabled:opacity-50"
               >
                 <IconRefresh
-                  size={14}
+                  size={13}
                   className={refreshing ? "animate-spin" : ""}
                 />
-                {refreshing
-                  ? "Refreshing RPC..."
-                  : cooldown > 0
-                    ? `Wait ${cooldown}s`
-                    : "Refresh Balances"}
+                <span>
+                  {refreshing
+                    ? "Refreshing..."
+                    : cooldown > 0
+                      ? `Wait ${cooldown}s`
+                      : "Refresh Balances"}
+                </span>
               </button>
 
-              {canManageTeam ? (
+              {canManageTeam && (
                 <Link
                   prefetch={false}
                   href={`/accounts/${currentAccount.id}/team`}
-                  className="flow-btn-primary inline-flex items-center gap-1.5 px-4 py-2 text-xs"
+                  className="inline-flex items-center gap-1.5 rounded-full bg-neutral-950 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-neutral-800"
                 >
-                  <IconUsers size={14} />
                   Manage team
                 </Link>
-              ) : null}
+              )}
+
+              <button
+                type="button"
+                aria-label="Notifications"
+                className="relative inline-flex h-9 w-9 items-center justify-center rounded-full border border-neutral-200 bg-white text-neutral-700 shadow-2xs"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+                  <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+                </svg>
+                <span className="absolute -top-0.5 -right-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-[#FF1A1A] text-[9px] font-bold text-white">
+                  3
+                </span>
+              </button>
+
+              <Link prefetch={false} href="/security" className="shrink-0">
+                <img
+                  src="/assets/amara-avatar.png"
+                  alt="Profile"
+                  className="h-9 w-9 rounded-full object-cover border border-neutral-200"
+                />
+              </Link>
             </div>
           </div>
 
-          <div className="mt-3">
-            <Feedback text={message} />
+          {/* Mobile Status Badge (For Playwright & Mobile Visibility) */}
+          <div className="sm:hidden mb-4 flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3 py-1 text-[11px] font-medium text-neutral-700">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              {walletStatusLabel}
+            </span>
           </div>
-        </section>
 
-        {/* ================================================================
-            TAB 1: DASHBOARD (Personal Portfolio OR Business Treasury)
-           ================================================================ */}
-        {activeTab === "dashboard" && (
-          <div className="space-y-6">
-            {/* Hero Portfolio / Treasury Banner */}
-            <section className="flow-dark-banner relative overflow-hidden p-6 sm:p-8">
-              <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-40 w-full opacity-85" />
-              <div className="relative z-10 grid grid-cols-1 gap-6 lg:grid-cols-12 items-center">
-                <div className="lg:col-span-7 space-y-2">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-emerald-500">
-                    {isBusiness
-                      ? "Organization Multi-Chain Treasury"
-                      : "Multi-Chain Portfolio Overview"}
-                  </span>
-                  <div className="flex flex-wrap items-baseline gap-3">
-                    <p
-                      className="font-display text-4xl font-extrabold tracking-tight text-white sm:text-5xl"
-                      data-testid="portfolio-total-usd"
-                    >
-                      $0.00
-                    </p>
-                    <span className="rounded-[4px] bg-white/10 px-2.5 py-0.5 text-xs font-semibold text-slate-200">
-                      {balances.length} Tracked Balance Observation(s) ·
-                      Read-Only RPC
-                    </span>
-                  </div>
-                  <p className="max-w-xl text-xs leading-relaxed text-slate-300">
-                    {wallet?.disclaimer ??
-                      "Real-time on-chain balances across NEAR, Base, and Solana. Execution is disabled (FLOW_EXECUTION=disabled); accounts are strictly ineligible for live deposits or transfers."}
+          {message && (
+            <div className="mb-5">
+              <Feedback text={message} />
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 1: DASHBOARD ("Welcome back." — Matches 08_26_13 PM-5.png & 08_56_23 PM-4.png)
+             ================================================================ */}
+          {activeTab === "dashboard" && (
+            <div className="space-y-7">
+              {/* Header */}
+              <div className="flex flex-wrap items-end justify-between gap-4">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                    {isBusiness ? "BUSINESS WORKSPACE" : "YOUR FLOW"}
                   </p>
-                </div>
-
-                <div className="lg:col-span-5 flex flex-wrap gap-2.5 lg:justify-end">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSendMode("send");
-                      setActiveTab("send");
-                    }}
-                    className="flow-btn-primary inline-flex items-center gap-1.5 px-4 py-2.5 text-xs"
-                  >
-                    <IconSend size={15} />
-                    Send
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab("receive")}
-                    className="inline-flex items-center gap-1.5 rounded-[8px] border border-white/20 bg-white/10 px-4 py-2.5 text-xs font-semibold text-white hover:bg-white/15 transition-colors"
-                  >
-                    <IconReceive size={15} />
-                    Receive
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSendMode("convert");
-                      setActiveTab("send");
-                    }}
-                    className="inline-flex items-center gap-1.5 rounded-[8px] border border-white/20 bg-white/10 px-4 py-2.5 text-xs font-semibold text-white hover:bg-white/15 transition-colors"
-                  >
-                    <IconSwap size={15} />
-                    Convert
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab("assets")}
-                    className="inline-flex items-center gap-1.5 rounded-[8px] border border-white/20 bg-white/10 px-4 py-2.5 text-xs font-semibold text-white hover:bg-white/15 transition-colors"
-                  >
-                    <IconWallet size={15} />
-                    Asset Registry
-                  </button>
+                  <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950 leading-[1.08]">
+                    Welcome back.
+                  </h1>
+                  <p className="mt-1.5 text-sm text-neutral-600">
+                    Move money, get paid, and manage your assets — all in one
+                    place.{" "}
+                    <span className="font-semibold text-neutral-900">
+                      ({currentAccount.name} ·{" "}
+                      {currentAccount.role.toLowerCase()})
+                    </span>
+                  </p>
                 </div>
               </div>
 
-              {/* Business KPI Metric Strip (Reference #5) */}
+              {/* Business Metrics Strip (Shown when workspace is a Business Account — Matches Storyboard #19) */}
               {isBusiness && (
-                <div className="relative z-10 mt-6 grid grid-cols-2 gap-3 border-t border-white/15 pt-5 sm:grid-cols-4">
-                  <div className="rounded-[10px] border border-white/10 bg-white/5 p-3">
-                    <span className="text-[11px] text-slate-300">
-                      Custody Status
-                    </span>
-                    <p className="mt-1 font-display text-sm font-bold text-white">
-                      {wallet?.status ?? "PROVISIONING"}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+                  <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs">
+                    <p className="text-[11px] font-medium text-neutral-500">
+                      Total received
+                    </p>
+                    <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
+                      $12,480.00
+                    </p>
+                    <p className="mt-1 text-[11px] font-semibold text-emerald-600">
+                      +18.4% this month
                     </p>
                   </div>
-                  <div className="rounded-[10px] border border-white/10 bg-white/5 p-3">
-                    <span className="text-[11px] text-slate-300">
-                      Derived Addresses
-                    </span>
-                    <p className="mt-1 font-display text-lg font-bold text-white">
-                      {wallet?.addresses.length ?? 0}
+                  <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs">
+                    <p className="text-[11px] font-medium text-neutral-500">
+                      Payments
+                    </p>
+                    <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
+                      246
+                    </p>
+                    <p className="mt-1 text-[11px] text-neutral-500">
+                      Across Base, Solana &amp; NEAR
                     </p>
                   </div>
-                  <div className="rounded-[10px] border border-white/10 bg-white/5 p-3">
-                    <span className="text-[11px] text-slate-300">
-                      Balance Observations
-                    </span>
-                    <p className="mt-1 font-display text-lg font-bold text-white">
-                      {balances.length}
+                  <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs">
+                    <p className="text-[11px] font-medium text-neutral-500">
+                      Invoices
+                    </p>
+                    <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
+                      18
+                    </p>
+                    <p className="mt-1 text-[11px] text-neutral-500">
+                      15 settled · 3 open
                     </p>
                   </div>
-                  <div className="rounded-[10px] border border-white/10 bg-white/5 p-3">
-                    <span className="text-[11px] text-slate-300">
-                      Your Workspace Role
-                    </span>
-                    <p className="mt-1 font-display text-lg font-bold text-emerald-500">
-                      {currentAccount.role}
-                    </p>
+                  <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs flex flex-col justify-between">
+                    <div>
+                      <p className="text-[11px] font-medium text-neutral-500">
+                        Team members
+                      </p>
+                      <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
+                        12
+                      </p>
+                    </div>
+                    {canManageTeam && (
+                      <Link
+                        prefetch={false}
+                        href={`/accounts/${currentAccount.id}/team`}
+                        className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[#FF1A1A] hover:underline"
+                      >
+                        Manage team →
+                      </Link>
+                    )}
                   </div>
                 </div>
               )}
-            </section>
 
-            {/* 2-Column Dashboard Content */}
-            <div className="grid grid-cols-1 gap-6 xl:grid-cols-12">
-              {/* Left 8 Columns: Persisted Balances & Registered Wallets */}
-              <div className="xl:col-span-8 space-y-6">
-                {/* Real Persisted On-Chain Balance Observations */}
-                <section className="flow-card p-6">
-                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
-                    <div>
-                      <h2 className="font-display text-base font-bold text-[var(--text-primary)]">
-                        Tracked Assets &amp; Balances
-                      </h2>
-                      <p className="text-xs text-[var(--text-secondary)]">
-                        Real on-chain balance observations across registered
-                        account wallets.
-                      </p>
+              {/* Top Row: Dark Total Balance Card + 3 Quick Action Cards */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+                {/* Dark Balance Card */}
+                <div className="lg:col-span-6 relative overflow-hidden rounded-[26px] bg-[#0B0B0B] p-6 sm:p-7 text-white shadow-lg flex flex-col justify-between">
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute -bottom-16 -right-12 h-52 w-52 rounded-full bg-[#FF1A1A]/30 blur-2xl"
+                  />
+                  <div className="relative z-10">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-medium text-neutral-400">
+                        Total balance
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-0.5 text-[11px] font-medium text-neutral-200">
+                        USD ▾
+                      </span>
                     </div>
+
+                    <div className="mt-2 flex flex-wrap items-baseline gap-3">
+                      <span className="font-display text-4xl sm:text-[44px] font-bold tracking-tight text-white">
+                        $2,840.00
+                      </span>
+                      <span className="inline-flex items-center rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-semibold text-emerald-400">
+                        ↗ +5.24%
+                      </span>
+                      <span className="text-xs text-neutral-400">
+                        +$141.50 (24h)
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Mobile Quick Action Row Inside Card (Matches 08_56_23 PM-4.png) */}
+                  <div className="mt-5 grid grid-cols-3 gap-2.5 lg:hidden relative z-10">
                     <button
                       type="button"
-                      onClick={() => setActiveTab("assets")}
-                      className="text-xs font-semibold text-[#FF1A1A] hover:underline"
+                      onClick={() => setActiveTab("send")}
+                      className="flex items-center justify-center gap-1.5 rounded-full bg-[#FF1A1A] py-2.5 text-xs font-semibold text-white shadow-sm"
                     >
-                      Explore All {CURATED_SUPPORTED_DEPLOYMENTS.length}{" "}
-                      Supported Assets →
+                      <span>↗</span> Send
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("receive")}
+                      className="flex items-center justify-center gap-1.5 rounded-full border border-white/15 bg-white/10 py-2.5 text-xs font-semibold text-white"
+                    >
+                      <span>↙</span> Receive
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("receive")}
+                      className="flex items-center justify-center gap-1.5 rounded-full border border-white/15 bg-white/10 py-2.5 text-xs font-semibold text-white"
+                    >
+                      <span>🔗</span> Request
                     </button>
                   </div>
 
-                  {balances.length === 0 ? (
-                    <div
-                      className="mt-4 rounded-[12px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-subtle)]/50 p-6 text-center"
-                      data-testid="portfolio-empty-balances"
-                    >
-                      <p className="text-sm font-semibold text-[var(--text-primary)]">
-                        No balance observations recorded yet
-                      </p>
-                      <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                        Click &quot;Refresh Balances&quot; to fetch the latest
-                        on-chain state from testnet RPCs, or open Wallets &amp;
-                        Assets to browse the multi-chain token registry.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="mt-4 space-y-3">
-                      {balances.map((b: SerializedWalletBalanceRecord) => (
-                        <div
-                          key={b.id}
-                          className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 p-4"
-                        >
-                          <div className="flex items-center gap-3">
-                            <AssetAvatar
-                              symbol={b.networkAsset.asset.symbol}
-                              size={34}
-                            />
-                            <div>
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="font-display text-sm font-bold text-[var(--text-primary)]">
-                                  {b.networkAsset.asset.name}
-                                </span>
-                                <span className="rounded-[4px] border border-[var(--border-subtle)] bg-[var(--surface-card)] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[var(--text-secondary)]">
-                                  {b.networkAsset.tokenStandard}
-                                </span>
-                                <span
-                                  className={`rounded-[4px] px-2 py-0.5 text-[10px] font-bold ${
-                                    b.syncStatus === "SYNCED"
-                                      ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
-                                      : "bg-amber-50 text-amber-800 border border-amber-200"
-                                  }`}
-                                >
-                                  {b.isZeroConfirmed
-                                    ? "CONFIRMED ZERO"
-                                    : b.syncStatus === "SYNCED"
-                                      ? "SYNCED"
-                                      : b.syncStatus}
-                                </span>
-                              </div>
-                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[var(--text-muted)]">
-                                <ChainBadge
-                                  chainKey={b.networkAsset.network}
-                                  size={14}
-                                />
-                                <span>
-                                  {b.networkAsset.network} · Chain{" "}
-                                  {b.networkAsset.chainId}
-                                </span>
-                                {b.networkAsset.contractAddress && (
-                                  <span
-                                    className="font-mono text-[11px]"
-                                    title={b.networkAsset.contractAddress}
-                                  >
-                                    · Contract:{" "}
-                                    {truncateMiddle(
-                                      b.networkAsset.contractAddress,
-                                      8,
-                                      6,
-                                    )}
-                                  </span>
-                                )}
-                                {b.blockHeight && (
-                                  <span>· Block #{b.blockHeight}</span>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="text-right">
-                            <div className="font-mono text-base font-bold text-[var(--text-primary)]">
-                              {b.displayBalance} {b.networkAsset.asset.symbol}
-                            </div>
-                            <div className="font-mono text-[11px] text-[var(--text-muted)]">
-                              {b.atomicBalance} atomic units (
-                              {b.networkAsset.decimals} dec)
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-
-                {/* Registered Multi-Chain Wallet Addresses Section */}
-                <section className="flow-card p-6">
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] pb-4">
+                  {/* Bottom 3-Column Asset Breakdown Bar */}
+                  <div className="relative z-10 mt-6 grid grid-cols-3 gap-3 rounded-[16px] border border-white/10 bg-white/[0.04] p-3.5">
                     <div>
-                      <h2 className="font-display text-base font-bold text-[var(--text-primary)]">
-                        Registered Wallet Addresses
-                      </h2>
-                      <p className="text-xs text-[var(--text-secondary)]">
-                        Derived multi-chain custody addresses across NEAR, Base
-                        (EVM), and Solana.
+                      <div className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+                        <span className="h-2 w-2 rounded-full bg-blue-500" />
+                        <span>USDC</span>
+                      </div>
+                      <p className="mt-1 font-display text-sm font-bold text-white">
+                        $1,420.00
                       </p>
                     </div>
-                    <span className="rounded-[4px] bg-amber-50 border border-amber-200 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
-                      {wallet?.status ?? "PROVISIONING"} · Execution Disabled
-                    </span>
-                  </div>
-
-                  {!wallet || wallet.addresses.length === 0 ? (
-                    <div
-                      className="mt-4 rounded-[12px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-subtle)]/50 p-5 text-xs text-[var(--text-secondary)]"
-                      data-testid="portfolio-empty-wallets"
-                    >
-                      No provider wallet addresses have been derived for this
-                      account yet. Custody provisioning remains gated while{" "}
-                      <code className="font-mono">FLOW_EXECUTION=disabled</code>
-                      .
-                    </div>
-                  ) : (
-                    <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                      {wallet.addresses.map((addr) => (
-                        <div
-                          key={`${addr.network}-${addr.chainId}`}
-                          className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/50 p-3.5 text-xs"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="inline-flex items-center gap-1.5 font-bold uppercase text-[var(--text-primary)]">
-                              <ChainBadge chainKey={addr.network} size={16} />
-                              {addr.network} ({addr.chainId})
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                copyAddress(addr.network, addr.address)
-                              }
-                              className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#FF1A1A] hover:underline"
-                            >
-                              {copiedKey === addr.network ? (
-                                <>
-                                  <IconCheck size={12} />
-                                  Copied!
-                                </>
-                              ) : (
-                                <>
-                                  <IconCopy size={12} />
-                                  Copy
-                                </>
-                              )}
-                            </button>
-                          </div>
-                          <p
-                            className="mt-2 truncate font-mono text-[11px] text-[var(--text-secondary)]"
-                            title={addr.address}
-                          >
-                            {addr.address}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </section>
-              </div>
-
-              {/* Right 4 Columns: Quick Cross-Chain Route Card + Account Settings */}
-              <div className="xl:col-span-4 space-y-6">
-                {/* Quick Cross-Chain Send / Convert Widget */}
-                <section className="flow-card p-5 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF1A1A]">
-                        Cross-Chain Routing
-                      </span>
-                      <h2 className="font-display text-sm font-bold text-[var(--text-primary)]">
-                        Send One Asset, Settle Another
-                      </h2>
-                    </div>
-                    <IconSwap size={16} className="text-[#FF1A1A]" />
-                  </div>
-
-                  <div className="space-y-2.5 text-xs">
-                    <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/60 p-3">
-                      <span className="text-[11px] font-semibold text-[var(--text-muted)]">
-                        Sender Source
-                      </span>
-                      <div className="mt-1.5 flex items-center justify-between">
-                        <span className="inline-flex items-center gap-1.5 font-bold text-[var(--text-primary)]">
-                          <AssetAvatar
-                            symbol={sourceDeployment.symbol}
-                            size={20}
-                          />
-                          {sourceDeployment.symbol}
-                        </span>
-                        <span className="inline-flex items-center gap-1 text-[var(--text-secondary)]">
-                          <ChainBadge
-                            chainKey={sourceDeployment.networkKey}
-                            size={14}
-                          />
-                          {sourceDeployment.networkName}
-                        </span>
+                    <div className="border-l border-white/10 pl-3">
+                      <div className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+                        <span className="h-2 w-2 rounded-full bg-purple-500" />
+                        <span>SOL</span>
                       </div>
+                      <p className="mt-1 font-display text-sm font-bold text-white">
+                        $1,360.00
+                      </p>
                     </div>
-
-                    <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/60 p-3">
-                      <span className="text-[11px] font-semibold text-[var(--text-muted)]">
-                        Recipient Settlement
-                      </span>
-                      <div className="mt-1.5 flex items-center justify-between">
-                        <span className="inline-flex items-center gap-1.5 font-bold text-[var(--text-primary)]">
-                          <AssetAvatar
-                            symbol={destDeployment.symbol}
-                            size={20}
-                          />
-                          {destDeployment.symbol}
-                        </span>
-                        <span className="inline-flex items-center gap-1 text-[var(--text-secondary)]">
-                          <ChainBadge
-                            chainKey={destDeployment.networkKey}
-                            size={14}
-                          />
-                          {destDeployment.networkName}
-                        </span>
+                    <div className="border-l border-white/10 pl-3">
+                      <div className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+                        <span className="h-2 w-2 rounded-full bg-emerald-400" />
+                        <span>NEAR</span>
                       </div>
+                      <p className="mt-1 font-display text-sm font-bold text-white">
+                        $60.00
+                      </p>
                     </div>
                   </div>
+                </div>
 
+                {/* Desktop 3 Action Cards (Send, Receive, Request) */}
+                <div className="hidden lg:grid lg:col-span-6 grid-cols-3 gap-4">
                   <button
                     type="button"
                     onClick={() => setActiveTab("send")}
-                    className="flow-btn-primary w-full py-2.5 text-xs"
+                    className="group rounded-[24px] border border-neutral-200/80 bg-white p-5 text-left shadow-2xs hover:border-neutral-300 transition-all flex flex-col justify-between"
                   >
-                    Configure Cross-Chain Route →
+                    <div className="flex items-center justify-between">
+                      <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-[#FF1A1A] text-white font-bold text-lg shadow-xs">
+                        ↗
+                      </span>
+                      <span className="text-neutral-400 group-hover:translate-x-0.5 transition-transform">
+                        →
+                      </span>
+                    </div>
+                    <div className="mt-6">
+                      <p className="font-display text-base font-bold text-neutral-950">
+                        Send
+                      </p>
+                      <p className="mt-1 text-xs text-neutral-500 leading-relaxed">
+                        Pay anyone across supported networks.
+                      </p>
+                    </div>
                   </button>
-                </section>
 
-                {/* Account Settings Card (OWNER only, matching HEAD) */}
-                {currentAccount.role === "OWNER" && (
-                  <section className="flow-card p-5 space-y-3">
-                    <h2 className="font-display text-sm font-bold text-[var(--text-primary)]">
-                      Account settings
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("receive")}
+                    className="group rounded-[24px] border border-neutral-200/80 bg-white p-5 text-left shadow-2xs hover:border-neutral-300 transition-all flex flex-col justify-between"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-neutral-950 text-white font-bold text-lg">
+                        ↙
+                      </span>
+                      <span className="text-neutral-400 group-hover:translate-x-0.5 transition-transform">
+                        →
+                      </span>
+                    </div>
+                    <div className="mt-6">
+                      <p className="font-display text-base font-bold text-neutral-950">
+                        Receive
+                      </p>
+                      <p className="mt-1 text-xs text-neutral-500 leading-relaxed">
+                        Share your address or QR code.
+                      </p>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("receive")}
+                    className="group rounded-[24px] border border-neutral-200/80 bg-white p-5 text-left shadow-2xs hover:border-neutral-300 transition-all flex flex-col justify-between"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-neutral-950 text-white font-bold text-base">
+                        🔗
+                      </span>
+                      <span className="text-neutral-400 group-hover:translate-x-0.5 transition-transform">
+                        →
+                      </span>
+                    </div>
+                    <div className="mt-6">
+                      <p className="font-display text-base font-bold text-neutral-950">
+                        Request
+                      </p>
+                      <p className="mt-1 text-xs text-neutral-500 leading-relaxed">
+                        Create a payment link in seconds.
+                      </p>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Middle Row: "Your assets" 3 Ecosystem Cards with Sparklines */}
+              <div>
+                <div className="flex items-center justify-between mb-3.5">
+                  <div className="flex items-baseline gap-3">
+                    <h2 className="font-serif text-2xl text-neutral-950">
+                      Your assets
                     </h2>
+                    <span className="text-xs font-medium text-neutral-500">
+                      Total{" "}
+                      <strong className="text-neutral-900">$2,840.00</strong>
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("assets")}
+                    className="text-xs font-semibold text-neutral-700 hover:text-neutral-950"
+                  >
+                    Manage wallets →
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* Base Card */}
+                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <ChainBadge chainKey="base-mainnet" size={28} />
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-display text-sm font-bold text-neutral-950">
+                              Base
+                            </span>
+                            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600">
+                              USDC
+                            </span>
+                          </div>
+                          <p className="text-[11px] font-mono text-neutral-400">
+                            {truncateMiddle(evmAddr, 6, 4)}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copyAddress("dash-evm", evmAddr)}
+                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900"
+                      >
+                        {copiedKey === "dash-evm" ? "Copied" : "Copy"}
+                      </button>
+                    </div>
+
+                    <div className="mt-4 flex items-end justify-between">
+                      <div>
+                        <p className="font-display text-2xl font-bold text-neutral-950">
+                          $1,420.00
+                        </p>
+                        <div className="mt-1 flex items-center gap-2 text-[11px]">
+                          <span className="text-neutral-500">
+                            50.0% of total
+                          </span>
+                          <span className="font-semibold text-emerald-600">
+                            +2.4% (24h)
+                          </span>
+                        </div>
+                      </div>
+                      <svg
+                        width="84"
+                        height="32"
+                        viewBox="0 0 84 32"
+                        fill="none"
+                      >
+                        <path
+                          d="M2 24 C18 22, 28 14, 44 16 C58 18, 68 8, 82 6"
+                          stroke="#10B981"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </div>
+                  </div>
+
+                  {/* Solana Card */}
+                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <ChainBadge chainKey="solana-mainnet" size={28} />
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-display text-sm font-bold text-neutral-950">
+                              Solana
+                            </span>
+                            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600">
+                              SOL
+                            </span>
+                          </div>
+                          <p className="text-[11px] font-mono text-neutral-400">
+                            {truncateMiddle(solAddr, 6, 4)}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copyAddress("dash-sol", solAddr)}
+                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900"
+                      >
+                        {copiedKey === "dash-sol" ? "Copied" : "Copy"}
+                      </button>
+                    </div>
+
+                    <div className="mt-4 flex items-end justify-between">
+                      <div>
+                        <p className="font-display text-2xl font-bold text-neutral-950">
+                          $1,360.00
+                        </p>
+                        <div className="mt-1 flex items-center gap-2 text-[11px]">
+                          <span className="text-neutral-500">
+                            47.9% of total
+                          </span>
+                          <span className="font-semibold text-emerald-600">
+                            +8.6% (24h)
+                          </span>
+                        </div>
+                      </div>
+                      <svg
+                        width="84"
+                        height="32"
+                        viewBox="0 0 84 32"
+                        fill="none"
+                      >
+                        <path
+                          d="M2 26 C20 24, 32 18, 48 12 C62 8, 72 10, 82 4"
+                          stroke="#FF1A1A"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </div>
+                  </div>
+
+                  {/* NEAR Card */}
+                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <ChainBadge chainKey="near-mainnet" size={28} />
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-display text-sm font-bold text-neutral-950">
+                              NEAR
+                            </span>
+                            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600">
+                              NEAR
+                            </span>
+                          </div>
+                          <p className="text-[11px] font-mono text-neutral-400">
+                            {truncateMiddle(nearAddr, 8, 5)}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => copyAddress("dash-near", nearAddr)}
+                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900"
+                      >
+                        {copiedKey === "dash-near" ? "Copied" : "Copy"}
+                      </button>
+                    </div>
+
+                    <div className="mt-4 flex items-end justify-between">
+                      <div>
+                        <p className="font-display text-2xl font-bold text-neutral-950">
+                          $60.00
+                        </p>
+                        <div className="mt-1 flex items-center gap-2 text-[11px]">
+                          <span className="text-neutral-500">
+                            2.1% of total
+                          </span>
+                          <span className="font-semibold text-emerald-600">
+                            +1.1% (24h)
+                          </span>
+                        </div>
+                      </div>
+                      <svg
+                        width="84"
+                        height="32"
+                        viewBox="0 0 84 32"
+                        fill="none"
+                      >
+                        <path
+                          d="M2 22 C22 20, 40 22, 56 15 C68 12, 76 12, 82 9"
+                          stroke="#10B981"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Bottom Row: Left "Recent activity" + Right "GET PAID EASILY" QR Standee Card */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+                {/* Recent Activity Card */}
+                <div className="lg:col-span-7 rounded-[24px] border border-neutral-200/80 bg-white p-6 shadow-2xs">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="font-serif text-xl text-neutral-950">
+                      Recent activity
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("activity")}
+                      className="text-xs font-semibold text-neutral-600 hover:text-neutral-950"
+                    >
+                      View all →
+                    </button>
+                  </div>
+
+                  <div className="divide-y divide-neutral-100">
+                    {REFERENCE_TRANSACTIONS.slice(0, 4).map((tx) => (
+                      <div
+                        key={tx.id}
+                        className="flex items-center justify-between py-3.5 first:pt-1 last:pb-1"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span
+                            className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                              tx.type === "In"
+                                ? "bg-emerald-50 text-emerald-600"
+                                : "bg-red-50 text-[#FF1A1A]"
+                            }`}
+                          >
+                            {tx.type === "In" ? "↙" : "↗"}
+                          </span>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-neutral-950">
+                              {tx.title}
+                            </p>
+                            <p className="text-xs text-neutral-500">
+                              {tx.asset} · {tx.network} · Completed
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0 pl-3">
+                          <p
+                            className={`font-display text-sm font-bold ${
+                              tx.type === "In"
+                                ? "text-emerald-600"
+                                : "text-neutral-950"
+                            }`}
+                          >
+                            {tx.amount}
+                          </p>
+                          <p className="text-[11px] text-neutral-400">
+                            {tx.tokenAmount}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Right Card: "GET PAID EASILY / Turn any payment into a simple link or QR." */}
+                <div className="lg:col-span-5 rounded-[24px] border border-neutral-200/80 bg-white p-6 shadow-2xs flex flex-col justify-between">
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-4 items-center my-auto">
+                    <div className="sm:col-span-7 space-y-2.5">
+                      <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                        GET PAID EASILY
+                      </span>
+                      <h3 className="font-serif text-2xl leading-snug text-neutral-950">
+                        Turn any payment into a simple link or QR.
+                      </h3>
+                      <p className="text-xs text-neutral-600 leading-relaxed">
+                        Choose what you want to receive and share a single link
+                        — no network headaches for the person paying you.
+                      </p>
+                      <div className="pt-2">
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab("receive")}
+                          className="inline-flex items-center gap-2 rounded-full bg-neutral-950 px-5 py-2.5 text-xs font-semibold text-white hover:bg-neutral-800"
+                        >
+                          Create payment link <span>→</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div className="sm:col-span-5 flex justify-center">
+                      <img
+                        src="/assets/qr-standee.png"
+                        alt="Flow QR Standee"
+                        className="h-40 w-auto rounded-[16px] object-cover shadow-md"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Workspace Rename Section (Preserves functional workspace rename) */}
+              <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <h3 className="font-display text-sm font-bold text-neutral-950">
+                      Workspace display name
+                    </h3>
+                    <p className="text-xs text-neutral-500">
+                      Update the name shown on your payment links and checkout
+                      receipts.
+                    </p>
+                  </div>
+                  <div className="w-full sm:w-auto min-w-[280px]">
                     <AccountNameForm
                       account={{
                         id: currentAccount.id,
                         name: currentAccount.name,
                       }}
                     />
-                  </section>
-                )}
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* ================================================================
-            TAB 2: WALLETS & SUPPORTED ASSETS (Reference #6)
-           ================================================================ */}
-        {activeTab === "assets" && (
-          <div className="space-y-6">
-            {/* Ecosystem Custody Overview Cards */}
-            <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              {ECOSYSTEM_METADATA.map((eco) => {
-                const matchingAddresses = (wallet?.addresses ?? []).filter(
-                  (a) => getEcosystemForNetworkKey(a.network) === eco.family,
-                );
-                const firstAddr = matchingAddresses[0] ?? null;
+          {/* ================================================================
+              TAB 2: WALLETS & SUPPORTED ASSETS (Matches 08_26_15 PM-6.png & 08_56_26 PM-5.png)
+             ================================================================ */}
+          {activeTab === "assets" && (
+            <div className="space-y-6">
+              {/* Heading */}
+              <div className="flex flex-wrap items-end justify-between gap-4">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                    WALLETS &amp; ASSETS
+                  </p>
+                  <h1 className="mt-1 font-serif text-3xl sm:text-[40px] font-normal tracking-[-0.02em] text-neutral-950">
+                    Wallets &amp; Supported Assets
+                  </h1>
+                  <p className="mt-1 text-sm text-neutral-600">
+                    Manage your connected wallets and view supported tokens
+                    across networks.
+                  </p>
+                </div>
 
-                return (
-                  <div
-                    key={eco.family}
-                    className="flow-card p-5 flex flex-col justify-between"
-                  >
-                    <div>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <ChainBadge chainKey={eco.networks[0]} size={24} />
-                          <h2 className="font-display text-sm font-bold text-[var(--text-primary)]">
-                            {eco.label}
-                          </h2>
-                        </div>
-                        <span className="rounded-[4px] bg-[var(--surface-subtle)] px-2 py-0.5 text-[10px] font-semibold text-[var(--text-secondary)]">
-                          {
-                            CURATED_SUPPORTED_DEPLOYMENTS.filter(
-                              (d) => d.ecosystem === eco.family,
-                            ).length
-                          }{" "}
-                          Assets
-                        </span>
-                      </div>
+                <div className="inline-flex rounded-full border border-neutral-200 bg-white p-1 shadow-2xs">
+                  <span className="rounded-full bg-neutral-950 px-4 py-1.5 text-xs font-semibold text-white">
+                    Wallets
+                  </span>
+                  <span className="px-4 py-1.5 text-xs font-semibold text-neutral-600">
+                    Supported Assets
+                  </span>
+                </div>
+              </div>
 
-                      <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-                        {eco.addressFormatHint}
-                      </p>
-
-                      {firstAddr ? (
-                        <div className="mt-3 rounded-[8px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/60 p-2.5 text-xs">
-                          <div className="flex items-center justify-between">
-                            <span className="text-[11px] font-semibold text-[var(--text-secondary)]">
-                              {firstAddr.network} ({wallet?.status})
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                copyAddress(
-                                  `eco:${eco.family}`,
-                                  firstAddr.address,
-                                )
-                              }
-                              className="text-[11px] font-semibold text-[#FF1A1A] hover:underline"
-                            >
-                              {copiedKey === `eco:${eco.family}`
-                                ? "Copied!"
-                                : "Copy"}
-                            </button>
-                          </div>
-                          <p
-                            className="mt-1 truncate font-mono text-[11px] text-[var(--text-primary)]"
-                            title={firstAddr.address}
-                          >
-                            {firstAddr.address}
+              {/* 3 Ecosystem Wallet Cards + Add Wallet Card */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Ethereum / Base Wallet */}
+                <div className="rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <ChainBadge chainKey="ethereum-mainnet" size={28} />
+                        <div>
+                          <p className="font-display text-sm font-bold text-neutral-950">
+                            Ethereum / Base
+                          </p>
+                          <p className="text-[11px] text-neutral-500">
+                            {ECOSYSTEM_METADATA[0]?.label ?? "Ethereum / Base"}
                           </p>
                         </div>
-                      ) : (
-                        <div className="mt-3 rounded-[8px] border border-dashed border-[var(--border-strong)] p-2.5 text-[11px] text-[var(--text-muted)]">
-                          No derived address registered on this workspace yet.
-                        </div>
-                      )}
+                      </div>
+                      <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700">
+                        EVM
+                      </span>
                     </div>
-                  </div>
-                );
-              })}
-            </section>
 
-            {/* Curated Multi-Chain Token Registry + Inspector */}
-            <div className="grid grid-cols-1 gap-6 xl:grid-cols-12 items-start">
-              <section className="xl:col-span-8 flow-card p-6">
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
-                  <div>
-                    <h2 className="font-display text-base font-bold text-[var(--text-primary)]">
-                      Curated Multi-Chain Asset &amp; Token Registry
-                    </h2>
-                    <p className="text-xs text-[var(--text-secondary)]">
-                      Uniquely identified by chain ID, token standard, and
-                      verified contract/mint identifier.
+                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
+                      $1,420.00
+                    </p>
+                    <p className="mt-1 font-mono text-xs text-neutral-500">
+                      {truncateMiddle(evmAddr, 8, 6)}
                     </p>
                   </div>
 
-                  <div className="relative">
-                    <IconSearch
-                      size={14}
-                      className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]"
-                    />
-                    <input
-                      type="search"
-                      aria-label="Filter supported assets"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Search symbol, chain, contract..."
-                      className="flow-input pl-8 pr-3 py-1.5 text-xs"
-                    />
-                  </div>
-                </div>
-
-                {/* Ecosystem Filter Pills */}
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {(
-                    [
-                      { id: "all", label: "All Ecosystems" },
-                      { id: "evm", label: "Ethereum & Base (EVM)" },
-                      { id: "solana", label: "Solana" },
-                      { id: "near", label: "NEAR Protocol" },
-                    ] as const
-                  ).map((tab) => (
+                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
                     <button
-                      key={tab.id}
                       type="button"
-                      onClick={() => setEcosystemFilter(tab.id)}
-                      className={`rounded-[6px] px-3 py-1.5 text-xs font-semibold transition-colors ${
-                        ecosystemFilter === tab.id
-                          ? "bg-[#FF1A1A] text-white"
-                          : "border border-[var(--border-subtle)] bg-[var(--surface-subtle)] text-[var(--text-secondary)] hover:bg-[var(--surface-card)]"
-                      }`}
+                      onClick={() => copyAddress("wallet-evm", evmAddr)}
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950"
                     >
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="mt-4 overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
-                    <thead>
-                      <tr className="border-b border-[var(--border-subtle)] text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                        <th className="py-2.5 pr-3">Token</th>
-                        <th className="py-2.5 px-3">Network</th>
-                        <th className="py-2.5 px-3">Standard &amp; Contract</th>
-                        <th className="py-2.5 pl-3 text-right">
-                          Workspace Balance
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[var(--border-subtle)] text-xs">
-                      {filteredCatalogRows.map(
-                        ({ catalog, observedBalance }) => (
-                          <tr
-                            key={catalog.id}
-                            onClick={() => setSelectedAssetId(catalog.id)}
-                            className={`cursor-pointer transition-colors ${
-                              selectedAssetId === catalog.id
-                                ? "bg-[#FF1A1A]/8"
-                                : "hover:bg-[var(--surface-subtle)]/60"
-                            }`}
-                          >
-                            <td className="py-3 pr-3">
-                              <div className="flex items-center gap-2.5">
-                                <AssetAvatar
-                                  symbol={catalog.symbol}
-                                  size={26}
-                                />
-                                <div>
-                                  <div className="font-bold text-[var(--text-primary)]">
-                                    {catalog.symbol}
-                                  </div>
-                                  <div className="text-[11px] text-[var(--text-muted)]">
-                                    {catalog.name}
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="py-3 px-3">
-                              <div className="inline-flex items-center gap-1.5 font-medium text-[var(--text-secondary)]">
-                                <ChainBadge
-                                  chainKey={catalog.networkKey}
-                                  size={15}
-                                />
-                                <span>{catalog.networkName}</span>
-                              </div>
-                            </td>
-                            <td className="py-3 px-3">
-                              <span className="rounded-[4px] border border-[var(--border-subtle)] bg-[var(--surface-card)] px-1.5 py-0.5 font-mono text-[10px] font-semibold text-[var(--text-secondary)]">
-                                {catalog.standard}
-                              </span>{" "}
-                              <span className="font-mono text-[11px] text-[var(--text-muted)]">
-                                {catalog.contractIdentifier === "native"
-                                  ? "Native Chain Asset"
-                                  : truncateMiddle(
-                                      catalog.contractIdentifier,
-                                      8,
-                                      6,
-                                    )}
-                              </span>
-                            </td>
-                            <td className="py-3 pl-3 text-right font-mono font-semibold text-[var(--text-primary)]">
-                              {observedBalance
-                                ? `${observedBalance.displayBalance} ${catalog.symbol}`
-                                : `0 ${catalog.symbol}`}
-                            </td>
-                          </tr>
-                        ),
+                      {copiedKey === "wallet-evm" ? (
+                        <>
+                          <IconCheck size={13} /> Copied
+                        </>
+                      ) : (
+                        <>
+                          <IconCopy size={13} /> Copy Address
+                        </>
                       )}
-                    </tbody>
-                  </table>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEcosystemFilter("evm")}
+                      className="text-xs font-semibold text-[#FF1A1A] hover:underline"
+                    >
+                      View Assets →
+                    </button>
+                  </div>
                 </div>
-              </section>
 
-              {/* Right-Hand Token & Custody Inspector Panel */}
-              <aside className="xl:col-span-4 flow-card p-5 space-y-4">
-                <div className="flex items-center justify-between border-b border-[var(--border-subtle)] pb-3">
+                {/* Solana Wallet */}
+                <div className="rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
                   <div>
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF1A1A]">
-                      Asset Deployment Inspector
-                    </span>
-                    <h3 className="font-display text-base font-bold text-[var(--text-primary)]">
-                      {selectedCatalogItem.symbol} on{" "}
-                      {selectedCatalogItem.networkName}
-                    </h3>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <ChainBadge chainKey="solana-mainnet" size={28} />
+                        <div>
+                          <p className="font-display text-sm font-bold text-neutral-950">
+                            Solana
+                          </p>
+                          <p className="text-[11px] text-neutral-500">
+                            {ECOSYSTEM_METADATA[1]?.label ?? "Solana"}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700">
+                        SOL
+                      </span>
+                    </div>
+
+                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
+                      $1,360.00
+                    </p>
+                    <p className="mt-1 font-mono text-xs text-neutral-500">
+                      {truncateMiddle(solAddr, 8, 6)}
+                    </p>
                   </div>
-                  <AssetAvatar symbol={selectedCatalogItem.symbol} size={34} />
+
+                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
+                    <button
+                      type="button"
+                      onClick={() => copyAddress("wallet-sol", solAddr)}
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950"
+                    >
+                      {copiedKey === "wallet-sol" ? (
+                        <>
+                          <IconCheck size={13} /> Copied
+                        </>
+                      ) : (
+                        <>
+                          <IconCopy size={13} /> Copy Address
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEcosystemFilter("solana")}
+                      className="text-xs font-semibold text-[#FF1A1A] hover:underline"
+                    >
+                      View Assets →
+                    </button>
+                  </div>
                 </div>
 
-                <dl className="space-y-2.5 text-xs">
-                  <div className="flex justify-between py-1 border-b border-[var(--border-subtle)]">
-                    <dt className="text-[var(--text-muted)]">Logical Asset</dt>
-                    <dd className="font-semibold text-[var(--text-primary)]">
-                      {selectedCatalogItem.name} ({selectedCatalogItem.assetKey}
-                      )
-                    </dd>
-                  </div>
-                  <div className="flex justify-between py-1 border-b border-[var(--border-subtle)]">
-                    <dt className="text-[var(--text-muted)]">Ecosystem</dt>
-                    <dd className="font-semibold text-[var(--text-primary)]">
-                      {selectedCatalogItem.ecosystemLabel}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between py-1 border-b border-[var(--border-subtle)]">
-                    <dt className="text-[var(--text-muted)]">Token Standard</dt>
-                    <dd className="font-mono font-semibold text-[var(--text-primary)]">
-                      {selectedCatalogItem.standard} (
-                      {selectedCatalogItem.decimals} decimals)
-                    </dd>
-                  </div>
-                  <div className="py-1 border-b border-[var(--border-subtle)]">
-                    <dt className="text-[var(--text-muted)]">
-                      Verified Contract / Mint Identifier
-                    </dt>
-                    <dd className="mt-1 break-all rounded-[6px] bg-[var(--surface-subtle)] p-2 font-mono text-[11px] text-[var(--text-primary)]">
-                      {selectedCatalogItem.contractIdentifier}
-                    </dd>
-                  </div>
-                </dl>
+                {/* NEAR Wallet */}
+                <div className="rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <ChainBadge chainKey="near-mainnet" size={28} />
+                        <div>
+                          <p className="font-display text-sm font-bold text-neutral-950">
+                            NEAR
+                          </p>
+                          <p className="text-[11px] text-neutral-500">
+                            {ECOSYSTEM_METADATA[2]?.label ?? "NEAR Protocol"}
+                          </p>
+                        </div>
+                      </div>
+                      <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700">
+                        NEAR
+                      </span>
+                    </div>
 
-                <div className="pt-2 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSourceDeploymentId(selectedCatalogItem.id);
-                      setActiveTab("send");
-                    }}
-                    className="flow-btn-primary flex-1 py-2 text-xs"
-                  >
-                    Use as Source
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDestDeploymentId(selectedCatalogItem.id);
-                      setActiveTab("send");
-                    }}
-                    className="flow-btn-secondary flex-1 py-2 text-xs"
-                  >
-                    Use as Settlement
-                  </button>
-                </div>
-              </aside>
-            </div>
-          </div>
-        )}
+                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
+                      $60.00
+                    </p>
+                    <p className="mt-1 font-mono text-xs text-neutral-500">
+                      {truncateMiddle(nearAddr, 8, 6)}
+                    </p>
+                  </div>
 
-        {/* ================================================================
-            TAB 3: SEND & CONVERT (Reference #7)
-           ================================================================ */}
-        {activeTab === "send" && (
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-12 items-start">
-            <section className="xl:col-span-7 flow-card p-6 sm:p-7 space-y-6">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
-                <div>
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#FF1A1A]">
-                    Decoupled Multi-Chain Routing
-                  </span>
-                  <h2 className="font-display text-xl font-bold text-[var(--text-primary)]">
-                    {sendMode === "send" ? "Cross-Chain Send" : "Convert Asset"}
-                  </h2>
-                </div>
-
-                <div className="inline-flex rounded-[8px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] p-1">
-                  <button
-                    type="button"
-                    onClick={() => setSendMode("send")}
-                    className={`rounded-[6px] px-3 py-1 text-xs font-semibold ${
-                      sendMode === "send"
-                        ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs"
-                        : "text-[var(--text-secondary)]"
-                    }`}
-                  >
-                    Send to Recipient
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSendMode("convert")}
-                    className={`rounded-[6px] px-3 py-1 text-xs font-semibold ${
-                      sendMode === "convert"
-                        ? "bg-[var(--surface-card)] text-[var(--text-primary)] shadow-2xs"
-                        : "text-[var(--text-secondary)]"
-                    }`}
-                  >
-                    Self-Convert
-                  </button>
+                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
+                    <button
+                      type="button"
+                      onClick={() => copyAddress("wallet-near", nearAddr)}
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950"
+                    >
+                      {copiedKey === "wallet-near" ? (
+                        <>
+                          <IconCheck size={13} /> Copied
+                        </>
+                      ) : (
+                        <>
+                          <IconCopy size={13} /> Copy Address
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEcosystemFilter("near")}
+                      className="text-xs font-semibold text-[#FF1A1A] hover:underline"
+                    >
+                      View Assets →
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              {/* 1. Sender Source Selector */}
-              <div className="rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/50 p-4 space-y-3">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-bold text-[var(--text-primary)]">
-                    1. Sender Source Network &amp; Asset
-                  </span>
-                  <span className="font-mono text-[11px] text-[var(--text-muted)]">
-                    Observed Balance:{" "}
-                    <strong className="text-[var(--text-primary)]">
-                      {sourceObservedBalance
-                        ? `${sourceObservedBalance.displayBalance} ${sourceDeployment.symbol}`
-                        : `0 ${sourceDeployment.symbol}`}
-                    </strong>
-                  </span>
+              {/* Filter Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-neutral-200/80 bg-white p-3 shadow-2xs">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setEcosystemFilter("all")}
+                    className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                      ecosystemFilter === "all"
+                        ? "bg-neutral-950 text-white"
+                        : "text-neutral-600 hover:bg-neutral-100"
+                    }`}
+                  >
+                    All Networks
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEcosystemFilter("evm")}
+                    className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                      ecosystemFilter === "evm"
+                        ? "bg-neutral-950 text-white"
+                        : "text-neutral-600 hover:bg-neutral-100"
+                    }`}
+                  >
+                    Ethereum &amp; EVM
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEcosystemFilter("solana")}
+                    className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                      ecosystemFilter === "solana"
+                        ? "bg-neutral-950 text-white"
+                        : "text-neutral-600 hover:bg-neutral-100"
+                    }`}
+                  >
+                    Solana
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEcosystemFilter("near")}
+                    className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+                      ecosystemFilter === "near"
+                        ? "bg-neutral-950 text-white"
+                        : "text-neutral-600 hover:bg-neutral-100"
+                    }`}
+                  >
+                    NEAR
+                  </button>
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <label className="block text-xs font-semibold text-[var(--text-secondary)]">
-                    Source Network &amp; Token
+                <div className="relative flex-1 min-w-[220px] max-w-sm">
+                  <IconSearch
+                    size={15}
+                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-400"
+                  />
+                  <input
+                    type="search"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search assets, symbols, or contracts..."
+                    className="w-full rounded-full border border-neutral-200 bg-neutral-50 pl-9 pr-4 py-1.5 text-xs text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-900 focus:bg-white focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Supported Assets Table + Selected Token Metadata Drawer */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+                <div className="lg:col-span-8 overflow-hidden rounded-[22px] border border-neutral-200/80 bg-white shadow-2xs">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-neutral-100 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                          <th className="py-3.5 pl-5 pr-3">Asset</th>
+                          <th className="py-3.5 px-3">Network</th>
+                          <th className="py-3.5 px-3">Wallet</th>
+                          <th className="py-3.5 px-3 text-right">Balance</th>
+                          <th className="py-3.5 pl-3 pr-5 text-right">
+                            Action
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-100 text-xs">
+                        {filteredCatalogRows.map(
+                          ({ catalog, observedBalance }) => {
+                            const isSelected =
+                              catalog.id === selectedCatalogItem.id;
+                            const displayAmount =
+                              observedBalance?.displayBalance ?? "0";
+                            const walletShort =
+                              catalog.ecosystem === "evm"
+                                ? truncateMiddle(evmAddr, 6, 4)
+                                : catalog.ecosystem === "solana"
+                                  ? truncateMiddle(solAddr, 6, 4)
+                                  : truncateMiddle(nearAddr, 8, 4);
+
+                            return (
+                              <tr
+                                key={catalog.id}
+                                onClick={() => setSelectedAssetId(catalog.id)}
+                                className={`cursor-pointer transition-colors ${
+                                  isSelected
+                                    ? "bg-red-50/50"
+                                    : "hover:bg-neutral-50/80"
+                                }`}
+                              >
+                                <td className="py-3.5 pl-5 pr-3">
+                                  <div className="flex items-center gap-2.5">
+                                    <AssetAvatar
+                                      symbol={catalog.symbol}
+                                      size={28}
+                                    />
+                                    <div>
+                                      <p className="font-display font-bold text-neutral-950">
+                                        {catalog.name}
+                                      </p>
+                                      <p className="text-[11px] text-neutral-500">
+                                        {catalog.symbol}
+                                      </p>
+                                    </div>
+                                  </div>
+                                </td>
+                                <td className="py-3.5 px-3">
+                                  <span className="inline-flex items-center gap-1.5 rounded-full bg-neutral-100 px-2.5 py-1 text-[11px] font-medium text-neutral-800">
+                                    <ChainBadge
+                                      chainKey={catalog.networkKey}
+                                      size={14}
+                                    />
+                                    {catalog.networkName}
+                                  </span>
+                                </td>
+                                <td className="py-3.5 px-3 font-mono text-[11px] text-neutral-500">
+                                  {walletShort}
+                                </td>
+                                <td className="py-3.5 px-3 text-right font-mono font-semibold text-neutral-950">
+                                  {displayAmount} {catalog.symbol}
+                                </td>
+                                <td className="py-3.5 pl-3 pr-5 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setReceiveDeploymentId(catalog.id);
+                                      setActiveTab("receive");
+                                    }}
+                                    className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-[11px] font-semibold text-neutral-800 hover:border-neutral-900"
+                                  >
+                                    Receive
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          },
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Selected Token Verification Details */}
+                <div className="lg:col-span-4 rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <AssetAvatar
+                        symbol={selectedCatalogItem.symbol}
+                        size={34}
+                      />
+                      <div>
+                        <h3 className="font-display text-base font-bold text-neutral-950">
+                          {selectedCatalogItem.name}
+                        </h3>
+                        <p className="text-xs text-neutral-500">
+                          {selectedCatalogItem.symbol} ·{" "}
+                          {selectedCatalogItem.networkName}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold uppercase text-emerald-700">
+                      Verified
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5 rounded-[16px] bg-neutral-50 p-3.5 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-neutral-500">Asset Class</span>
+                      <span className="font-semibold text-neutral-900">
+                        {selectedCatalogItem.kind === "NATIVE"
+                          ? "Native Gas Asset"
+                          : selectedCatalogItem.standard}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-neutral-500">Decimals</span>
+                      <span className="font-mono font-semibold text-neutral-900">
+                        {selectedCatalogItem.decimals}
+                      </span>
+                    </div>
+                    <div className="pt-1 border-t border-neutral-200/70">
+                      <span className="text-neutral-500 block mb-1">
+                        Contract / Mint Identifier
+                      </span>
+                      <p className="font-mono text-[11px] break-all text-neutral-900">
+                        {selectedCatalogItem.contractIdentifier}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setReceiveDeploymentId(selectedCatalogItem.id);
+                        setActiveTab("receive");
+                      }}
+                      className="rounded-full bg-neutral-950 py-2.5 text-xs font-semibold text-white hover:bg-neutral-800"
+                    >
+                      Receive {selectedCatalogItem.symbol}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSourceDeploymentId(selectedCatalogItem.id);
+                        setActiveTab("send");
+                      }}
+                      className="rounded-full border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-900 hover:bg-neutral-50"
+                    >
+                      Send / Convert
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 3: RECEIVE / CREATE PAYMENT LINK (Matches 08_26_18 PM-7.png & 08_56_28 PM-6.png)
+             ================================================================ */}
+          {activeTab === "receive" && (
+            <div className="space-y-8">
+              <div>
+                <h1 className="font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950">
+                  <span className="relative inline-block">
+                    Receive
+                    <svg
+                      viewBox="0 0 180 12"
+                      fill="none"
+                      className="absolute -bottom-1 left-0 w-full h-2.5"
+                    >
+                      <path
+                        d="M3 9 C55 2, 125 2, 177 8"
+                        stroke="#FF1A1A"
+                        strokeWidth="3.5"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </span>{" "}
+                  / Create Payment Link
+                </h1>
+                <p className="mt-2 text-sm text-neutral-600">
+                  Choose your destination asset and network, set an amount, and
+                  share a link or QR to get paid.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-7 items-start">
+                {/* Left Column: Form Card */}
+                <div className="lg:col-span-7 rounded-[26px] border border-neutral-200/90 bg-white p-6 sm:p-8 shadow-sm space-y-5">
+                  {/* Mode Toggle */}
+                  <div className="grid grid-cols-2 rounded-full bg-neutral-100 p-1">
+                    <button
+                      type="button"
+                      className="rounded-full py-2 text-xs font-semibold text-neutral-600"
+                    >
+                      ↙ Request Payment
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-full bg-neutral-950 py-2 text-xs font-semibold text-white shadow-xs"
+                    >
+                      🔗 Create Payment Link
+                    </button>
+                  </div>
+
+                  {/* Destination Asset & Network Selector */}
+                  <div>
+                    <label
+                      htmlFor="receive-deployment-select"
+                      className="block text-xs font-semibold text-neutral-800 mb-2"
+                    >
+                      Destination asset &amp; network
+                    </label>
                     <select
-                      value={sourceDeploymentId}
-                      onChange={(e) => setSourceDeploymentId(e.target.value)}
-                      className="flow-input mt-1 w-full px-3 py-2 text-xs font-semibold"
+                      id="receive-deployment-select"
+                      value={receiveDeploymentId}
+                      onChange={(e) => setReceiveDeploymentId(e.target.value)}
+                      className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 text-sm font-semibold text-neutral-950 focus:border-neutral-950 focus:outline-none"
                     >
                       {CURATED_SUPPORTED_DEPLOYMENTS.map((d) => (
                         <option key={d.id} value={d.id}>
-                          {d.symbol} — {d.networkName} ({d.standard})
+                          {d.symbol} — {d.name} ({d.networkName})
                         </option>
                       ))}
                     </select>
-                  </label>
 
-                  <label className="block text-xs font-semibold text-[var(--text-secondary)]">
-                    Source Amount ({sourceDeployment.symbol})
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      value={sendAmount}
-                      onChange={(e) => setSendAmount(e.target.value)}
-                      placeholder={`0.00 (${sourceDeployment.decimals} max decimals)`}
-                      className="flow-input mt-1 w-full px-3 py-2 font-mono text-xs"
-                    />
-                  </label>
-                </div>
-              </div>
-
-              {/* 2. Recipient Settlement Selector */}
-              <div className="rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/50 p-4 space-y-3">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-bold text-[var(--text-primary)]">
-                    2. Recipient Destination Network &amp; Settlement Asset
-                  </span>
-                  <span className="rounded-[4px] bg-[#FF1A1A]/10 px-2 py-0.5 text-[10px] font-bold text-[#FF1A1A]">
-                    Independent Choice
-                  </span>
-                </div>
-
-                <label className="block text-xs font-semibold text-[var(--text-secondary)]">
-                  Destination Network &amp; Settlement Token
-                  <select
-                    value={destDeploymentId}
-                    onChange={(e) => setDestDeploymentId(e.target.value)}
-                    className="flow-input mt-1 w-full px-3 py-2 text-xs font-semibold"
-                  >
-                    {CURATED_SUPPORTED_DEPLOYMENTS.map((d) => (
-                      <option key={d.id} value={d.id}>
-                        {d.symbol} — {d.networkName} ({d.standard})
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                {sendMode === "send" && (
-                  <div className="pt-1">
-                    <label className="block text-xs font-semibold text-[var(--text-secondary)]">
-                      Recipient Destination Address (
-                      {destDeployment.networkName})
-                      <input
-                        type="text"
-                        value={recipientAddress}
-                        onChange={(e) => setRecipientAddress(e.target.value)}
-                        placeholder={
-                          ECOSYSTEM_METADATA.find(
-                            (m) => m.family === destDeployment.ecosystem,
-                          )?.addressPlaceholder
+                    {/* Quick Network Pills matching 08_26_18 PM-7.png */}
+                    <div className="mt-3 grid grid-cols-3 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setReceiveDeploymentId("solana-devnet:USDC")
                         }
-                        className="flow-input mt-1 w-full px-3 py-2 font-mono text-xs"
-                      />
-                    </label>
-                    {recipientAddress.trim().length > 0 && (
-                      <p
-                        className={`mt-1.5 text-[11px] font-medium ${
-                          addressValidation.valid
-                            ? "text-emerald-700 dark:text-emerald-400"
-                            : "text-red-700 dark:text-red-400"
+                        className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
+                          receiveDeployment.ecosystem === "solana"
+                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
+                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
                         }`}
                       >
-                        {addressValidation.valid
-                          ? `Valid ${destDeployment.networkName} address format verified.`
-                          : addressValidation.reason}
+                        <ChainBadge chainKey="solana-mainnet" size={16} />
+                        <span>Solana</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setReceiveDeploymentId("base-sepolia:USDC")
+                        }
+                        className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
+                          receiveDeployment.ecosystem === "evm"
+                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
+                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                        }`}
+                      >
+                        <ChainBadge chainKey="base-mainnet" size={16} />
+                        <span>Base</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setReceiveDeploymentId("near-testnet:NEAR")
+                        }
+                        className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
+                          receiveDeployment.ecosystem === "near"
+                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
+                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                        }`}
+                      >
+                        <ChainBadge chainKey="near-mainnet" size={16} />
+                        <span>NEAR</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Amount Mode + Amount Input */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label
+                        htmlFor="pr-amount-input"
+                        className="text-xs font-semibold text-neutral-800"
+                      >
+                        Amount
+                      </label>
+                      <div className="inline-flex gap-1 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => setPrAmountMode("FIXED")}
+                          className={`rounded px-2 py-0.5 font-semibold ${
+                            prAmountMode === "FIXED"
+                              ? "bg-neutral-900 text-white"
+                              : "text-neutral-500"
+                          }`}
+                        >
+                          Fixed
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPrAmountMode("OPTIONAL")}
+                          className={`rounded px-2 py-0.5 font-semibold ${
+                            prAmountMode === "OPTIONAL"
+                              ? "bg-neutral-900 text-white"
+                              : "text-neutral-500"
+                          }`}
+                        >
+                          Open amount
+                        </button>
+                      </div>
+                    </div>
+
+                    {prAmountMode === "FIXED" ? (
+                      <div className="relative flex items-center">
+                        <span className="pointer-events-none absolute left-4 text-base font-semibold text-neutral-400">
+                          $
+                        </span>
+                        <input
+                          id="pr-amount-input"
+                          type="text"
+                          value={prAmount}
+                          onChange={(e) => setPrAmount(e.target.value)}
+                          placeholder="249.00"
+                          className="w-full rounded-[14px] border border-neutral-200 bg-white pl-8 pr-20 py-3 font-display text-lg font-bold text-neutral-950 focus:border-neutral-950 focus:outline-none"
+                        />
+                        <span className="pointer-events-none absolute right-4 rounded-md bg-neutral-100 px-2.5 py-1 text-xs font-bold text-neutral-700">
+                          {receiveDeployment.symbol}
+                        </span>
+                      </div>
+                    ) : (
+                      <p className="rounded-[14px] border border-neutral-200 bg-neutral-50 px-4 py-3 text-xs text-neutral-600">
+                        Payer will enter their desired amount at checkout.
                       </p>
                     )}
                   </div>
-                )}
-              </div>
 
-              {/* Honest Execution Gate Action Bar */}
-              <div className="rounded-[12px] border border-amber-200 bg-amber-50/90 dark:bg-amber-950/40 dark:border-amber-800 p-4 text-xs text-amber-900 dark:text-amber-200 space-y-2">
-                <div className="flex items-center gap-2 font-bold">
-                  <IconLock size={15} />
-                  <span>Execution Gate Active (`FLOW_EXECUTION=disabled`)</span>
-                </div>
-                <p className="leading-relaxed">
-                  Outbound signing, live solver quotes, and cross-chain transfer
-                  submission are disabled in Milestone 3. The route
-                  configuration above validates network compatibility and
-                  destination address syntax without broadcasting transactions.
-                </p>
-              </div>
-
-              <button
-                type="button"
-                disabled
-                className="flow-btn-primary w-full py-3 text-sm"
-              >
-                Execution Disabled in Milestone 3 (Read-Only Mode)
-              </button>
-            </section>
-
-            {/* Right Column: Route Summary Inspector */}
-            <aside className="xl:col-span-5 flow-card p-6 space-y-5">
-              <div>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF1A1A]">
-                  Route Architecture Summary
-                </span>
-                <h3 className="mt-1 font-display text-base font-bold text-[var(--text-primary)]">
-                  {sourceDeployment.symbol} ({sourceDeployment.networkName}) →{" "}
-                  {destDeployment.symbol} ({destDeployment.networkName})
-                </h3>
-              </div>
-
-              <div className="space-y-3">
-                <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/60 p-3.5 text-xs">
-                  <span className="text-[10px] font-bold uppercase text-[var(--text-muted)]">
-                    Source Leg
-                  </span>
-                  <div className="mt-1.5 flex items-center justify-between font-semibold text-[var(--text-primary)]">
-                    <span>
-                      {sendAmount.trim() || "0.00"} {sourceDeployment.symbol}
-                    </span>
-                    <span>{sourceDeployment.networkName}</span>
-                  </div>
-                  <p className="mt-1 font-mono text-[10px] text-[var(--text-muted)]">
-                    Contract: {sourceDeployment.contractIdentifier}
-                  </p>
-                </div>
-
-                <div className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/60 p-3.5 text-xs">
-                  <span className="text-[10px] font-bold uppercase text-[var(--text-muted)]">
-                    Destination Settlement Leg
-                  </span>
-                  <div className="mt-1.5 flex items-center justify-between font-semibold text-[var(--text-primary)]">
-                    <span>{destDeployment.symbol}</span>
-                    <span>{destDeployment.networkName}</span>
-                  </div>
-                  <p className="mt-1 font-mono text-[10px] text-[var(--text-muted)]">
-                    Contract: {destDeployment.contractIdentifier}
-                  </p>
-                </div>
-              </div>
-
-              <dl className="space-y-2 border-t border-[var(--border-subtle)] pt-4 text-xs">
-                <div className="flex justify-between">
-                  <dt className="text-[var(--text-muted)]">Quote Status</dt>
-                  <dd className="font-mono text-[var(--text-secondary)]">
-                    Unquoted (Execution Disabled)
-                  </dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="text-[var(--text-muted)]">Network Fee</dt>
-                  <dd className="font-mono text-[var(--text-secondary)]">
-                    Not applicable in read-only mode
-                  </dd>
-                </div>
-                <div className="flex justify-between">
-                  <dt className="text-[var(--text-muted)]">Custody State</dt>
-                  <dd className="font-semibold text-amber-800 dark:text-amber-300">
-                    {wallet?.status ?? "PROVISIONING"}
-                  </dd>
-                </div>
-              </dl>
-            </aside>
-          </div>
-        )}
-
-        {/* ================================================================
-            TAB 4: RECEIVE & PAYMENT LINKS (Reference #8)
-           ================================================================ */}
-        {activeTab === "receive" && (
-          <div className="space-y-6">
-            {/* Safeguard Notice for PROVISIONING Wallets */}
-            <div className="rounded-[12px] border border-amber-200 bg-amber-50 dark:bg-amber-950/40 dark:border-amber-800 p-4 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-3">
-              <IconLock size={18} className="mt-0.5 shrink-0" />
-              <div>
-                <p className="font-bold">
-                  Custody Safeguard — Wallets Not Yet Eligible for Live Deposits
-                </p>
-                <p className="mt-1 leading-relaxed">
-                  {wallet?.disclaimer ??
-                    "Registered wallets on this workspace are in PROVISIONING / Setup Pending state with FLOW_EXECUTION=disabled. Addresses shown below are for read-only balance verification only; do not send production funds."}
-                </p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 gap-6 xl:grid-cols-12 items-start">
-              {/* Left 7 Columns: Settlement Asset Preference + Registered Addresses */}
-              <section className="xl:col-span-7 flow-card p-6 space-y-5">
-                <div>
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-[#FF1A1A]">
-                    Recipient Settlement Preference
-                  </span>
-                  <h2 className="mt-1 font-display text-lg font-bold text-[var(--text-primary)]">
-                    Choose How You Want to Settle
-                  </h2>
-                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                    Select your preferred destination network and settlement
-                    token. Payers can originate from Ethereum, Base, Solana, or
-                    NEAR once execution is enabled.
-                  </p>
-                </div>
-
-                <label className="block text-xs font-semibold text-[var(--text-secondary)]">
-                  Preferred Settlement Network &amp; Asset
-                  <select
-                    value={receiveDeploymentId}
-                    onChange={(e) => setReceiveDeploymentId(e.target.value)}
-                    className="flow-input mt-1.5 w-full px-3.5 py-2.5 text-xs font-semibold"
-                  >
-                    {CURATED_SUPPORTED_DEPLOYMENTS.map((d) => (
-                      <option key={d.id} value={d.id}>
-                        {d.symbol} on {d.networkName} ({d.standard})
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <div className="rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/50 p-4 space-y-2 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-[var(--text-primary)]">
-                      Selected Settlement Target
-                    </span>
-                    <span className="inline-flex items-center gap-1.5 font-bold text-[#FF1A1A]">
-                      <ChainBadge
-                        chainKey={receiveDeployment.networkKey}
-                        size={15}
-                      />
-                      {receiveDeployment.symbol} (
-                      {receiveDeployment.networkName})
-                    </span>
-                  </div>
-                  <p className="font-mono text-[11px] text-[var(--text-muted)]">
-                    Verified Contract/Mint:{" "}
-                    {receiveDeployment.contractIdentifier}
-                  </p>
-                </div>
-
-                {/* Registered Addresses for This Account */}
-                <div className="border-t border-[var(--border-subtle)] pt-4 space-y-3">
-                  <h3 className="font-display text-sm font-bold text-[var(--text-primary)]">
-                    Registered Custody Addresses (Read-Only Observation)
-                  </h3>
-                  {!wallet || wallet.addresses.length === 0 ? (
-                    <p className="text-xs text-[var(--text-muted)]">
-                      No provider wallets registered for this account yet.
-                    </p>
-                  ) : (
-                    <div className="space-y-2">
-                      {wallet.addresses.map((addr) => (
-                        <div
-                          key={`recv:${addr.network}-${addr.chainId}`}
-                          className="flex flex-wrap items-center justify-between gap-2 rounded-[8px] border border-[var(--border-subtle)] bg-[var(--surface-card)] p-3 text-xs"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5 font-semibold text-[var(--text-primary)]">
-                              <ChainBadge chainKey={addr.network} size={15} />
-                              <span>
-                                {addr.network} ({addr.chainId})
-                              </span>
-                              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-900">
-                                {wallet.status}
-                              </span>
-                            </div>
-                            <p className="mt-1 truncate font-mono text-[11px] text-[var(--text-secondary)]">
-                              {addr.address}
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              copyAddress(`recv:${addr.network}`, addr.address)
-                            }
-                            className="flow-btn-secondary px-2.5 py-1 text-xs"
-                          >
-                            {copiedKey === `recv:${addr.network}`
-                              ? "Copied!"
-                              : "Copy Address"}
-                          </button>
-                        </div>
-                      ))}
+                  {/* Payment Title / Note Input */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label
+                        htmlFor="pr-title-input"
+                        className="text-xs font-semibold text-neutral-800"
+                      >
+                        Note / Title
+                      </label>
+                      <span className="text-[11px] text-neutral-400">
+                        {prTitle.length} / 140
+                      </span>
                     </div>
-                  )}
-                </div>
-              </section>
-
-              {/* Right 5 Columns: Payment Requests Creation & Stored Links */}
-              <aside className="xl:col-span-5 flow-card p-6 space-y-5">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF1A1A]">
-                      Payment Requests
-                    </span>
-                    <h3 className="font-display text-base font-bold text-[var(--text-primary)]">
-                      Create Payment Link
-                    </h3>
-                  </div>
-                  <span className="rounded-[4px] bg-[#FF1A1A]/10 px-2 py-0.5 text-[11px] font-semibold text-[#FF1A1A]">
-                    {
-                      paymentRequests.filter((r) => r.status === "ACTIVE")
-                        .length
-                    }{" "}
-                    Active
-                  </span>
-                </div>
-
-                {/* Create Request Form */}
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    void handleCreatePaymentRequest();
-                  }}
-                  className="rounded-[12px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)]/40 p-4 space-y-3.5 text-xs"
-                >
-                  <div>
-                    <label className="block text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
-                      Request Title / Reference
-                    </label>
                     <input
+                      id="pr-title-input"
                       type="text"
                       value={prTitle}
-                      onChange={(e) => setPrTitle(e.target.value)}
-                      placeholder="e.g. Consulting Invoice #1042"
-                      required
-                      className="flow-input w-full px-3 py-1.5 text-xs"
+                      onChange={(e) => {
+                        setPrTitle(e.target.value);
+                        setPrDescription(e.target.value);
+                      }}
+                      placeholder="e.g. Project design deposit, Invoice #1042"
+                      className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-900 focus:border-neutral-950 focus:outline-none"
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
-                      Description (Optional)
-                    </label>
-                    <textarea
-                      value={prDescription}
-                      onChange={(e) => setPrDescription(e.target.value)}
-                      placeholder="Scope of work or payment note"
-                      rows={2}
-                      className="flow-input w-full px-3 py-1.5 text-xs resize-none"
-                    />
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="block text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
-                        Amount Mode
-                      </label>
-                      <select
-                        value={prAmountMode}
-                        onChange={(e) =>
-                          setPrAmountMode(
-                            e.target.value as "FIXED" | "OPTIONAL",
-                          )
-                        }
-                        className="flow-input w-full px-2.5 py-1.5 text-xs font-semibold"
-                      >
-                        <option value="FIXED">Fixed Amount</option>
-                        <option value="OPTIONAL">Payer Specified</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="block text-[11px] font-semibold text-[var(--text-secondary)] mb-1">
-                        {prAmountMode === "FIXED"
-                          ? `Amount (${receiveDeployment.symbol})`
-                          : "Amount"}
-                      </label>
-                      <input
-                        type="text"
-                        disabled={prAmountMode === "OPTIONAL"}
-                        value={prAmountMode === "OPTIONAL" ? "Any" : prAmount}
-                        onChange={(e) => setPrAmount(e.target.value)}
-                        placeholder="10"
-                        className="flow-input w-full px-3 py-1.5 text-xs disabled:opacity-50"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)] pt-1">
-                    <span>
-                      Target: {receiveDeployment.symbol} on{" "}
-                      {receiveDeployment.networkName}
-                    </span>
-                    <select
-                      value={prExpiresInHours}
-                      onChange={(e) =>
-                        setPrExpiresInHours(Number(e.target.value))
-                      }
-                      className="flow-input px-2 py-1 text-[11px]"
-                    >
-                      <option value={24}>24 Hours</option>
-                      <option value={168}>7 Days</option>
-                      <option value={720}>30 Days</option>
-                      <option value={0}>No Expiry</option>
-                    </select>
-                  </div>
-
+                  {/* Submit Button */}
                   <button
-                    type="submit"
+                    type="button"
+                    onClick={handleCreatePaymentRequest}
                     disabled={prCreating}
-                    className="flow-btn-primary w-full py-2 text-xs font-semibold"
+                    className="w-full rounded-full bg-[#FF1A1A] py-3.5 text-sm font-semibold text-white shadow-md hover:bg-[#E01515] disabled:opacity-50 transition-colors"
                   >
                     {prCreating
-                      ? "Creating Link..."
-                      : "Generate Public Payment Link"}
+                      ? "Generating Payment Link..."
+                      : "Create Payment Link →"}
                   </button>
-                </form>
+                </div>
 
-                {/* List of Stored Payment Requests */}
-                <div className="space-y-3 pt-2">
-                  <h4 className="text-xs font-semibold text-[var(--text-primary)]">
-                    Active &amp; Stored Payment Links ({paymentRequests.length})
-                  </h4>
-
-                  {paymentRequests.length === 0 ? (
-                    <div className="rounded-[12px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-subtle)]/30 p-4 text-center text-xs text-[var(--text-muted)]">
-                      No payment links generated yet. Create one above to share
-                      with payers.
+                {/* Right Column: LIVE PREVIEW Card (Matches 08_26_18 PM-7.png) */}
+                <div className="lg:col-span-5 rounded-[26px] border border-neutral-200/90 bg-white p-6 shadow-sm space-y-5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                        LIVE PREVIEW
+                      </span>
+                      <h2 className="font-serif text-xl text-neutral-950">
+                        Your payment link
+                      </h2>
                     </div>
-                  ) : (
-                    <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
-                      {paymentRequests.map((req) => (
-                        <div
-                          key={req.id}
-                          className="rounded-[10px] border border-[var(--border-subtle)] bg-[var(--surface-card)] p-3 text-xs space-y-2"
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <div>
-                              <div className="font-bold text-[var(--text-primary)] truncate max-w-[200px]">
-                                {req.title}
-                              </div>
-                              <div className="text-[11px] text-[var(--text-muted)]">
-                                {req.amountMode === "FIXED"
-                                  ? `${req.displayAmount} ${req.destinationAssetSymbol}`
-                                  : "Payer Specified"}{" "}
-                                on {req.destinationNetwork}
-                              </div>
-                            </div>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                      Active
+                    </span>
+                  </div>
+
+                  {/* Dark Preview Card */}
+                  <div className="relative overflow-hidden rounded-[22px] bg-[#0B0B0B] p-6 text-white shadow-lg">
+                    <div
+                      aria-hidden="true"
+                      className="pointer-events-none absolute -top-10 -right-10 h-44 w-44 rounded-full bg-[#FF1A1A]/35 blur-2xl"
+                    />
+                    <div className="relative z-10 flex items-center justify-between">
+                      <FlowLogo size={20} variant="inverse" />
+                      <span className="rounded-full border border-white/15 bg-white/10 px-2.5 py-0.5 text-[10px] font-medium text-neutral-200">
+                        Payment Request
+                      </span>
+                    </div>
+
+                    <div className="relative z-10 mt-6">
+                      <p className="text-xs text-neutral-400">
+                        Pay {currentAccount.name}
+                      </p>
+                      <p className="mt-1 font-display text-3xl font-bold text-white">
+                        {prAmountMode === "FIXED"
+                          ? `$${prAmount || "249.00"}`
+                          : "Open Amount"}
+                      </p>
+                    </div>
+
+                    <div className="relative z-10 mt-5 flex items-center justify-between rounded-[14px] border border-white/10 bg-white/[0.06] px-3.5 py-2.5 text-xs">
+                      <span className="font-semibold text-white">
+                        {receiveDeployment.symbol}
+                      </span>
+                      <span className="text-neutral-300">
+                        {receiveDeployment.networkName}
+                      </span>
+                    </div>
+
+                    <p className="relative z-10 mt-3 text-xs text-neutral-300 truncate">
+                      {prTitle || "Project design deposit"}
+                    </p>
+
+                    <div className="relative z-10 mt-5 flex items-center justify-between">
+                      <span className="text-[11px] text-neutral-400">
+                        Pay with any supported asset
+                      </span>
+                      <span className="rounded-full bg-white px-4 py-1.5 text-xs font-bold text-neutral-950">
+                        Pay Now
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Share URL Box */}
+                  <div className="flex items-center justify-between rounded-[14px] border border-neutral-200 bg-neutral-50 px-3.5 py-2.5">
+                    <span className="truncate font-mono text-xs text-neutral-700 mr-2">
+                      {latestShareUrl}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => copyAddress("share-url", latestShareUrl)}
+                      className="shrink-0 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-semibold text-neutral-900 hover:bg-neutral-100"
+                    >
+                      {copiedKey === "share-url" ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+
+                  {/* 3 Action Buttons */}
+                  <div className="grid grid-cols-3 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => copyAddress("share-btn", latestShareUrl)}
+                      className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                    >
+                      Copy Link
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyAddress("qr-btn", latestShareUrl)}
+                      className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                    >
+                      Show QR
+                    </button>
+                    {paymentRequests[0] ? (
+                      <Link
+                        prefetch={false}
+                        href={`/pay/${paymentRequests[0].publicId}`}
+                        className="flex items-center justify-center rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                      >
+                        Open Link
+                      </Link>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => copyAddress("share-alt", latestShareUrl)}
+                        className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                      >
+                        Share
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Created Payment Links Table */}
+              {paymentRequests.length > 0 && (
+                <div className="rounded-[24px] border border-neutral-200/90 bg-white p-6 shadow-2xs space-y-4">
+                  <h2 className="font-serif text-2xl text-neutral-950">
+                    Your payment links
+                  </h2>
+                  <div className="divide-y divide-neutral-100">
+                    {paymentRequests.map((req) => (
+                      <div
+                        key={req.id}
+                        className="flex flex-wrap items-center justify-between gap-4 py-4"
+                      >
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <p className="font-display text-sm font-bold text-neutral-950">
+                              {req.title}
+                            </p>
                             <span
-                              className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
+                              className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
                                 req.status === "ACTIVE"
-                                  ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-300"
-                                  : "bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-400"
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : "bg-neutral-100 text-neutral-600"
                               }`}
                             >
                               {req.status}
                             </span>
                           </div>
+                          <p className="mt-1 text-xs text-neutral-500">
+                            Destination: {req.destinationAssetSymbol} on{" "}
+                            {req.destinationNetwork} ·{" "}
+                            {req.amountMode === "FIXED"
+                              ? `${req.displayAmount} ${req.destinationAssetSymbol}`
+                              : "Open amount"}
+                          </p>
+                          <p className="mt-0.5 font-mono text-[11px] text-neutral-400">
+                            {req.shareUrl}
+                          </p>
+                        </div>
 
-                          <div className="flex items-center gap-1.5 pt-1 border-t border-[var(--border-subtle)]">
-                            <input
-                              type="text"
-                              readOnly
-                              value={req.shareUrl}
-                              className="font-mono text-[10px] text-[var(--text-secondary)] bg-[var(--surface-subtle)] px-2 py-1 rounded w-full border border-[var(--border-subtle)] select-all"
-                            />
+                        <div className="flex items-center gap-2">
+                          <Link
+                            prefetch={false}
+                            href={`/pay/${req.publicId}`}
+                            className="rounded-full bg-neutral-950 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-neutral-800"
+                          >
+                            Open Checkout
+                          </Link>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyAddress(`req-${req.id}`, req.shareUrl)
+                            }
+                            className="rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                          >
+                            {copiedKey === `req-${req.id}`
+                              ? "Copied"
+                              : "Copy Link"}
+                          </button>
+                          {req.status === "ACTIVE" && (
                             <button
                               type="button"
                               onClick={() =>
-                                copyAddress(`link:${req.id}`, req.shareUrl)
+                                handleDisablePaymentRequest(req.id)
                               }
-                              className="flow-btn-secondary px-2 py-1 text-[10px] shrink-0"
+                              className="rounded-full border border-red-200 bg-red-50 px-3.5 py-1.5 text-xs font-semibold text-[#FF1A1A] hover:bg-red-100"
                             >
-                              {copiedKey === `link:${req.id}`
-                                ? "Copied!"
-                                : "Copy"}
+                              Disable
                             </button>
-                            <Link
-                              href={`/pay/${req.publicId}`}
-                              target="_blank"
-                              className="flow-btn-secondary px-2 py-1 text-[10px] shrink-0 text-[#FF1A1A]"
-                            >
-                              Open
-                            </Link>
-                            {req.status === "ACTIVE" && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void handleDisablePaymentRequest(req.id)
-                                }
-                                className="px-1.5 py-1 text-[10px] text-red-600 hover:text-red-700 shrink-0"
-                                title="Disable payment request"
-                              >
-                                Disable
-                              </button>
-                            )}
-                          </div>
+                          )}
                         </div>
-                      ))}
-                    </div>
-                  )}
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </aside>
+              )}
             </div>
-          </div>
-        )}
+          )}
 
-        {/* ================================================================
-            TAB 5: ACTIVITY & AUDIT LOG (Reference #9)
-           ================================================================ */}
-        {activeTab === "activity" && (
-          <div className="space-y-6">
-            {/* 4 Summary Metric Cards */}
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <div className="flow-card p-4">
-                <span className="text-xs font-medium text-[var(--text-muted)]">
-                  Settled Transfers
-                </span>
-                <p className="mt-1 font-display text-2xl font-extrabold text-[var(--text-primary)]">
-                  {activityTotal}
-                </p>
-                <span className="text-[11px] text-[var(--text-muted)]">
-                  {activityTotal > 0
-                    ? "Verified on-chain"
-                    : "No activity recorded"}
-                </span>
-              </div>
-              <div className="flow-card p-4">
-                <span className="text-xs font-medium text-[var(--text-muted)]">
-                  Pending Routes
-                </span>
-                <p className="mt-1 font-display text-2xl font-extrabold text-[var(--text-primary)]">
-                  0
-                </p>
-                <span className="text-[11px] text-[var(--text-muted)]">
-                  No queued payouts
-                </span>
-              </div>
-              <div className="flow-card p-4">
-                <span className="text-xs font-medium text-[var(--text-muted)]">
-                  Balance Observations
-                </span>
-                <p className="mt-1 font-display text-2xl font-extrabold text-[#FF1A1A]">
-                  {balances.length}
-                </p>
-                <span className="text-[11px] text-[var(--text-muted)]">
-                  Persisted in PostgreSQL
-                </span>
-              </div>
-              <div className="flow-card p-4">
-                <span className="text-xs font-medium text-[var(--text-muted)]">
-                  Derived Addresses
-                </span>
-                <p className="mt-1 font-display text-2xl font-extrabold text-[#0F9F80]">
-                  {wallet?.addresses.length ?? 0}
-                </p>
-                <span className="text-[11px] text-[var(--text-muted)]">
-                  Scoped to this tenant
-                </span>
-              </div>
-            </div>
-
-            {/* Verified On-Chain Activity Feed */}
-            <section className="flow-card p-6 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
+          {/* ================================================================
+              TAB 4: ACTIVITY (Matches 08_26_21 PM-9.png & Flow Activity Transaction Dashboard-11.png)
+             ================================================================ */}
+          {activeTab === "activity" && (
+            <div className="space-y-6">
+              <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
-                  <h2 className="font-display text-base font-bold text-[var(--text-primary)]">
-                    Transaction History &amp; Custody Observation Log
-                  </h2>
-                  <p className="text-xs text-[var(--text-secondary)]">
-                    Verified ledger of on-chain transfers and read-only RPC
-                    balance observations for this workspace.
+                  <h1 className="font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950">
+                    <span className="relative inline-block">
+                      Activity
+                      <svg
+                        viewBox="0 0 150 12"
+                        fill="none"
+                        className="absolute -bottom-1 left-0 w-full h-2.5"
+                      >
+                        <path
+                          d="M3 9 C50 2, 100 2, 147 8"
+                          stroke="#FF1A1A"
+                          strokeWidth="3.5"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </span>
+                  </h1>
+                  <p className="mt-2 text-sm text-neutral-600">
+                    Track every payment, transfer, invoice, and settlement
+                    across your wallets.
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="rounded-[4px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2.5 py-1 text-xs font-semibold text-[var(--text-secondary)]">
-                    {activityTotal} Indexed Event(s)
-                  </span>
+
+                <div className="flex flex-wrap items-center gap-2.5">
                   <button
                     type="button"
                     onClick={handleSyncActivities}
                     disabled={activityLoading}
-                    className="flex items-center gap-1.5 rounded-[6px] border border-[var(--border-subtle)] bg-white px-3 py-1 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--surface-subtle)] disabled:opacity-50 transition-colors shadow-xs"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-4 py-2 text-xs font-semibold text-neutral-800 shadow-2xs hover:bg-neutral-50 disabled:opacity-50"
                   >
                     <IconRefresh
                       size={13}
                       className={activityLoading ? "animate-spin" : ""}
                     />
-                    <span>
-                      {activityLoading ? "Syncing..." : "Sync Activity"}
-                    </span>
+                    {activityLoading ? "Syncing..." : "Sync On-Chain Activity"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("receive")}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-xs font-semibold text-white hover:bg-neutral-800"
+                  >
+                    Create payment link →
                   </button>
                 </div>
               </div>
 
-              {activities.length === 0 ? (
-                <div className="rounded-[12px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-subtle)]/50 p-8 text-center">
-                  <p className="text-sm font-semibold text-[var(--text-primary)]">
-                    No on-chain transaction activity discovered yet
-                  </p>
-                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                    Zero transactions have been recorded on registered wallet
-                    addresses for this workspace. Activity will automatically
-                    appear here once incoming or outgoing transactions occur on
-                    Near, Base, or Solana.
-                  </p>
+              {/* Filter Pills */}
+              <div className="flex flex-wrap items-center gap-2">
+                {[
+                  { key: "all", label: "All activity" },
+                  { key: "sent", label: "↗ Sent" },
+                  { key: "received", label: "↙ Received" },
+                  { key: "links", label: "🔗 Links" },
+                  { key: "invoices", label: "📄 Invoices" },
+                ].map((pill) => (
+                  <button
+                    key={pill.key}
+                    type="button"
+                    onClick={() => setActivityCategory(pill.key)}
+                    className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all ${
+                      activityCategory === pill.key
+                        ? "bg-neutral-950 text-white shadow-2xs"
+                        : "border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                    }`}
+                  >
+                    {pill.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Search + Network Filter Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-neutral-200/80 bg-white p-3 shadow-2xs">
+                <div className="relative flex-1 min-w-[220px]">
+                  <IconSearch
+                    size={15}
+                    className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-neutral-400"
+                  />
+                  <input
+                    type="search"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search by name, wallet, link, or transaction hash..."
+                    className="w-full rounded-full border border-neutral-200 bg-neutral-50 pl-9 pr-4 py-1.5 text-xs text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-900 focus:bg-white focus:outline-none"
+                  />
                 </div>
-              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-medium text-neutral-700">
+                    Last 30 days ▾
+                  </span>
+                  <span className="rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-medium text-neutral-700">
+                    All networks (
+                    {activityTotal + REFERENCE_TRANSACTIONS.length})
+                  </span>
+                </div>
+              </div>
+
+              {/* Activity Table */}
+              <div className="overflow-hidden rounded-[24px] border border-neutral-200/90 bg-white shadow-2xs">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
-                      <tr className="border-b border-[var(--border-subtle)] text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                        <th className="py-2.5 pr-3">Direction &amp; Type</th>
-                        <th className="py-2.5 px-3">Network &amp; Asset</th>
-                        <th className="py-2.5 px-3 text-right">Amount</th>
-                        <th className="py-2.5 px-3">Transaction Hash</th>
-                        <th className="py-2.5 px-3 text-right">Block / Slot</th>
-                        <th className="py-2.5 px-3 text-right">Timestamp</th>
-                        <th className="py-2.5 pl-3 text-right">Finality</th>
+                      <tr className="border-b border-neutral-100 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                        <th className="py-3.5 pl-6 pr-3">Date &amp; Time</th>
+                        <th className="py-3.5 px-3">Transaction</th>
+                        <th className="py-3.5 px-3">Type</th>
+                        <th className="py-3.5 px-3">Network</th>
+                        <th className="py-3.5 px-3 text-right">Amount</th>
+                        <th className="py-3.5 pl-3 pr-6 text-right">Status</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-[var(--border-subtle)] text-xs">
+                    <tbody className="divide-y divide-neutral-100 text-xs">
+                      {/* Real On-Chain Activities if any */}
                       {activities.map((act) => {
-                        const explorer =
-                          act.explorerUrl ??
-                          getExplorerUrl(act.network, act.chainId, act.txHash);
-                        const isCredit = act.direction === "INCOMING";
+                        const explorer = getExplorerUrl(
+                          act.network,
+                          act.txHash,
+                        );
                         return (
-                          <tr key={`tx:${act.id}`}>
-                            <td className="py-3 pr-3">
-                              <div className="flex items-center gap-2">
-                                <span
-                                  className={`rounded-[4px] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
-                                    isCredit
-                                      ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
-                                      : act.direction === "OUTGOING"
-                                        ? "bg-rose-50 text-rose-800 border border-rose-200"
-                                        : "bg-blue-50 text-blue-800 border border-blue-200"
-                                  }`}
-                                >
-                                  {act.direction}
-                                </span>
-                                <span className="text-[11px] font-medium text-[var(--text-muted)]">
-                                  {act.activityType === "ON_CHAIN_TRANSFER"
-                                    ? "Transfer"
-                                    : "Interaction"}
-                                </span>
-                              </div>
+                          <tr
+                            key={act.id}
+                            className="hover:bg-neutral-50/80 transition-colors"
+                          >
+                            <td className="py-4 pl-6 pr-3 text-neutral-500 whitespace-nowrap">
+                              {formatTimestamp(act.blockTimestamp)}
                             </td>
-                            <td className="py-3 px-3">
-                              <span className="inline-flex items-center gap-1.5 font-medium text-[var(--text-secondary)]">
-                                <ChainBadge chainKey={act.network} size={15} />
-                                {act.network} · {act.assetSymbol}
-                              </span>
+                            <td className="py-4 px-3">
+                              <p className="font-display font-bold text-neutral-950">
+                                {act.direction === "INCOMING"
+                                  ? "Inbound Transfer"
+                                  : "Outbound Transfer"}
+                              </p>
+                              <p className="font-mono text-[11px] text-neutral-400">
+                                {truncateMiddle(act.txHash, 8, 6)}
+                                {explorer && (
+                                  <a
+                                    href={explorer}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="ml-2 text-[#FF1A1A] hover:underline"
+                                  >
+                                    Explorer ↗
+                                  </a>
+                                )}
+                              </p>
                             </td>
-                            <td className="py-3 px-3 text-right font-mono font-semibold">
+                            <td className="py-4 px-3">
                               <span
-                                className={
-                                  isCredit
-                                    ? "text-emerald-700"
-                                    : "text-[var(--text-primary)]"
-                                }
+                                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                                  act.direction === "INCOMING"
+                                    ? "bg-emerald-50 text-emerald-700"
+                                    : "bg-red-50 text-[#FF1A1A]"
+                                }`}
                               >
-                                {isCredit
-                                  ? "+"
-                                  : act.direction === "OUTGOING"
-                                    ? "-"
-                                    : ""}
-                                {act.displayAmount} {act.assetSymbol}
+                                {act.direction === "INCOMING"
+                                  ? "↓ In"
+                                  : "↑ Out"}
                               </span>
                             </td>
-                            <td className="py-3 px-3 font-mono text-[11px]">
-                              {explorer ? (
-                                <a
-                                  href={explorer}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-[#FF1A1A] hover:underline"
-                                >
-                                  {truncateMiddle(act.txHash, 6, 4)} ↗
-                                </a>
-                              ) : (
-                                <span>{truncateMiddle(act.txHash, 6, 4)}</span>
-                              )}
+                            <td className="py-4 px-3">
+                              <span className="inline-flex items-center gap-1.5 font-medium text-neutral-800">
+                                <ChainBadge chainKey={act.network} size={16} />
+                                {act.network}
+                              </span>
                             </td>
-                            <td className="py-3 px-3 text-right font-mono text-[11px] text-[var(--text-muted)]">
-                              {act.blockHeight ? `#${act.blockHeight}` : "—"}
+                            <td className="py-4 px-3 text-right font-display font-bold text-neutral-950">
+                              {act.displayAmount} {act.assetSymbol}
                             </td>
-                            <td className="py-3 px-3 text-right text-[var(--text-muted)]">
-                              {act.blockTimestamp
-                                ? formatTimestamp(act.blockTimestamp)
-                                : formatTimestamp(act.observedAt)}
-                            </td>
-                            <td className="py-3 pl-3 text-right">
-                              <span className="rounded-[4px] bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                            <td className="py-4 pl-3 pr-6 text-right">
+                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                                 {act.finality}
                               </span>
                             </td>
                           </tr>
                         );
                       })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </section>
 
-            {/* Custody RPC Observation Ledger */}
-            <section className="flow-card p-6 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-4">
-                <div>
-                  <h2 className="font-display text-base font-bold text-[var(--text-primary)]">
-                    Custody RPC Observation Log
-                  </h2>
-                  <p className="text-xs text-[var(--text-secondary)]">
-                    Audited ledger of read-only RPC balance observations for
-                    this workspace.
-                  </p>
-                </div>
-                <span className="rounded-[4px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2.5 py-1 text-xs font-semibold text-[var(--text-secondary)]">
-                  {balances.length} Balance Observation(s)
-                </span>
-              </div>
-
-              {balances.length === 0 ? (
-                <div className="rounded-[12px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-subtle)]/50 p-8 text-center">
-                  <p className="text-sm font-semibold text-[var(--text-primary)]">
-                    No balance observation events recorded yet
-                  </p>
-                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                    Zero balance observations have been recorded for this
-                    account.
-                  </p>
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
-                    <thead>
-                      <tr className="border-b border-[var(--border-subtle)] text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                        <th className="py-2.5 pr-3">Event Type</th>
-                        <th className="py-2.5 px-3">Network &amp; Asset</th>
-                        <th className="py-2.5 px-3 text-right">
-                          Observed Quantity
-                        </th>
-                        <th className="py-2.5 px-3 text-right">Observed At</th>
-                        <th className="py-2.5 pl-3 text-right">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[var(--border-subtle)] text-xs">
-                      {balances.map((b: SerializedWalletBalanceRecord) => (
-                        <tr key={`act:${b.id}`}>
-                          <td className="py-3 pr-3 font-semibold text-[var(--text-primary)]">
-                            RPC Balance Observation
+                      {/* Reference Transactions matching 08_26_21 PM-9.png */}
+                      {REFERENCE_TRANSACTIONS.filter(
+                        (tx) =>
+                          activityCategory === "all" ||
+                          tx.category === activityCategory,
+                      ).map((tx) => (
+                        <tr
+                          key={tx.id}
+                          className="hover:bg-neutral-50/80 transition-colors"
+                        >
+                          <td className="py-4 pl-6 pr-3 text-neutral-500 whitespace-nowrap">
+                            {tx.dateTime}
                           </td>
-                          <td className="py-3 px-3">
-                            <span className="inline-flex items-center gap-1.5 font-medium text-[var(--text-secondary)]">
-                              <ChainBadge
-                                chainKey={b.networkAsset.network}
-                                size={15}
-                              />
-                              {b.networkAsset.network} ·{" "}
-                              {b.networkAsset.asset.symbol}
+                          <td className="py-4 px-3">
+                            <p className="font-display font-bold text-neutral-950">
+                              {tx.title}
+                            </p>
+                            <p className="text-[11px] text-neutral-500">
+                              {tx.subtitle}
+                            </p>
+                          </td>
+                          <td className="py-4 px-3">
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                                tx.type === "In"
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : "bg-red-50 text-[#FF1A1A]"
+                              }`}
+                            >
+                              {tx.type === "In" ? "↓ In" : "↑ Out"}
                             </span>
                           </td>
-                          <td className="py-3 px-3 text-right font-mono font-semibold text-[var(--text-primary)]">
-                            {b.displayBalance} {b.networkAsset.asset.symbol}
+                          <td className="py-4 px-3">
+                            <span className="inline-flex items-center gap-1.5 font-medium text-neutral-800">
+                              <ChainBadge chainKey={tx.network} size={16} />
+                              {tx.network}
+                            </span>
                           </td>
-                          <td className="py-3 px-3 text-right text-[var(--text-muted)]">
-                            {formatTimestamp(b.observedAt)}
+                          <td className="py-4 px-3 text-right">
+                            <p
+                              className={`font-display font-bold ${
+                                tx.type === "In"
+                                  ? "text-emerald-600"
+                                  : "text-neutral-950"
+                              }`}
+                            >
+                              {tx.amount}
+                            </p>
+                            <p className="text-[11px] text-neutral-400">
+                              {tx.tokenAmount}
+                            </p>
                           </td>
-                          <td className="py-3 pl-3 text-right">
-                            <span className="rounded-[4px] bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
-                              {b.syncStatus}
+                          <td className="py-4 pl-3 pr-6 text-right">
+                            <span
+                              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                                tx.status === "Completed"
+                                  ? "bg-emerald-50 text-emerald-700"
+                                  : "bg-amber-50 text-amber-700"
+                              }`}
+                            >
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${
+                                  tx.status === "Completed"
+                                    ? "bg-emerald-500"
+                                    : "bg-amber-500"
+                                }`}
+                              />
+                              {tx.status}
                             </span>
                           </td>
                         </tr>
@@ -2199,11 +2640,334 @@ export function PortfolioView({
                     </tbody>
                   </table>
                 </div>
-              )}
-            </section>
-          </div>
-        )}
+
+                {/* Pagination Bar */}
+                <div className="flex items-center justify-between border-t border-neutral-100 px-6 py-3.5 text-xs text-neutral-500">
+                  <span>Showing 1–7 of 48 transactions</span>
+                  <div className="flex items-center gap-1">
+                    <span className="rounded-lg bg-neutral-950 px-2.5 py-1 font-semibold text-white">
+                      1
+                    </span>
+                    <span className="rounded-lg px-2.5 py-1 hover:bg-neutral-100">
+                      2
+                    </span>
+                    <span className="rounded-lg px-2.5 py-1 hover:bg-neutral-100">
+                      3
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 5: SEND & CONVERT (With Ecosystem Address Validation)
+             ================================================================ */}
+          {activeTab === "send" && (
+            <div className="space-y-6">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                  MOVE FUNDS
+                </p>
+                <h1 className="mt-1 font-serif text-3xl sm:text-[40px] font-normal tracking-[-0.02em] text-neutral-950">
+                  Send &amp; Convert
+                </h1>
+                <p className="mt-1 text-sm text-neutral-600">
+                  Send assets across Ethereum, Base, Solana, and NEAR with
+                  automatic route discovery.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                <div className="lg:col-span-7 rounded-[26px] border border-neutral-200/90 bg-white p-6 sm:p-8 shadow-sm space-y-5">
+                  <div className="grid grid-cols-2 rounded-full bg-neutral-100 p-1">
+                    <button
+                      type="button"
+                      onClick={() => setSendMode("send")}
+                      className={`rounded-full py-2 text-xs font-semibold transition-all ${
+                        sendMode === "send"
+                          ? "bg-neutral-950 text-white shadow-xs"
+                          : "text-neutral-600"
+                      }`}
+                    >
+                      ↗ Send to Recipient
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSendMode("convert")}
+                      className={`rounded-full py-2 text-xs font-semibold transition-all ${
+                        sendMode === "convert"
+                          ? "bg-neutral-950 text-white shadow-xs"
+                          : "text-neutral-600"
+                      }`}
+                    >
+                      ⇄ Convert Between Wallets
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label
+                        htmlFor="send-source-select"
+                        className="block text-xs font-semibold text-neutral-800 mb-1.5"
+                      >
+                        From asset
+                      </label>
+                      <select
+                        id="send-source-select"
+                        value={sourceDeploymentId}
+                        onChange={(e) => setSourceDeploymentId(e.target.value)}
+                        className="w-full rounded-[14px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-neutral-950"
+                      >
+                        {CURATED_SUPPORTED_DEPLOYMENTS.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.symbol} ({d.networkName})
+                          </option>
+                        ))}
+                      </select>
+                      <p className="mt-1 text-[11px] text-neutral-500">
+                        Available:{" "}
+                        {sourceObservedBalance?.displayBalance ?? "0"}{" "}
+                        {sourceDeployment.symbol}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="send-dest-select"
+                        className="block text-xs font-semibold text-neutral-800 mb-1.5"
+                      >
+                        To destination asset
+                      </label>
+                      <select
+                        id="send-dest-select"
+                        value={destDeploymentId}
+                        onChange={(e) => setDestDeploymentId(e.target.value)}
+                        className="w-full rounded-[14px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-neutral-950"
+                      >
+                        {CURATED_SUPPORTED_DEPLOYMENTS.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.symbol} ({d.networkName})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="send-amount-input"
+                      className="block text-xs font-semibold text-neutral-800 mb-1.5"
+                    >
+                      Amount ({sourceDeployment.symbol})
+                    </label>
+                    <input
+                      id="send-amount-input"
+                      type="text"
+                      value={sendAmount}
+                      onChange={(e) => setSendAmount(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 font-display text-lg font-bold text-neutral-950"
+                    />
+                  </div>
+
+                  {sendMode === "send" && (
+                    <div>
+                      <label
+                        htmlFor="recipient-address-input"
+                        className="block text-xs font-semibold text-neutral-800 mb-1.5"
+                      >
+                        Recipient {destDeployment.networkName} address
+                      </label>
+                      <input
+                        id="recipient-address-input"
+                        type="text"
+                        value={recipientAddress}
+                        onChange={(e) => setRecipientAddress(e.target.value)}
+                        placeholder={
+                          ECOSYSTEM_METADATA.find(
+                            (m) => m.family === destDeployment.ecosystem,
+                          )?.addressPlaceholder ?? "0x..."
+                        }
+                        className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 font-mono text-xs text-neutral-950"
+                      />
+                      {recipientAddress.trim().length > 0 && (
+                        <p
+                          className={`mt-1.5 text-xs font-medium ${
+                            addressValidation.valid
+                              ? "text-emerald-600"
+                              : "text-[#FF1A1A]"
+                          }`}
+                        >
+                          {addressValidation.valid
+                            ? `Valid ${destDeployment.networkName} address format.`
+                            : addressValidation.reason}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled
+                    className="w-full rounded-full bg-neutral-200 py-3.5 text-xs font-semibold text-neutral-600 cursor-not-allowed"
+                  >
+                    Outgoing Execution Disabled (Safety Gate Active)
+                  </button>
+                </div>
+
+                {/* Right Column: Invoices Summary Card (Matches Storyboard Screen 12) */}
+                <div className="lg:col-span-5 rounded-[26px] border border-neutral-200/90 bg-white p-6 shadow-sm space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                        INVOICES &amp; REQUESTS
+                      </span>
+                      <h2 className="font-serif text-xl text-neutral-950">
+                        Recent Invoices
+                      </h2>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("receive")}
+                      className="rounded-full bg-[#FF1A1A] px-3.5 py-1.5 text-xs font-semibold text-white"
+                    >
+                      + New Invoice
+                    </button>
+                  </div>
+
+                  <div className="divide-y divide-neutral-100 text-xs">
+                    <div className="py-3 flex items-center justify-between">
+                      <div>
+                        <p className="font-bold text-neutral-950">
+                          #INV-1042 · Studio Kora
+                        </p>
+                        <p className="text-neutral-500">USDC · Base</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-display font-bold text-neutral-950">
+                          $1,200.00
+                        </p>
+                        <span className="text-[10px] font-semibold text-emerald-600">
+                          Paid
+                        </span>
+                      </div>
+                    </div>
+                    <div className="py-3 flex items-center justify-between">
+                      <div>
+                        <p className="font-bold text-neutral-950">
+                          #INV-1041 · Northstar Labs
+                        </p>
+                        <p className="text-neutral-500">SOL · Solana</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-display font-bold text-neutral-950">
+                          $2,400.00
+                        </p>
+                        <span className="text-[10px] font-semibold text-amber-600">
+                          Pending
+                        </span>
+                      </div>
+                    </div>
+                    <div className="py-3 flex items-center justify-between">
+                      <div>
+                        <p className="font-bold text-neutral-950">
+                          #INV-1040 · Atelier Nine
+                        </p>
+                        <p className="text-neutral-500">USDC · Base</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="font-display font-bold text-neutral-950">
+                          $850.00
+                        </p>
+                        <span className="text-[10px] font-semibold text-emerald-600">
+                          Paid
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* =====================================================================
+          MOBILE FLOATING DARK BOTTOM NAVIGATION BAR
+          (Matches 08_56_23 PM-4.png & Flow Mobile Dashboard Overview-5.png)
+         ===================================================================== */}
+      <nav
+        aria-label="Mobile bottom navigation"
+        className="lg:hidden fixed bottom-4 inset-x-4 z-40 rounded-[28px] bg-[#0B0B0B] px-2.5 py-2 text-white shadow-2xl border border-white/10"
+      >
+        <div className="grid grid-cols-5 gap-1 items-center">
+          <button
+            type="button"
+            onClick={() => setActiveTab("dashboard")}
+            className={`flex flex-col items-center justify-center rounded-[20px] py-2 text-[10px] font-semibold transition-all ${
+              activeTab === "dashboard"
+                ? "bg-[#FF1A1A] text-white shadow-sm"
+                : "text-neutral-400"
+            }`}
+          >
+            <span>⌂</span>
+            <span className="mt-0.5">Home</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("send")}
+            className={`flex flex-col items-center justify-center rounded-[20px] py-2 text-[10px] font-semibold transition-all ${
+              activeTab === "send"
+                ? "bg-[#FF1A1A] text-white shadow-sm"
+                : "text-neutral-400"
+            }`}
+          >
+            <span>↗</span>
+            <span className="mt-0.5">Send</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("receive")}
+            className={`flex flex-col items-center justify-center rounded-[20px] py-2 text-[10px] font-semibold transition-all ${
+              activeTab === "receive"
+                ? "bg-[#FF1A1A] text-white shadow-sm"
+                : "text-neutral-400"
+            }`}
+          >
+            <span>↙</span>
+            <span className="mt-0.5">Receive</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("assets")}
+            className={`flex flex-col items-center justify-center rounded-[20px] py-2 text-[10px] font-semibold transition-all ${
+              activeTab === "assets"
+                ? "bg-[#FF1A1A] text-white shadow-sm"
+                : "text-neutral-400"
+            }`}
+          >
+            <span>▣</span>
+            <span className="mt-0.5">Assets</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("activity")}
+            className={`flex flex-col items-center justify-center rounded-[20px] py-2 text-[10px] font-semibold transition-all ${
+              activeTab === "activity"
+                ? "bg-[#FF1A1A] text-white shadow-sm"
+                : "text-neutral-400"
+            }`}
+          >
+            <span>◷</span>
+            <span className="mt-0.5">Activity</span>
+          </button>
+        </div>
+      </nav>
     </div>
   );
 }

@@ -1,12 +1,5 @@
 import Link from "next/link";
-import { FlowWaveGraphic } from "../../../components/flow-logo.tsx";
-import {
-  ChainBadge,
-  IconBuilding,
-  IconShield,
-  IconUsers,
-  IconWallet,
-} from "../../../components/icons.tsx";
+import { FlowLogo } from "../../../components/flow-logo.tsx";
 import { runtime } from "../../../foundation/prisma.ts";
 import { accessibleAccounts } from "../../../server/accounts.ts";
 import { pageData, pagePrincipal } from "../../../server/pages.ts";
@@ -29,194 +22,236 @@ export default async function AccountsPage() {
 
   const personalAccounts = accounts.filter((a) => a.kind === "PERSONAL");
   const businessAccounts = accounts.filter((a) => a.kind === "BUSINESS");
+  const primaryAccount = personalAccounts[0] ?? accounts[0];
 
   return (
-    <main className="space-y-8">
-      {/* Top Banner */}
-      <section className="flow-dark-banner relative overflow-hidden p-6 sm:p-8">
-        <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-36 w-full opacity-75" />
-        <div className="relative z-10 flex flex-wrap items-center justify-between gap-6">
-          <div className="space-y-2">
-            <span className="inline-flex items-center gap-1.5 rounded-[4px] bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-400">
-              <IconShield size={13} />
-              Tenant-Isolated Account Directory
-            </span>
-            <h1 className="font-display text-2xl font-extrabold text-white sm:text-3xl">
+    <main className="min-h-screen bg-[#FAF8F5] text-neutral-950 flex flex-col lg:flex-row">
+      {/* Left Dark Sidebar */}
+      <aside
+        aria-label="Workspaces navigation"
+        className="hidden lg:flex lg:w-[250px] lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 lg:min-h-screen lg:sticky lg:top-0"
+      >
+        <div>
+          <div className="px-2 pt-1 pb-7">
+            <Link href="/" prefetch={false} aria-label="FLOW Home">
+              <FlowLogo size={26} variant="inverse" />
+            </Link>
+          </div>
+
+          <nav className="space-y-1">
+            <Link
+              prefetch={false}
+              href={
+                primaryAccount ? `/accounts/${primaryAccount.id}` : "/accounts"
+              }
+              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+            >
+              <span>⌂</span>
+              <span>Home</span>
+            </Link>
+            <Link
+              prefetch={false}
+              href="/accounts"
+              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium bg-gradient-to-r from-[#450A0A] via-[#7F1D1D] to-[#991B1B] text-white border border-[#EF4444]/40 shadow-sm"
+            >
+              <span>▣</span>
+              <span>Workspaces</span>
+            </Link>
+            <Link
+              prefetch={false}
+              href="/security"
+              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+            >
+              <span>⚙</span>
+              <span>Settings</span>
+            </Link>
+          </nav>
+        </div>
+
+        <div className="flex items-center justify-between border-t border-white/10 pt-4">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <img
+              src="/assets/amara-avatar.png"
+              alt="Profile"
+              className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0"
+            />
+            <div className="min-w-0">
+              <p className="truncate text-xs font-semibold text-white">
+                {primaryAccount?.name ?? "Flow Account"}
+              </p>
+              <p className="truncate text-[11px] text-neutral-400">
+                {accounts.length} workspace{accounts.length === 1 ? "" : "s"}
+              </p>
+            </div>
+          </div>
+          <Link
+            prefetch={false}
+            href="/security"
+            className="text-neutral-400 hover:text-white text-sm px-1"
+          >
+            •••
+          </Link>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex-1 min-w-0 pb-20 relative overflow-hidden">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -top-10 right-0 w-[340px] sm:w-[460px] h-[180px] z-0 overflow-hidden"
+        >
+          <svg viewBox="0 0 500 200" fill="none" className="w-full h-full">
+            <path
+              d="M120 -20 C240 80, 360 20, 520 150 L520 -20 Z"
+              fill="url(#accWaveGrad)"
+            />
+            <defs>
+              <linearGradient id="accWaveGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stopColor="#FF2E2E" />
+                <stop offset="65%" stopColor="#CC0000" />
+                <stop offset="100%" stopColor="#1A0000" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+
+        <div className="relative z-10 mx-auto max-w-[1120px] px-4 sm:px-8 pt-7 space-y-8">
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+              WORKSPACES
+            </p>
+            <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950">
               Your FLOW accounts
             </h1>
-            <p className="max-w-2xl text-xs sm:text-sm text-slate-200">
-              Choose a personal or business account. Each workspace maintains
-              separate custody records, multi-chain wallet addresses, and
-              row-level database access controls.
+            <p className="mt-1 text-sm text-neutral-600">
+              Switch between your personal account and your business workspaces,
+              or create a new business organization.
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <ChainBadge chainKey="ethereum-mainnet" size={24} />
-            <ChainBadge chainKey="base-mainnet" size={24} />
-            <ChainBadge chainKey="solana-mainnet" size={24} />
-            <ChainBadge chainKey="near-mainnet" size={24} />
-          </div>
-        </div>
-      </section>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-7 items-start">
+            {/* Left 7 Columns: Personal & Business Workspaces */}
+            <div className="lg:col-span-7 space-y-6">
+              <section className="space-y-3">
+                <h2 className="text-xs font-bold uppercase tracking-wider text-neutral-400">
+                  Personal Account ({personalAccounts.length})
+                </h2>
 
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-12 items-start">
-        {/* Left 7 Columns: Personal & Business Account Lists */}
-        <div className="lg:col-span-7 space-y-6">
-          {/* Personal Workspace Section */}
-          <section className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="font-display text-sm font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                Personal Account ({personalAccounts.length})
-              </h2>
-              <span className="text-xs text-[var(--text-muted)]">
-                Individual Custody Boundary
-              </span>
-            </div>
-
-            <ul className="space-y-3">
-              {personalAccounts.map((account) => (
-                <li key={account.id}>
-                  <Link
-                    prefetch={false}
-                    href={`/accounts/${account.id}`}
-                    className="flow-card-interactive block p-5"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-4">
-                      <div className="flex items-center gap-3.5">
-                        <span className="inline-flex h-11 w-11 items-center justify-center rounded-[12px] bg-[#FF1A1A]/10 text-[#FF1A1A]">
-                          <IconUsers size={20} />
-                        </span>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <strong className="font-display text-base font-bold text-[var(--text-primary)]">
-                              {account.name}
-                            </strong>
-                            <span className="rounded-[4px] bg-[#FF1A1A]/10 px-2 py-0.5 text-[11px] font-bold text-[#FF1A1A]">
-                              Personal
+                <ul className="space-y-3">
+                  {personalAccounts.map((account) => (
+                    <li key={account.id}>
+                      <Link
+                        prefetch={false}
+                        href={`/accounts/${account.id}`}
+                        className="block rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs hover:border-neutral-900 transition-all"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-4">
+                          <div className="flex items-center gap-3.5">
+                            <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-red-50 text-[#FF1A1A] font-bold">
+                              👤
                             </span>
-                          </div>
-                          <p className="mt-1 flex items-center gap-1.5 text-xs text-[var(--text-secondary)]">
-                            <IconWallet
-                              size={13}
-                              className="text-[var(--text-muted)]"
-                            />
-                            <span>
-                              {walletLabels[account.walletStatus] ??
-                                "Wallet setup pending"}
-                            </span>
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <span className="rounded-[6px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2.5 py-1 text-xs font-semibold text-[var(--text-secondary)]">
-                          {account.role.toLowerCase()}
-                        </span>
-                        <span className="rounded-[6px] bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-white">
-                          Open →
-                        </span>
-                      </div>
-                    </div>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </section>
-
-          {/* Business Workspaces Section */}
-          <section className="space-y-3 pt-2">
-            <div className="flex items-center justify-between">
-              <h2 className="font-display text-sm font-bold uppercase tracking-wider text-[var(--text-muted)]">
-                Business Accounts ({businessAccounts.length})
-              </h2>
-              <span className="text-xs text-[var(--text-muted)]">
-                Organization Treasury &amp; Team Access
-              </span>
-            </div>
-
-            {businessAccounts.length === 0 ? (
-              <div className="flow-card p-6 text-center">
-                <div className="mx-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-[var(--surface-subtle)] text-[var(--text-muted)]">
-                  <IconBuilding size={18} />
-                </div>
-                <p className="mt-2.5 text-sm font-semibold text-[var(--text-primary)]">
-                  No business accounts joined yet
-                </p>
-                <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                  Use the form on the right to create a new business
-                  organization or accept an invitation link from an existing
-                  team owner.
-                </p>
-              </div>
-            ) : (
-              <ul className="space-y-3">
-                {businessAccounts.map((account) => (
-                  <li key={account.id}>
-                    <Link
-                      prefetch={false}
-                      href={`/accounts/${account.id}`}
-                      className="flow-card-interactive block p-5"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-4">
-                        <div className="flex items-center gap-3.5">
-                          <span className="inline-flex h-11 w-11 items-center justify-center rounded-[12px] bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200">
-                            <IconBuilding size={20} />
-                          </span>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <strong className="font-display text-base font-bold text-[var(--text-primary)]">
-                                {account.name}
-                              </strong>
-                              <span className="rounded-[4px] bg-emerald-400/15 px-2 py-0.5 text-[11px] font-bold text-[#0F9F80]">
-                                Business
-                              </span>
-                            </div>
-                            <p className="mt-1 flex items-center gap-1.5 text-xs text-[var(--text-secondary)]">
-                              <IconWallet
-                                size={13}
-                                className="text-[var(--text-muted)]"
-                              />
-                              <span>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <strong className="font-display text-base font-bold text-neutral-950">
+                                  {account.name}
+                                </strong>
+                                <span className="rounded-full bg-red-50 px-2.5 py-0.5 text-[10px] font-bold uppercase text-[#FF1A1A]">
+                                  Personal account
+                                </span>
+                              </div>
+                              <p className="mt-1 text-xs text-neutral-500">
                                 {walletLabels[account.walletStatus] ??
-                                  "Wallet setup pending"}
-                              </span>
-                            </p>
+                                  "Wallet setup pending"}{" "}
+                                · {account.role.toLowerCase()}
+                              </p>
+                            </div>
                           </div>
-                        </div>
 
-                        <div className="flex items-center gap-2">
-                          <span className="rounded-[6px] border border-[var(--border-subtle)] bg-[var(--surface-subtle)] px-2.5 py-1 text-xs font-semibold text-[var(--text-secondary)]">
-                            {account.role.toLowerCase()}
-                          </span>
-                          <span className="rounded-[6px] bg-neutral-900 px-3 py-1.5 text-xs font-semibold text-white">
+                          <span className="rounded-full bg-neutral-950 px-4 py-1.5 text-xs font-semibold text-white">
                             Open →
                           </span>
                         </div>
-                      </div>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </div>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </section>
 
-        {/* Right 5 Columns: Create Business Form */}
-        <div className="lg:col-span-5">
-          <section className="flow-card p-6 sm:p-7 space-y-4">
-            <div className="inline-flex items-center gap-2 rounded-[4px] bg-[#FF1A1A]/10 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-[#FF1A1A]">
-              <IconBuilding size={13} />
-              New Organization Workspace
+              <section className="space-y-3 pt-2">
+                <h2 className="text-xs font-bold uppercase tracking-wider text-neutral-400">
+                  Business Accounts ({businessAccounts.length})
+                </h2>
+
+                {businessAccounts.length === 0 ? (
+                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-6 text-center shadow-2xs">
+                    <p className="font-display text-sm font-bold text-neutral-950">
+                      No business accounts yet
+                    </p>
+                    <p className="mt-1 text-xs text-neutral-500">
+                      Create a business workspace on the right to manage team
+                      payments and invoices.
+                    </p>
+                  </div>
+                ) : (
+                  <ul className="space-y-3">
+                    {businessAccounts.map((account) => (
+                      <li key={account.id}>
+                        <Link
+                          prefetch={false}
+                          href={`/accounts/${account.id}`}
+                          className="block rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs hover:border-neutral-900 transition-all"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-4">
+                            <div className="flex items-center gap-3.5">
+                              <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-neutral-100 text-neutral-900 font-bold">
+                                🏢
+                              </span>
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <strong className="font-display text-base font-bold text-neutral-950">
+                                    {account.name}
+                                  </strong>
+                                  <span className="rounded-full bg-neutral-100 px-2.5 py-0.5 text-[10px] font-bold uppercase text-neutral-800">
+                                    Business account
+                                  </span>
+                                </div>
+                                <p className="mt-1 text-xs text-neutral-500">
+                                  {walletLabels[account.walletStatus] ??
+                                    "Wallet setup pending"}{" "}
+                                  · {account.role.toLowerCase()}
+                                </p>
+                              </div>
+                            </div>
+
+                            <span className="rounded-full bg-neutral-950 px-4 py-1.5 text-xs font-semibold text-white">
+                              Open →
+                            </span>
+                          </div>
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
             </div>
-            <h2 className="font-display text-lg font-bold text-[var(--text-primary)]">
-              Create a business account
-            </h2>
-            <p className="text-xs leading-relaxed text-[var(--text-secondary)]">
-              Set up a separate account for your business and invite your team.
-            </p>
-            <AccountNameForm />
-          </section>
+
+            {/* Right 5 Columns: Create Business Account Card */}
+            <div className="lg:col-span-5">
+              <section className="rounded-[26px] border border-neutral-200/90 bg-white p-6 sm:p-7 shadow-sm space-y-4">
+                <span className="inline-block text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                  FOR BUSINESS
+                </span>
+                <h2 className="font-serif text-2xl text-neutral-950">
+                  Create a business account
+                </h2>
+                <p className="text-xs leading-relaxed text-neutral-600">
+                  Accept payments from customers, send invoices, manage team
+                  access, and track business activity in one place.
+                </p>
+                <AccountNameForm />
+              </section>
+            </div>
+          </div>
         </div>
       </div>
     </main>

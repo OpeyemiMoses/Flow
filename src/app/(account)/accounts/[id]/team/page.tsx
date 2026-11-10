@@ -1,7 +1,6 @@
 import { headers } from "next/headers";
 import Link from "next/link";
-import { FlowWaveGraphic } from "../../../../../components/flow-logo.tsx";
-import { IconBuilding, IconUsers } from "../../../../../components/icons.tsx";
+import { FlowLogo } from "../../../../../components/flow-logo.tsx";
 import { accountId } from "../../../../../server/accounts.ts";
 import { pageData } from "../../../../../server/pages.ts";
 import { team } from "../../../../../server/team.ts";
@@ -17,36 +16,94 @@ export default async function TeamPage({
     team(await headers(), accountId(id)),
   );
   return (
-    <main className="space-y-6">
-      <section className="flow-dark-banner relative overflow-hidden p-6 sm:p-8">
-        <FlowWaveGraphic className="absolute inset-x-0 bottom-0 h-36 w-full opacity-80" />
-        <div className="relative z-10 flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1.5">
-            <span className="inline-flex items-center gap-1.5 rounded-[4px] bg-white/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-400">
-              <IconBuilding size={13} />
-              Business Team &amp; Role Governance
-            </span>
-            <h1 className="font-display text-2xl font-extrabold text-white sm:text-3xl">
-              {snapshot.account.name} team
-            </h1>
-            <p className="text-xs sm:text-sm text-slate-200">
-              Manage organization members, assign `OWNER`, `ADMIN`, or `MEMBER`
-              roles, and issue single-use email invitations.
-            </p>
+    <main className="min-h-screen bg-[#FAF8F5] text-neutral-950 flex flex-col lg:flex-row">
+      {/* Left Dark Sidebar */}
+      <aside
+        aria-label="Business team workspace navigation"
+        className="hidden lg:flex lg:w-[250px] lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 lg:min-h-screen lg:sticky lg:top-0"
+      >
+        <div>
+          <div className="px-2 pt-1 pb-7">
+            <Link href="/" prefetch={false} aria-label="FLOW Home">
+              <FlowLogo size={26} variant="inverse" />
+            </Link>
           </div>
 
-          <Link
-            prefetch={false}
-            href={`/accounts/${snapshot.account.id}`}
-            className="inline-flex items-center gap-1.5 rounded-[8px] border border-white/20 bg-white/10 px-4 py-2 text-xs font-semibold text-white hover:bg-white/15 transition-colors"
-          >
-            <IconUsers size={14} />
-            Back to account
-          </Link>
+          <nav className="space-y-1">
+            <Link
+              prefetch={false}
+              href={`/accounts/${snapshot.account.id}`}
+              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+            >
+              <span>⌂</span>
+              <span>Home</span>
+            </Link>
+            <Link
+              prefetch={false}
+              href={`/accounts/${snapshot.account.id}/team`}
+              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium bg-gradient-to-r from-[#450A0A] via-[#7F1D1D] to-[#991B1B] text-white border border-[#EF4444]/40 shadow-sm"
+            >
+              <span>👥</span>
+              <span>Team</span>
+            </Link>
+            <Link
+              prefetch={false}
+              href="/security"
+              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+            >
+              <span>⚙</span>
+              <span>Settings</span>
+            </Link>
+          </nav>
         </div>
-      </section>
 
-      <TeamManager {...snapshot} />
+        <div className="flex items-center justify-between border-t border-white/10 pt-4">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <img
+              src="/assets/amara-avatar.png"
+              alt="Profile"
+              className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0"
+            />
+            <div className="min-w-0">
+              <p className="truncate text-xs font-semibold text-white">
+                {snapshot.account.name}
+              </p>
+              <p className="truncate text-[11px] text-neutral-400">
+                Business · {snapshot.account.role.toLowerCase()}
+              </p>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex-1 min-w-0 pb-20 relative overflow-hidden">
+        <div className="relative z-10 mx-auto max-w-[1120px] px-4 sm:px-8 pt-7 space-y-6">
+          <div className="flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                BUSINESS WORKSPACE · TEAM
+              </p>
+              <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950">
+                {snapshot.account.name} team
+              </h1>
+              <p className="mt-1 text-sm text-neutral-600">
+                Manage organization members, assign roles, and invite teammates.
+              </p>
+            </div>
+
+            <Link
+              prefetch={false}
+              href={`/accounts/${snapshot.account.id}`}
+              className="rounded-full border border-neutral-200 bg-white px-4 py-2 text-xs font-semibold text-neutral-900 shadow-2xs hover:bg-neutral-50"
+            >
+              ← Back to account
+            </Link>
+          </div>
+
+          <TeamManager {...snapshot} />
+        </div>
+      </div>
     </main>
   );
 }
