@@ -3,6 +3,7 @@ import {
   OUTLAYER_CAPABILITIES,
   toEip55ChecksumAddress,
 } from "../src/domain/custody.ts";
+import { isBannedIllustrativeAddress } from "../src/domain/quote-discovery.ts";
 import {
   deriveKeyDigest,
   encryptSecret,
@@ -76,7 +77,8 @@ export async function activateFirstMainnetWallet(
   let db;
   let targetAccountId = options.accountId;
   let account:
-    { id: string; name: string; type: string; owner_id: string } | undefined;
+    | { id: string; name: string; type: string; owner_id: string | null }
+    | undefined;
 
   const hasDbUrl =
     Boolean(process.env.FLOW_OPERATOR_DATABASE_URL) ||
@@ -94,10 +96,10 @@ export async function activateFirstMainnetWallet(
             id: string;
             name: string;
             type: string;
-            owner_id: string;
+            owner_id: string | null;
           }>
         >`
-          SELECT id, name, type::text AS type, owner_id
+          SELECT id, name, kind::text AS type, personal_owner_id::text AS owner_id
           FROM flow.accounts
           ORDER BY created_at ASC
           LIMIT 5
@@ -121,11 +123,11 @@ export async function activateFirstMainnetWallet(
           id: string;
           name: string;
           type: string;
-          owner_id: string;
+          owner_id: string | null;
           created_at: Date;
         }>
       >`
-        SELECT id, name, type::text AS type, owner_id, created_at
+        SELECT id, name, kind::text AS type, personal_owner_id::text AS owner_id, created_at
         FROM flow.accounts
         WHERE id = ${targetAccountId}::uuid
         LIMIT 1
@@ -140,7 +142,7 @@ export async function activateFirstMainnetWallet(
 
       account = accountRows[0]!;
       console.log(
-        `   - Account Name: ${account.name} (Type: ${account.type}, Owner: ${account.owner_id})\n`,
+        `   - Account Name: ${account.name} (Type: ${account.type}, Owner: ${account.owner_id ?? "Business/Team"})\n`,
       );
     } catch (dbErr) {
       if (!options.dryRun) {
@@ -189,10 +191,14 @@ export async function activateFirstMainnetWallet(
       LIMIT 1
     `;
 
-    if (existingWallets.length > 0 && existingWallets[0]!.status === "ACTIVE") {
+    if (existingWallets.length === 0) {
+      console.log(
+        "   [NO EXISTING WALLET] Account has no existing wallet record. Ready for initial mainnet provisioning.\n",
+      );
+    } else if (existingWallets[0]!.status === "ACTIVE") {
       const existing = existingWallets[0]!;
       console.log(
-        `   [ALREADY ACTIVE] Account already has an active mainnet wallet.`,
+        `   [EXISTING WALLET DETECTED] Account has a previously recorded wallet.`,
       );
       console.log(`   - Wallet ID:               ${existing.id}`);
       console.log(`   - Environment:             ${existing.environment}`);
@@ -211,17 +217,39 @@ export async function activateFirstMainnetWallet(
       `;
 
       console.log("\n   Persisted Multi-Chain Receiving Addresses:");
+      let hasBannedAddress = false;
       for (const a of addresses) {
+        const isBanned = isBannedIllustrativeAddress(a.address);
+        if (isBanned) hasBannedAddress = true;
         console.log(
-          `   - ${a.network.toUpperCase().padEnd(8)} (${a.chain_id}): ${a.address}`,
+          `   - ${a.network.toUpperCase().padEnd(8)} (${a.chain_id}): ${a.address}${isBanned ? " [BANNED ILLUSTRATIVE ADDRESS / TEST FIXTURE]" : ""}`,
         );
       }
 
+      if (hasBannedAddress || existing.environment !== "mainnet") {
+        console.log(
+          "\n   [BLOCKER DETECTED] This wallet contains synthetic test fixture / banned illustrative addresses (e.g. vitalik.eth).",
+        );
+        console.log(
+          "   It is NOT an owner-controlled production custody wallet. Genuine OutLayer mainnet registration is required.\n",
+        );
+        if (!options.dryRun) {
+          throw new FlowError(
+            "INVALID_CONFIGURATION",
+            "Target account contains banned illustrative address or test fixture. Genuine OutLayer mainnet registration required.",
+          );
+        }
+      } else {
+        console.log(
+          "\n   [VERIFIED] Genuine mainnet wallet ownership is registered and proven to belong to this account.",
+        );
+        console.log("   Ready for payable payment request creation.\n");
+        return;
+      }
+    } else {
       console.log(
-        "\n   [VERIFIED] Wallet ownership is registered and proven to belong to this account.",
+        `   [PENDING/INCOMPLETE WALLET] Account wallet status is ${existingWallets[0]!.status} (${existingWallets[0]!.environment}). Ready for mainnet activation.\n`,
       );
-      console.log("   Ready for payable payment request creation.\n");
-      return;
     }
   }
 
@@ -457,6 +485,7 @@ export async function activateFirstMainnetWallet(
 if (process.argv[1]?.endsWith("activate-first-mainnet-wallet.ts")) {
   const { values } = parseArgs({
     options: {
+      account: { type: "string" },
       "account-id": { type: "string" },
       "dry-run": { type: "boolean", default: false },
       "operator-auth-id": { type: "string" },
@@ -466,7 +495,8 @@ if (process.argv[1]?.endsWith("activate-first-mainnet-wallet.ts")) {
   });
 
   activateFirstMainnetWallet({
-    accountId: values["account-id"] as string | undefined,
+    accountId: (values["account"] || values["account-id"]) as
+      string | undefined,
     dryRun: Boolean(values["dry-run"]),
     operatorAuthId: values["operator-auth-id"] as string | undefined,
     operatorSessionToken: values["session-token"] as string | undefined,
