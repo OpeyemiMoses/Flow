@@ -27,6 +27,7 @@ model AuthUser {
   custodyOperator CustodyOperator?
   recoveryApprovals CustodyRecoveryApproval[]
   issuanceTickets AuthIssuanceTicket[]
+  operatorApprovalAssertions OperatorApprovalAssertion[]
 
   @@map("auth_users")
   @@schema("flow")
@@ -608,6 +609,7 @@ model PaymentRequest {
   account                FlowAccount          @relation(fields: [accountId], references: [id], onDelete: Cascade)
   attempts               PaymentAttempt[]
   rehearsalAuthorizations PaymentRehearsalAuthorization[]
+  operatorApprovalAssertions OperatorApprovalAssertion[]
 
   @@index([accountId, status])
   @@index([publicId])
@@ -766,13 +768,44 @@ model PaymentRehearsalAuthorization {
   expiresAt                  DateTime       @map("expires_at") @db.Timestamptz
   consumedAt                 DateTime?      @map("consumed_at") @db.Timestamptz
   consumedByAttemptId        String?        @map("consumed_by_attempt_id") @db.Uuid
+  assertionId                String?        @map("assertion_id") @db.Uuid
   createdAt                  DateTime       @default(now()) @map("created_at") @db.Timestamptz
 
   paymentRequest             PaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade)
   consumedByAttempt          PaymentAttempt? @relation(fields: [consumedByAttemptId], references: [id], onDelete: SetNull)
+  operatorAssertion          OperatorApprovalAssertion? @relation(fields: [assertionId], references: [id], onDelete: SetNull)
 
   @@index([paymentRequestId, environment, expiresAt])
   @@map("payment_rehearsal_authorizations")
+  @@schema("flow")
+}
+
+model OperatorApprovalAssertion {
+  id                         String         @id @default(uuid()) @db.Uuid
+  assertionTokenHash         String         @unique @map("assertion_token_hash") @db.VarChar(128)
+  operatorAuthId             String         @map("operator_auth_id") @db.VarChar(128)
+  paymentRequestId           String         @map("payment_request_id") @db.Uuid
+  environment                String         @default("mainnet") @db.VarChar(32)
+  sourceNetwork              String         @map("source_network") @db.VarChar(64)
+  sourceAssetId              String         @map("source_asset_id") @db.VarChar(128)
+  destinationNetwork         String         @map("destination_network") @db.VarChar(64)
+  destinationAssetId         String         @map("destination_asset_id") @db.VarChar(128)
+  maxAtomicAmount            Decimal        @map("max_atomic_amount") @db.Decimal(78, 0)
+  allowedRecipientAddress    String         @map("allowed_recipient_address") @db.VarChar(128)
+  allowedPayerRefundAddress  String?        @map("allowed_payer_refund_address") @db.VarChar(128)
+  nonce                      String         @unique @db.VarChar(128)
+  signature                  String?
+  expiresAt                  DateTime       @map("expires_at") @db.Timestamptz
+  consumedAt                 DateTime?      @map("consumed_at") @db.Timestamptz
+  consumedByAuthorizationId  String?        @map("consumed_by_authorization_id") @db.Uuid
+  createdAt                  DateTime       @default(now()) @map("created_at") @db.Timestamptz
+
+  paymentRequest             PaymentRequest @relation(fields: [paymentRequestId], references: [id], onDelete: Cascade)
+  user                       AuthUser       @relation(fields: [operatorAuthId], references: [id], onDelete: Restrict)
+  authorizations             PaymentRehearsalAuthorization[]
+
+  @@index([paymentRequestId, operatorAuthId, expiresAt])
+  @@map("operator_approval_assertions")
   @@schema("flow")
 }
 

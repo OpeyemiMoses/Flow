@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -2846,6 +2846,7 @@ test("phase 6 end-to-end acceptance scenarios A–G: live OutLayer wallet provis
 test("security: scoped single-use rehearsal authorization lifecycle, privilege separation, and fail-closed bounds", async () => {
   const merchant = await person("rehearsal-merchant@flow.local");
   const operatorPerson = await person("rehearsal-operator@flow.local");
+  const victimPerson = await person("victim-operator@flow.local");
   const unauth = await app.createClient();
 
   const opUserRows = await app.db.query(
@@ -2854,14 +2855,26 @@ test("security: scoped single-use rehearsal authorization lifecycle, privilege s
   );
   const operatorAuthId = opUserRows.rows[0].id;
 
+  const victimUserRows = await app.db.query(
+    `SELECT id FROM flow.auth_users WHERE email = $1`,
+    [victimPerson.email],
+  );
+  const victimOperatorAuthId = victimUserRows.rows[0].id;
+
+  const operatorCookie = await cookieValue(operatorPerson.client);
+  const operatorSessionToken = decodeURIComponent(operatorCookie.value).split(
+    ".",
+  )[0];
+
   const opClient = await operatorDb.connect();
   try {
-    // 1. Enroll operator in flow.custody_operators via opClient
+    // 1. Enroll operators in flow.custody_operators via opClient
     await opClient.query(
       `INSERT INTO flow.custody_operators (auth_user_id, role, status, enrolled_by)
-       VALUES ($1, 'SECURITY_OFFICER', 'ACTIVE', 'rehearsal-test-bootstrap')
+       VALUES ($1, 'SECURITY_OFFICER', 'ACTIVE', 'rehearsal-test-bootstrap'),
+              ($2, 'SECURITY_OFFICER', 'ACTIVE', 'rehearsal-test-bootstrap')
        ON CONFLICT (auth_user_id) DO UPDATE SET role = 'SECURITY_OFFICER', status = 'ACTIVE'`,
-      [operatorAuthId],
+      [operatorAuthId, victimOperatorAuthId],
     );
 
     // 2. Configure merchant wallet for Base Mainnet (8453)
@@ -2997,7 +3010,8 @@ test("security: scoped single-use rehearsal authorization lifecycle, privilege s
       async () => {
         await app.db.query(
           `SELECT flow.create_payment_rehearsal_authorization(
-             $1::uuid, $2, 'solana-mainnet', 'solana-mainnet:SOL',
+             $1::uuid, $2, 'dummy_assertion_token_123456789012',
+             'solana-mainnet', 'solana-mainnet:SOL',
              'base-mainnet', 'base-mainnet:USDC', 5000000, $3, $4, 1800
            )`,
           [
@@ -3077,7 +3091,8 @@ test("security: scoped single-use rehearsal authorization lifecycle, privilege s
       async () => {
         await workerDb.query(
           `SELECT flow.create_payment_rehearsal_authorization(
-             $1::uuid, $2, 'solana-mainnet', 'solana-mainnet:SOL',
+             $1::uuid, $2, 'dummy_assertion_token_123456789012',
+             'solana-mainnet', 'solana-mainnet:SOL',
              'base-mainnet', 'base-mainnet:USDC', 5000000, $3, $4, 1800
            )`,
           [
@@ -3152,18 +3167,41 @@ test("security: scoped single-use rehearsal authorization lifecycle, privilege s
       "opClient direct DELETE on payment_rehearsal_authorizations must fail with 42501",
     );
 
-    // 6. Adversarial Operator Authentication & Spoofing Checks:
-    // (a) Unauthenticated operator session fails with OPERATOR_SESSION_NOT_AUTHENTICATED
+    // (k) Table mutations and execute privileges on operator_approval_assertions:
+    // app.db CANNOT insert/update/delete operator_approval_assertions or issue assertions
     await assert.rejects(
       async () => {
-        await opClient.query(
-          `SELECT flow.create_payment_rehearsal_authorization(
-             $1::uuid, $2, 'solana-mainnet', 'solana-mainnet:SOL',
-             'base-mainnet', 'base-mainnet:USDC', 5000000, $3, $4, 1800
+        await app.db.query(
+          `INSERT INTO flow.operator_approval_assertions (
+             assertion_token_hash, operator_auth_id, payment_request_id,
+             source_network, source_asset_id, destination_network, destination_asset_id,
+             max_atomic_amount, allowed_recipient_address, nonce, expires_at
+           ) VALUES (
+             'dummy_hash', $1, $2, 'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $3, 'nonce1',
+             CURRENT_TIMESTAMP + interval '30 minutes'
+           )`,
+          [operatorAuthId, paymentReq.id, verifiedRecipient],
+        );
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        return true;
+      },
+      "app.db direct INSERT on operator_approval_assertions must fail with 42501",
+    );
+
+    await assert.rejects(
+      async () => {
+        await app.db.query(
+          `SELECT flow.issue_operator_approval_assertion(
+             $1, $2, $3::uuid, 'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $4, $5, 1800, 'dummy_hash'
            )`,
           [
-            paymentReq.id,
             operatorAuthId,
+            operatorSessionToken,
+            paymentReq.id,
             verifiedRecipient,
             verifiedPayerRefund,
           ],
@@ -3171,55 +3209,180 @@ test("security: scoped single-use rehearsal authorization lifecycle, privilege s
       },
       (err) => {
         assert.equal(err.code, "42501");
-        assert.match(err.message, /OPERATOR_SESSION_NOT_AUTHENTICATED/);
         return true;
       },
-      "Unauthenticated session context must be rejected with OPERATOR_SESSION_NOT_AUTHENTICATED",
+      "app.db EXECUTE on issue_operator_approval_assertion must fail with 42501",
     );
 
-    // (b) Operator identity spoofing: caller passes an operator ID differing from session context
-    await opClient.query(
-      `SELECT set_config('flow.operator_auth_id', $1, false)`,
-      [operatorAuthId],
-    );
+    // workerDb CANNOT insert/update/delete operator_approval_assertions or issue assertions
     await assert.rejects(
       async () => {
-        await opClient.query(
-          `SELECT flow.create_payment_rehearsal_authorization(
-             $1::uuid, 'spoofed-operator-id', 'solana-mainnet', 'solana-mainnet:SOL',
-             'base-mainnet', 'base-mainnet:USDC', 5000000, $2, $3, 1800
+        await workerDb.query(
+          `INSERT INTO flow.operator_approval_assertions (
+             assertion_token_hash, operator_auth_id, payment_request_id,
+             source_network, source_asset_id, destination_network, destination_asset_id,
+             max_atomic_amount, allowed_recipient_address, nonce, expires_at
+           ) VALUES (
+             'dummy_hash', $1, $2, 'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $3, 'nonce2',
+             CURRENT_TIMESTAMP + interval '30 minutes'
            )`,
-          [paymentReq.id, verifiedRecipient, verifiedPayerRefund],
+          [operatorAuthId, paymentReq.id, verifiedRecipient],
         );
       },
       (err) => {
         assert.equal(err.code, "42501");
-        assert.match(err.message, /OPERATOR_IDENTITY_SPOOFED/);
         return true;
       },
-      "Operator identity spoofing must fail with OPERATOR_IDENTITY_SPOOFED",
+      "workerDb direct INSERT on operator_approval_assertions must fail with 42501",
     );
 
-    // (c) Unenrolled operator identity in session context fails with OPERATOR_NOT_AUTHORIZED
+    await assert.rejects(
+      async () => {
+        await workerDb.query(
+          `SELECT flow.issue_operator_approval_assertion(
+             $1, $2, $3::uuid, 'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $4, $5, 1800, 'dummy_hash'
+           )`,
+          [
+            operatorAuthId,
+            operatorSessionToken,
+            paymentReq.id,
+            verifiedRecipient,
+            verifiedPayerRefund,
+          ],
+        );
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        return true;
+      },
+      "workerDb EXECUTE on issue_operator_approval_assertion must fail with 42501",
+    );
+
+    // opClient CANNOT directly INSERT/UPDATE/DELETE operator_approval_assertions
+    await assert.rejects(
+      async () => {
+        await opClient.query(
+          `INSERT INTO flow.operator_approval_assertions (
+             assertion_token_hash, operator_auth_id, payment_request_id,
+             source_network, source_asset_id, destination_network, destination_asset_id,
+             max_atomic_amount, allowed_recipient_address, nonce, expires_at
+           ) VALUES (
+             'dummy_hash', $1, $2, 'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $3, 'nonce3',
+             CURRENT_TIMESTAMP + interval '30 minutes'
+           )`,
+          [operatorAuthId, paymentReq.id, verifiedRecipient],
+        );
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        return true;
+      },
+      "opClient direct INSERT on operator_approval_assertions must fail with 42501",
+    );
+
+    await assert.rejects(
+      async () => {
+        await opClient.query(
+          `UPDATE flow.operator_approval_assertions SET max_atomic_amount = 1000`,
+        );
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        return true;
+      },
+      "opClient direct UPDATE on operator_approval_assertions must fail with 42501",
+    );
+
+    await assert.rejects(
+      async () => {
+        await opClient.query(`DELETE FROM flow.operator_approval_assertions`);
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        return true;
+      },
+      "opClient direct DELETE on operator_approval_assertions must fail with 42501",
+    );
+
+    // 6. Adversarial Operator Impersonation & Identity Spoofing Checks:
+    // (a) An attacker setting BOTH flow.operator_auth_id session variable AND passing victim's ID
+    // cannot create an authorization without a valid cryptographic approval assertion token
+    await opClient.query(
+      `SELECT set_config('flow.operator_auth_id', $1, false)`,
+      [victimOperatorAuthId],
+    );
+
+    await assert.rejects(
+      async () => {
+        await opClient.query(
+          `SELECT flow.create_payment_rehearsal_authorization(
+             $1::uuid, $2, 'forged-token-12345678901234567890123456789012',
+             'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $3, $4, 1800
+           )`,
+          [
+            paymentReq.id,
+            victimOperatorAuthId,
+            verifiedRecipient,
+            verifiedPayerRefund,
+          ],
+        );
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        assert.match(err.message, /OPERATOR_ASSERTION_INVALID/);
+        return true;
+      },
+      "Setting session variable and parameter to victim ID must be rejected with OPERATOR_ASSERTION_INVALID",
+    );
+
+    // (b) Attacker cannot issue an approval assertion for victim without victim's authentic session credentials
+    await assert.rejects(
+      async () => {
+        await opClient.query(
+          `SELECT flow.issue_operator_approval_assertion(
+             $1, 'forged-session-token-attempt', $2::uuid,
+             'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $3, $4, 1800,
+             '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+           )`,
+          [
+            victimOperatorAuthId,
+            paymentReq.id,
+            verifiedRecipient,
+            verifiedPayerRefund,
+          ],
+        );
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        assert.match(err.message, /OPERATOR_CREDENTIALS_INVALID/);
+        return true;
+      },
+      "Issuing approval assertion with invalid session credentials must be rejected with OPERATOR_CREDENTIALS_INVALID",
+    );
+
+    // (c) Unenrolled operator identity fails with OPERATOR_NOT_AUTHORIZED
     const unenrolledUserRows = await app.db.query(
       `SELECT id FROM flow.auth_users WHERE email = $1`,
       [merchant.email],
     );
     const unenrolledAuthId = unenrolledUserRows.rows[0].id;
-    await opClient.query(
-      `SELECT set_config('flow.operator_auth_id', $1, false)`,
-      [unenrolledAuthId],
-    );
     await assert.rejects(
       async () => {
         await opClient.query(
-          `SELECT flow.create_payment_rehearsal_authorization(
-             $1::uuid, $2, 'solana-mainnet', 'solana-mainnet:SOL',
-             'base-mainnet', 'base-mainnet:USDC', 5000000, $3, $4, 1800
+          `SELECT flow.issue_operator_approval_assertion(
+             $1, 'any-token', $2::uuid,
+             'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $3, $4, 1800,
+             '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
            )`,
           [
-            paymentReq.id,
             unenrolledAuthId,
+            paymentReq.id,
             verifiedRecipient,
             verifiedPayerRefund,
           ],
@@ -3230,69 +3393,64 @@ test("security: scoped single-use rehearsal authorization lifecycle, privilege s
         assert.match(err.message, /OPERATOR_NOT_AUTHORIZED/);
         return true;
       },
-      "Unenrolled operator in session context must be rejected with OPERATOR_NOT_AUTHORIZED",
+      "Unenrolled operator must be rejected with OPERATOR_NOT_AUTHORIZED",
     );
 
-    // Reset session context to authentic enrolled operator on opClient
+    // Reset session context on opClient
     await opClient.query(
       `SELECT set_config('flow.operator_auth_id', $1, false)`,
       [operatorAuthId],
     );
 
-    // 7. Blocker 1: Illustrative and probe addresses rejected
+    // 7. Blocker 1: Illustrative and probe addresses rejected in assertion issuance and authorization
     // (a) vitalik.eth 0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 is rejected
     await assert.rejects(
       async () => {
         await opClient.query(
-          `SELECT flow.create_payment_rehearsal_authorization(
-             $1::uuid, $2, 'solana-mainnet', 'solana-mainnet:SOL',
+          `SELECT flow.issue_operator_approval_assertion(
+             $1, $2, $3::uuid, 'solana-mainnet', 'solana-mainnet:SOL',
              'base-mainnet', 'base-mainnet:USDC', 5000000,
-             '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', $3, 1800
+             '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045', $4, 1800,
+             '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
            )`,
-          [paymentReq.id, operatorAuthId, verifiedPayerRefund],
+          [
+            operatorAuthId,
+            operatorSessionToken,
+            paymentReq.id,
+            verifiedPayerRefund,
+          ],
         );
       },
       (err) => {
-        assert.match(err.message, /ILLUSTRATIVE_RECIPIENT_ADDRESS_PROHIBITED/);
+        assert.match(err.message, /PROHIBITED_RECIPIENT_ADDRESS/);
         return true;
       },
-      "vitalik.eth illustrative address must be rejected by create_payment_rehearsal_authorization",
+      "vitalik.eth illustrative address must be rejected by issue_operator_approval_assertion",
     );
 
     // (b) Probe address is rejected
     await assert.rejects(
       async () => {
         await opClient.query(
-          `SELECT flow.create_payment_rehearsal_authorization(
-             $1::uuid, $2, 'solana-mainnet', 'solana-mainnet:SOL',
+          `SELECT flow.issue_operator_approval_assertion(
+             $1, $2, $3::uuid, 'solana-mainnet', 'solana-mainnet:SOL',
              'base-mainnet', 'base-mainnet:USDC', 5000000,
-             '0x1111111111111111111111111111111111111111', $3, 1800
+             '0x1111111111111111111111111111111111111111', $4, 1800,
+             '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
            )`,
-          [paymentReq.id, operatorAuthId, verifiedPayerRefund],
+          [
+            operatorAuthId,
+            operatorSessionToken,
+            paymentReq.id,
+            verifiedPayerRefund,
+          ],
         );
       },
       (err) => {
-        assert.match(err.message, /ILLUSTRATIVE_RECIPIENT_ADDRESS_PROHIBITED/);
+        assert.match(err.message, /PROHIBITED_RECIPIENT_ADDRESS/);
         return true;
       },
-    );
-
-    // (c) Unregistered recipient address is rejected
-    await assert.rejects(
-      async () => {
-        await opClient.query(
-          `SELECT flow.create_payment_rehearsal_authorization(
-             $1::uuid, $2, 'solana-mainnet', 'solana-mainnet:SOL',
-             'base-mainnet', 'base-mainnet:USDC', 5000000,
-             '0x5555555555555555555555555555555555555555', $3, 1800
-           )`,
-          [paymentReq.id, operatorAuthId, verifiedPayerRefund],
-        );
-      },
-      (err) => {
-        assert.match(err.message, /RECIPIENT_WALLET_NOT_REGISTERED/);
-        return true;
-      },
+      "probe address must be rejected by issue_operator_approval_assertion",
     );
 
     // 8. Adversarial Check: Commit without active authorization fails closed with 403
@@ -3306,29 +3464,190 @@ test("security: scoped single-use rehearsal authorization lifecycle, privilege s
     const unauthErr = await unauthCommitRes.json();
     assert.match(unauthErr.error, /PAYMENT_EXECUTION_DISABLED/);
 
-    // 9. Legitimate Authorization Creation by authenticated operator session
+    // 9. Legitimate Approval Assertion Issuance & Provenance Verification
+    const assertionBearerToken = randomBytes(32).toString("hex");
+    const assertionTokenHash = createHash("sha256")
+      .update(assertionBearerToken)
+      .digest("hex");
+    const assertionNonce = randomUUID();
+
+    const assertionRes = await opClient.query(
+      `SELECT flow.issue_operator_approval_assertion(
+         $1, $2, $3::uuid, 'solana-mainnet', 'solana-mainnet:SOL',
+         'base-mainnet', 'base-mainnet:USDC', 5000000, $4, $5, 1800,
+         $6, 'sig-valid', $7
+       ) AS id`,
+      [
+        operatorAuthId,
+        operatorSessionToken,
+        paymentReq.id,
+        verifiedRecipient,
+        verifiedPayerRefund,
+        assertionTokenHash,
+        assertionNonce,
+      ],
+    );
+    const assertionId = assertionRes.rows[0].id;
+    assert.ok(assertionId);
+
+    // Verify assertion record in database (audit provenance)
+    const assertionAuditRows = await opClient.query(
+      `SELECT operator_auth_id, payment_request_id, consumed_at, expires_at
+       FROM flow.operator_approval_assertions
+       WHERE id = $1`,
+      [assertionId],
+    );
+    assert.equal(assertionAuditRows.rows[0].operator_auth_id, operatorAuthId);
+    assert.equal(assertionAuditRows.rows[0].payment_request_id, paymentReq.id);
+    assert.equal(assertionAuditRows.rows[0].consumed_at, null);
+
+    // (a) Scope mismatch rejection: Attempt to create authorization exceeding approved amount
+    await assert.rejects(
+      async () => {
+        await opClient.query(
+          `SELECT flow.create_payment_rehearsal_authorization(
+             $1::uuid, $2, $3,
+             'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 10000000, $4, $5, 1800
+           )`,
+          [
+            paymentReq.id,
+            operatorAuthId,
+            assertionBearerToken,
+            verifiedRecipient,
+            verifiedPayerRefund,
+          ],
+        );
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        assert.match(err.message, /OPERATOR_ASSERTION_SCOPE_MISMATCH/);
+        return true;
+      },
+      "Exceeding approved assertion amount must fail with OPERATOR_ASSERTION_SCOPE_MISMATCH",
+    );
+
+    // (b) Operator identity mismatch rejection: Using assertion with wrong operator ID
+    await assert.rejects(
+      async () => {
+        await opClient.query(
+          `SELECT flow.create_payment_rehearsal_authorization(
+             $1::uuid, $2, $3,
+             'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $4, $5, 1800
+           )`,
+          [
+            paymentReq.id,
+            victimOperatorAuthId,
+            assertionBearerToken,
+            verifiedRecipient,
+            verifiedPayerRefund,
+          ],
+        );
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        assert.match(err.message, /OPERATOR_ASSERTION_IDENTITY_MISMATCH/);
+        return true;
+      },
+      "Mismatch between assertion operator and caller operator must fail with OPERATOR_ASSERTION_IDENTITY_MISMATCH",
+    );
+
+    // (c) Legitimate Authorization Creation using verified cryptographic assertion token
     const validAuthRes = await opClient.query(
       `SELECT flow.create_payment_rehearsal_authorization(
-         $1::uuid, $2, 'solana-mainnet', 'solana-mainnet:SOL',
-         'base-mainnet', 'base-mainnet:USDC', 5000000, $3, $4, 1800
+         $1::uuid, $2, $3,
+         'solana-mainnet', 'solana-mainnet:SOL',
+         'base-mainnet', 'base-mainnet:USDC', 5000000, $4, $5, 1800
        ) AS id`,
-      [paymentReq.id, operatorAuthId, verifiedRecipient, verifiedPayerRefund],
+      [
+        paymentReq.id,
+        operatorAuthId,
+        assertionBearerToken,
+        verifiedRecipient,
+        verifiedPayerRefund,
+      ],
     );
     const validAuthId = validAuthRes.rows[0].id;
     assert.ok(validAuthId);
+
+    // Audit Provenance: Verify authorization links back to assertion and assertion is consumed
+    const authRecord = await opClient.query(
+      `SELECT assertion_id, operator_auth_id FROM flow.payment_rehearsal_authorizations WHERE id = $1`,
+      [validAuthId],
+    );
+    assert.equal(authRecord.rows[0].assertion_id, assertionId);
+    assert.equal(authRecord.rows[0].operator_auth_id, operatorAuthId);
+
+    const consumedAssertion = await opClient.query(
+      `SELECT consumed_at, consumed_by_authorization_id FROM flow.operator_approval_assertions WHERE id = $1`,
+      [assertionId],
+    );
+    assert.ok(consumedAssertion.rows[0].consumed_at !== null);
+    assert.equal(
+      consumedAssertion.rows[0].consumed_by_authorization_id,
+      validAuthId,
+    );
+
+    // (d) Single-Use Replay Prevention: Attempt to reuse already-consumed assertion token fails
+    await assert.rejects(
+      async () => {
+        await opClient.query(
+          `SELECT flow.create_payment_rehearsal_authorization(
+             $1::uuid, $2, $3,
+             'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $4, $5, 1800
+           )`,
+          [
+            paymentReq.id,
+            operatorAuthId,
+            assertionBearerToken,
+            verifiedRecipient,
+            verifiedPayerRefund,
+          ],
+        );
+      },
+      (err) => {
+        assert.equal(err.code, "42501");
+        assert.match(err.message, /OPERATOR_ASSERTION_INVALID/);
+        return true;
+      },
+      "Replaying consumed assertion token must fail with OPERATOR_ASSERTION_INVALID",
+    );
 
     // 10. Anti-tampering & Immutability checks on active authorization:
     // (a) Duplicate authorization creation for same payment request must fail
     await assert.rejects(
       async () => {
+        // Issue fresh assertion to attempt duplicate authorization
+        const freshBearerToken = randomBytes(32).toString("hex");
+        const freshHash = createHash("sha256")
+          .update(freshBearerToken)
+          .digest("hex");
+        await opClient.query(
+          `SELECT flow.issue_operator_approval_assertion(
+             $1, $2, $3::uuid, 'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $4, $5, 1800,
+             $6
+           )`,
+          [
+            operatorAuthId,
+            operatorSessionToken,
+            paymentReq.id,
+            verifiedRecipient,
+            verifiedPayerRefund,
+            freshHash,
+          ],
+        );
         await opClient.query(
           `SELECT flow.create_payment_rehearsal_authorization(
-             $1::uuid, $2, 'solana-mainnet', 'solana-mainnet:SOL',
-             'base-mainnet', 'base-mainnet:USDC', 5000000, $3, $4, 1800
+             $1::uuid, $2, $3, 'solana-mainnet', 'solana-mainnet:SOL',
+             'base-mainnet', 'base-mainnet:USDC', 5000000, $4, $5, 1800
            ) AS id`,
           [
             paymentReq.id,
             operatorAuthId,
+            freshBearerToken,
             verifiedRecipient,
             verifiedPayerRefund,
           ],

@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { formatAtomicToDisplay } from "../src/domain/atomic-amounts.ts";
 import {
@@ -10,6 +11,7 @@ import { generatePublicPaymentId } from "../src/domain/payment-requests.ts";
 import { isBannedIllustrativeAddress } from "../src/domain/quote-discovery.ts";
 import { getPrismaClient } from "../src/foundation/prisma.ts";
 import { callJsonRpc } from "../src/server/assets/connectors/rpc-client.ts";
+import { authorizePaymentRehearsalWithCredentials } from "../src/server/custody/operator-assertion-service.ts";
 
 const BASE_USDC_CONTRACT = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 
@@ -21,6 +23,8 @@ export interface PrepareRehearsalOptions {
   readonly maxUsdc?: string;
   readonly durationSeconds?: number;
   readonly operatorAuthId?: string;
+  readonly operatorSessionToken?: string;
+  readonly operatorSessionTokenFile?: string;
 }
 
 export async function prepareMainnetRehearsal(
@@ -302,35 +306,61 @@ export async function prepareMainnetRehearsal(
       );
     }
 
-    // Issue Scoped Rehearsal Authorization strictly via operatorDb within a dedicated transaction
-    const authorizationId = await operatorDb.$transaction(async (tx) => {
-      // Bind authenticated operator identity to database session context for this transaction
-      await tx.$executeRaw`
-        SELECT set_config('flow.operator_auth_id', ${operatorAuthId}, true)
-      `;
+    // Read session token from options, file, or environment
+    let operatorSessionToken =
+      options.operatorSessionToken ||
+      process.env.FLOW_CUSTODY_OPERATOR_SESSION_TOKEN;
+    const sessionTokenFile =
+      options.operatorSessionTokenFile ||
+      process.env.FLOW_CUSTODY_OPERATOR_SESSION_FILE;
 
-      const authRows = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT flow.create_payment_rehearsal_authorization(
-          ${paymentReq.id}::uuid,
-          ${operatorAuthId},
-          'solana-mainnet',
-          'solana-mainnet:SOL',
-          'base-mainnet',
-          'base-mainnet:USDC',
-          ${maxAtomic.toString()}::numeric,
-          ${checksummedRecipient},
-          ${payerRefund},
-          ${durationSeconds}
-        ) AS id
-      `;
+    if (
+      !operatorSessionToken &&
+      sessionTokenFile &&
+      existsSync(sessionTokenFile)
+    ) {
+      operatorSessionToken = readFileSync(sessionTokenFile, "utf8").trim();
+    }
 
-      return authRows[0]?.id;
-    });
+    if (!operatorSessionToken) {
+      // In local operator context, look up active session for operator
+      const sessionRows = await operatorDb.$queryRaw<Array<{ token: string }>>`
+        SELECT token FROM flow.auth_sessions
+        WHERE user_id = ${operatorAuthId}
+          AND expires_at > CURRENT_TIMESTAMP
+        ORDER BY expires_at DESC
+        LIMIT 1
+      `;
+      operatorSessionToken = sessionRows[0]?.token;
+    }
+
+    if (!operatorSessionToken) {
+      throw new Error(
+        "OPERATOR_CREDENTIALS_REQUIRED: Valid operator session token must be provided via --session-token, FLOW_CUSTODY_OPERATOR_SESSION_TOKEN, or --session-token-file.",
+      );
+    }
+
+    const { authorizationId, assertionId } =
+      await authorizePaymentRehearsalWithCredentials(operatorDb, {
+        operatorAuthId,
+        operatorSessionToken,
+        paymentRequestId: paymentReq.id,
+        sourceNetwork: "solana-mainnet",
+        sourceAssetId: "solana-mainnet:SOL",
+        destinationNetwork: "base-mainnet",
+        destinationAssetId: "base-mainnet:USDC",
+        maxAtomicAmount: maxAtomic,
+        allowedRecipientAddress: checksummedRecipient,
+        allowedPayerRefundAddress: payerRefund,
+        durationSeconds,
+      });
+
+    console.log(`  - Issued Cryptographic Approval Assertion: ${assertionId}`);
     console.log(
-      `  - Issued Scoped Rehearsal Authorization: ${authorizationId}`,
+      `  - Issued Scoped Rehearsal Authorization:   ${authorizationId}`,
     );
     console.log(
-      "  [PASS] Single-use execution authorization securely persisted via operator privilege.\n",
+      "  [PASS] Single-use execution authorization securely persisted via verified operator cryptographic assertion.\n",
     );
 
     console.log(
@@ -376,6 +406,8 @@ if (process.argv[1]?.endsWith("prepare-mainnet-rehearsal.ts")) {
       "max-usdc": { type: "string" },
       "duration-seconds": { type: "string" },
       "operator-auth-id": { type: "string" },
+      "session-token": { type: "string" },
+      "session-token-file": { type: "string" },
     },
     strict: false,
   });
@@ -406,6 +438,14 @@ if (process.argv[1]?.endsWith("prepare-mainnet-rehearsal.ts")) {
     operatorAuthId:
       typeof values["operator-auth-id"] === "string"
         ? values["operator-auth-id"]
+        : undefined,
+    operatorSessionToken:
+      typeof values["session-token"] === "string"
+        ? values["session-token"]
+        : undefined,
+    operatorSessionTokenFile:
+      typeof values["session-token-file"] === "string"
+        ? values["session-token-file"]
         : undefined,
   }).catch((err) => {
     console.error("Preparation failed:", err);
