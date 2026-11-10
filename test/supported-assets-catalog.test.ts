@@ -1,49 +1,124 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  APPROVED_ASSET_SYMBOLS,
+  APPROVED_MAINNET_NETWORKS,
   CURATED_SUPPORTED_DEPLOYMENTS,
   ECOSYSTEM_METADATA,
+  getCanonicalDeploymentsForAsset,
   getEcosystemForNetworkKey,
+  getSupportedNetworksForAsset,
+  isAssetSupportedOnNetwork,
   validateEcosystemAddress,
 } from "../src/domain/supported-assets-catalog.ts";
 
-describe("supported-assets-catalog — multi-chain registry & address validation", () => {
-  it("covers all three primary ecosystems: Ethereum/Base (EVM), Solana, and NEAR", () => {
-    const families = new Set(ECOSYSTEM_METADATA.map((e) => e.family));
-    assert.deepEqual([...families].sort(), ["evm", "near", "solana"]);
+describe("supported-assets-catalog — five-asset canonical registry & address validation", () => {
+  it("covers strictly the five approved assets and four approved mainnet networks", () => {
+    assert.deepEqual([...APPROVED_ASSET_SYMBOLS].sort(), [
+      "ETH",
+      "NEAR",
+      "SOL",
+      "USDC",
+      "USDT",
+    ]);
 
-    const evmSymbols = new Set(
-      CURATED_SUPPORTED_DEPLOYMENTS.filter((d) => d.ecosystem === "evm").map(
-        (d) => d.symbol,
-      ),
-    );
-    for (const sym of ["ETH", "USDC", "USDT", "cbETH", "WETH"]) {
-      assert.ok(evmSymbols.has(sym), `Expected EVM catalog to include ${sym}`);
-    }
+    assert.deepEqual([...APPROVED_MAINNET_NETWORKS].sort(), [
+      "base-mainnet",
+      "ethereum-mainnet",
+      "near-mainnet",
+      "solana-mainnet",
+    ]);
 
-    const solSymbols = new Set(
-      CURATED_SUPPORTED_DEPLOYMENTS.filter((d) => d.ecosystem === "solana").map(
-        (d) => d.symbol,
-      ),
+    const mainnetDeployments = CURATED_SUPPORTED_DEPLOYMENTS.filter(
+      (d) => d.environment === "mainnet",
     );
-    for (const sym of ["SOL", "USDC", "USDT", "mSOL", "JUP", "PYTH"]) {
+    // Exactly 11 genuine canonical mainnet deployments
+    assert.equal(mainnetDeployments.length, 11);
+
+    const allCuratedSymbols = new Set(
+      CURATED_SUPPORTED_DEPLOYMENTS.map((d) => d.symbol),
+    );
+    // Disallowed / non-canonical tokens must NOT be present
+    for (const forbidden of [
+      "cbETH",
+      "WETH",
+      "mSOL",
+      "JUP",
+      "PYTH",
+      "wNEAR",
+      "USDC.e",
+    ]) {
       assert.ok(
-        solSymbols.has(sym),
-        `Expected Solana catalog to include ${sym}`,
+        !allCuratedSymbols.has(forbidden),
+        `Prohibited token ${forbidden} found in catalog`,
       );
     }
+  });
 
-    const nearSymbols = new Set(
-      CURATED_SUPPORTED_DEPLOYMENTS.filter((d) => d.ecosystem === "near").map(
-        (d) => d.symbol,
-      ),
+  it("verifies genuine mainnet deployments per network matching the approved matrix", () => {
+    const mainnet = CURATED_SUPPORTED_DEPLOYMENTS.filter(
+      (d) => d.environment === "mainnet",
     );
-    for (const sym of ["NEAR", "USDC", "USDT", "wNEAR"]) {
-      assert.ok(
-        nearSymbols.has(sym),
-        `Expected NEAR catalog to include ${sym}`,
-      );
-    }
+
+    // Ethereum Mainnet: ETH, USDC, USDT
+    const ethMainnetSymbols = mainnet
+      .filter((d) => d.networkKey === "ethereum-mainnet")
+      .map((d) => d.symbol)
+      .sort();
+    assert.deepEqual(ethMainnetSymbols, ["ETH", "USDC", "USDT"]);
+
+    // Base Mainnet: ETH, USDC (USDT is NOT deployed on Base)
+    const baseMainnetSymbols = mainnet
+      .filter((d) => d.networkKey === "base-mainnet")
+      .map((d) => d.symbol)
+      .sort();
+    assert.deepEqual(baseMainnetSymbols, ["ETH", "USDC"]);
+
+    // Solana Mainnet: SOL, USDC, USDT
+    const solMainnetSymbols = mainnet
+      .filter((d) => d.networkKey === "solana-mainnet")
+      .map((d) => d.symbol)
+      .sort();
+    assert.deepEqual(solMainnetSymbols, ["SOL", "USDC", "USDT"]);
+
+    // NEAR Mainnet: NEAR, USDC, USDT
+    const nearMainnetSymbols = mainnet
+      .filter((d) => d.networkKey === "near-mainnet")
+      .map((d) => d.symbol)
+      .sort();
+    assert.deepEqual(nearMainnetSymbols, ["NEAR", "USDC", "USDT"]);
+  });
+
+  it("enforces isAssetSupportedOnNetwork rules correctly across genuine and unsupported combinations", () => {
+    // USDT supported on Ethereum, Solana, NEAR — rejected on Base
+    assert.equal(isAssetSupportedOnNetwork("USDT", "ethereum-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("USDT", "solana-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("USDT", "near-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("USDT", "base-mainnet"), false);
+
+    // ETH supported on Ethereum and Base — rejected on Solana and NEAR
+    assert.equal(isAssetSupportedOnNetwork("ETH", "ethereum-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("ETH", "base-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("ETH", "solana-mainnet"), false);
+    assert.equal(isAssetSupportedOnNetwork("ETH", "near-mainnet"), false);
+
+    // SOL supported only on Solana
+    assert.equal(isAssetSupportedOnNetwork("SOL", "solana-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("SOL", "ethereum-mainnet"), false);
+    assert.equal(isAssetSupportedOnNetwork("SOL", "base-mainnet"), false);
+    assert.equal(isAssetSupportedOnNetwork("SOL", "near-mainnet"), false);
+
+    // NEAR supported only on NEAR
+    assert.equal(isAssetSupportedOnNetwork("NEAR", "near-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("NEAR", "ethereum-mainnet"), false);
+    assert.equal(isAssetSupportedOnNetwork("NEAR", "base-mainnet"), false);
+    assert.equal(isAssetSupportedOnNetwork("NEAR", "solana-mainnet"), false);
+
+    // USDC supported across all four networks
+    assert.equal(isAssetSupportedOnNetwork("USDC", "ethereum-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("USDC", "base-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("USDC", "solana-mainnet"), true);
+    assert.equal(isAssetSupportedOnNetwork("USDC", "near-mainnet"), true);
   });
 
   it("identifies every deployment uniquely by network, standard, and contract/mint identifier", () => {

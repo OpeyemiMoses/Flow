@@ -61,11 +61,20 @@ async function main() {
   const db = getPrismaClient("worker");
 
   try {
-    const config = getDefaultRpcConfig("testnet");
-    console.log("Configured Endpoints:");
-    console.log(`- NEAR Testnet:   ${config.near?.primary}`);
-    console.log(`- Base Sepolia:   ${config.base?.primary}`);
-    console.log(`- Solana Devnet:  ${config.solana?.primary}\n`);
+    const wallets = await db.$queryRaw<
+      Array<{ id: string; environment: string }>
+    >`
+      SELECT id, environment FROM flow.wallets WHERE id = ${walletId}::uuid
+    `;
+    const env = (wallets[0]?.environment as "testnet" | "mainnet") || "mainnet";
+    const config = getDefaultRpcConfig(env);
+    console.log(`Configured Endpoints (${env}):`);
+    if (config.ethereum) {
+      console.log(`- Ethereum:       ${config.ethereum.primary}`);
+    }
+    console.log(`- NEAR:           ${config.near?.primary}`);
+    console.log(`- Base:           ${config.base?.primary}`);
+    console.log(`- Solana:         ${config.solana?.primary}\n`);
 
     console.log("Dispatching real read-only blockchain queries...\n");
     const result = await reconcileWalletBalances(db, walletId, config);
@@ -73,7 +82,7 @@ async function main() {
     console.log(
       "--------------------------------------------------------------------------------",
     );
-    console.log(" OBSERVED ON-CHAIN BALANCES (TESTNET)");
+    console.log(` OBSERVED ON-CHAIN BALANCES (${env.toUpperCase()})`);
     console.log(
       "--------------------------------------------------------------------------------",
     );

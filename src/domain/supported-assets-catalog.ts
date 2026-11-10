@@ -57,7 +57,9 @@ export const CURATED_SUPPORTED_DEPLOYMENTS: readonly [
   CatalogTokenDeployment,
   ...CatalogTokenDeployment[],
 ] = [
-  // Ethereum Mainnet (EVM)
+  // --------------------------------------------------------------------------
+  // Ethereum Mainnet (Chain ID 1, EVM) — 3 Approved Assets
+  // --------------------------------------------------------------------------
   {
     id: "ethereum-mainnet:ETH",
     assetKey: "eth",
@@ -72,7 +74,7 @@ export const CURATED_SUPPORTED_DEPLOYMENTS: readonly [
     standard: "NATIVE",
     contractIdentifier: "native",
     decimals: 18,
-    isDbSeeded: false,
+    isDbSeeded: true,
   },
   {
     id: "ethereum-mainnet:USDC",
@@ -88,7 +90,7 @@ export const CURATED_SUPPORTED_DEPLOYMENTS: readonly [
     standard: "ERC20",
     contractIdentifier: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
     decimals: 6,
-    isDbSeeded: false,
+    isDbSeeded: true,
   },
   {
     id: "ethereum-mainnet:USDT",
@@ -104,25 +106,13 @@ export const CURATED_SUPPORTED_DEPLOYMENTS: readonly [
     standard: "ERC20",
     contractIdentifier: "0xdac17f958d2ee523a2206206994597c13d831ec7",
     decimals: 6,
-    isDbSeeded: false,
+    isDbSeeded: true,
   },
-  {
-    id: "ethereum-mainnet:cbETH",
-    assetKey: "cbeth",
-    symbol: "cbETH",
-    name: "Coinbase Wrapped Staked ETH",
-    kind: "FUNGIBLE_TOKEN",
-    ecosystem: "evm",
-    ecosystemLabel: "Ethereum / Base (EVM)",
-    networkKey: "ethereum-mainnet",
-    networkName: "Ethereum Mainnet",
-    environment: "mainnet",
-    standard: "ERC20",
-    contractIdentifier: "0xbe9895146f7af43049ca1c1ae358b0541ea49704",
-    decimals: 18,
-    isDbSeeded: false,
-  },
-  // Base Mainnet & Base Sepolia (EVM)
+
+  // --------------------------------------------------------------------------
+  // Base Mainnet (Chain ID 8453, EVM) — 2 Approved Assets (ETH, USDC)
+  // Note: USDT has no native Tether deployment on Base; wrapped tokens prohibited.
+  // --------------------------------------------------------------------------
   {
     id: "base-mainnet:ETH",
     assetKey: "eth",
@@ -155,72 +145,10 @@ export const CURATED_SUPPORTED_DEPLOYMENTS: readonly [
     decimals: 6,
     isDbSeeded: true,
   },
-  {
-    id: "base-mainnet:cbETH",
-    assetKey: "cbeth",
-    symbol: "cbETH",
-    name: "Coinbase Wrapped Staked ETH",
-    kind: "FUNGIBLE_TOKEN",
-    ecosystem: "evm",
-    ecosystemLabel: "Ethereum / Base (EVM)",
-    networkKey: "base-mainnet",
-    networkName: "Base",
-    environment: "mainnet",
-    standard: "ERC20",
-    contractIdentifier: "0x2ae3f1ec7f1f5012cfeab0185bfc7aa3cf0dec22",
-    decimals: 18,
-    isDbSeeded: false,
-  },
-  {
-    id: "base-mainnet:WETH",
-    assetKey: "weth",
-    symbol: "WETH",
-    name: "Wrapped Ether",
-    kind: "FUNGIBLE_TOKEN",
-    ecosystem: "evm",
-    ecosystemLabel: "Ethereum / Base (EVM)",
-    networkKey: "base-mainnet",
-    networkName: "Base",
-    environment: "mainnet",
-    standard: "ERC20",
-    contractIdentifier: "0x4200000000000000000000000000000000000006",
-    decimals: 18,
-    isDbSeeded: false,
-  },
-  {
-    id: "base-sepolia:ETH",
-    assetKey: "eth",
-    symbol: "ETH",
-    name: "Ether (Base Sepolia)",
-    kind: "NATIVE",
-    ecosystem: "evm",
-    ecosystemLabel: "Ethereum / Base (EVM)",
-    networkKey: "base-sepolia",
-    networkName: "Base Sepolia",
-    environment: "testnet",
-    standard: "NATIVE",
-    contractIdentifier: "native",
-    decimals: 18,
-    isDbSeeded: true,
-  },
-  {
-    id: "base-sepolia:USDC",
-    assetKey: "usdc",
-    symbol: "USDC",
-    name: "USD Coin (Base Sepolia)",
-    kind: "STABLECOIN",
-    ecosystem: "evm",
-    ecosystemLabel: "Ethereum / Base (EVM)",
-    networkKey: "base-sepolia",
-    networkName: "Base Sepolia",
-    environment: "testnet",
-    standard: "ERC20",
-    contractIdentifier: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
-    decimals: 6,
-    isDbSeeded: true,
-  },
 
-  // Solana Mainnet & Devnet
+  // --------------------------------------------------------------------------
+  // Solana Mainnet (solana-mainnet) — 3 Approved Assets (SOL, USDC, USDT)
+  // --------------------------------------------------------------------------
   {
     id: "solana-mainnet:SOL",
     assetKey: "sol",
@@ -267,90 +195,12 @@ export const CURATED_SUPPORTED_DEPLOYMENTS: readonly [
     standard: "SPL",
     contractIdentifier: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
     decimals: 6,
-    isDbSeeded: false,
-  },
-  {
-    id: "solana-mainnet:mSOL",
-    assetKey: "msol",
-    symbol: "mSOL",
-    name: "Marinade Staked SOL",
-    kind: "FUNGIBLE_TOKEN",
-    ecosystem: "solana",
-    ecosystemLabel: "Solana",
-    networkKey: "solana-mainnet",
-    networkName: "Solana",
-    environment: "mainnet",
-    standard: "SPL",
-    contractIdentifier: "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",
-    decimals: 9,
-    isDbSeeded: false,
-  },
-  {
-    id: "solana-mainnet:JUP",
-    assetKey: "jup",
-    symbol: "JUP",
-    name: "Jupiter",
-    kind: "FUNGIBLE_TOKEN",
-    ecosystem: "solana",
-    ecosystemLabel: "Solana",
-    networkKey: "solana-mainnet",
-    networkName: "Solana",
-    environment: "mainnet",
-    standard: "SPL",
-    contractIdentifier: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
-    decimals: 6,
-    isDbSeeded: false,
-  },
-  {
-    id: "solana-mainnet:PYTH",
-    assetKey: "pyth",
-    symbol: "PYTH",
-    name: "Pyth Network",
-    kind: "FUNGIBLE_TOKEN",
-    ecosystem: "solana",
-    ecosystemLabel: "Solana",
-    networkKey: "solana-mainnet",
-    networkName: "Solana",
-    environment: "mainnet",
-    standard: "SPL",
-    contractIdentifier: "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",
-    decimals: 6,
-    isDbSeeded: false,
-  },
-  {
-    id: "solana-devnet:SOL",
-    assetKey: "sol",
-    symbol: "SOL",
-    name: "Solana (Devnet)",
-    kind: "NATIVE",
-    ecosystem: "solana",
-    ecosystemLabel: "Solana",
-    networkKey: "solana-devnet",
-    networkName: "Solana Devnet",
-    environment: "testnet",
-    standard: "NATIVE",
-    contractIdentifier: "native",
-    decimals: 9,
-    isDbSeeded: true,
-  },
-  {
-    id: "solana-devnet:USDC",
-    assetKey: "usdc",
-    symbol: "USDC",
-    name: "USD Coin (Solana Devnet)",
-    kind: "STABLECOIN",
-    ecosystem: "solana",
-    ecosystemLabel: "Solana",
-    networkKey: "solana-devnet",
-    networkName: "Solana Devnet",
-    environment: "testnet",
-    standard: "SPL",
-    contractIdentifier: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
-    decimals: 6,
     isDbSeeded: true,
   },
 
-  // NEAR Mainnet & Testnet
+  // --------------------------------------------------------------------------
+  // NEAR Mainnet (near-mainnet) — 3 Approved Assets (NEAR, USDC, USDT)
+  // --------------------------------------------------------------------------
   {
     id: "near-mainnet:NEAR",
     assetKey: "near",
@@ -398,23 +248,75 @@ export const CURATED_SUPPORTED_DEPLOYMENTS: readonly [
     standard: "NEP141",
     contractIdentifier: "usdt.tether-token.near",
     decimals: 6,
-    isDbSeeded: false,
+    isDbSeeded: true,
+  },
+
+  // --------------------------------------------------------------------------
+  // Testnet Deployments (Retained for automated test suites)
+  // --------------------------------------------------------------------------
+  {
+    id: "base-sepolia:ETH",
+    assetKey: "eth",
+    symbol: "ETH",
+    name: "Ether (Base Sepolia)",
+    kind: "NATIVE",
+    ecosystem: "evm",
+    ecosystemLabel: "Ethereum / Base (EVM)",
+    networkKey: "base-sepolia",
+    networkName: "Base Sepolia",
+    environment: "testnet",
+    standard: "NATIVE",
+    contractIdentifier: "native",
+    decimals: 18,
+    isDbSeeded: true,
   },
   {
-    id: "near-mainnet:wNEAR",
-    assetKey: "wnear",
-    symbol: "wNEAR",
-    name: "Wrapped NEAR",
-    kind: "FUNGIBLE_TOKEN",
-    ecosystem: "near",
-    ecosystemLabel: "NEAR Protocol",
-    networkKey: "near-mainnet",
-    networkName: "NEAR Mainnet",
-    environment: "mainnet",
-    standard: "NEP141",
-    contractIdentifier: "wrap.near",
-    decimals: 24,
-    isDbSeeded: false,
+    id: "base-sepolia:USDC",
+    assetKey: "usdc",
+    symbol: "USDC",
+    name: "USD Coin (Base Sepolia)",
+    kind: "STABLECOIN",
+    ecosystem: "evm",
+    ecosystemLabel: "Ethereum / Base (EVM)",
+    networkKey: "base-sepolia",
+    networkName: "Base Sepolia",
+    environment: "testnet",
+    standard: "ERC20",
+    contractIdentifier: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+    decimals: 6,
+    isDbSeeded: true,
+  },
+  {
+    id: "solana-devnet:SOL",
+    assetKey: "sol",
+    symbol: "SOL",
+    name: "Solana (Devnet)",
+    kind: "NATIVE",
+    ecosystem: "solana",
+    ecosystemLabel: "Solana",
+    networkKey: "solana-devnet",
+    networkName: "Solana Devnet",
+    environment: "testnet",
+    standard: "NATIVE",
+    contractIdentifier: "native",
+    decimals: 9,
+    isDbSeeded: true,
+  },
+  {
+    id: "solana-devnet:USDC",
+    assetKey: "usdc",
+    symbol: "USDC",
+    name: "USD Coin (Solana Devnet)",
+    kind: "STABLECOIN",
+    ecosystem: "solana",
+    ecosystemLabel: "Solana",
+    networkKey: "solana-devnet",
+    networkName: "Solana Devnet",
+    environment: "testnet",
+    standard: "SPL",
+    contractIdentifier: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    decimals: 6,
+    isDbSeeded: true,
   },
   {
     id: "near-testnet:NEAR",
@@ -450,6 +352,83 @@ export const CURATED_SUPPORTED_DEPLOYMENTS: readonly [
     isDbSeeded: true,
   },
 ] as const;
+
+/**
+ * The 5 approved assets for the mainnet configuration.
+ */
+export const APPROVED_ASSET_SYMBOLS = [
+  "USDT",
+  "USDC",
+  "NEAR",
+  "SOL",
+  "ETH",
+] as const;
+export type ApprovedAssetSymbol = (typeof APPROVED_ASSET_SYMBOLS)[number];
+
+/**
+ * The 4 approved networks for the mainnet configuration.
+ */
+export const APPROVED_MAINNET_NETWORKS = [
+  "ethereum-mainnet",
+  "base-mainnet",
+  "solana-mainnet",
+  "near-mainnet",
+] as const;
+export type ApprovedMainnetNetwork = (typeof APPROVED_MAINNET_NETWORKS)[number];
+
+/**
+ * Returns canonical list of supported mainnet networks for a given asset symbol or asset key.
+ */
+export function getSupportedNetworksForAsset(
+  assetKeyOrSymbol: string,
+): readonly string[] {
+  const norm = assetKeyOrSymbol.trim().toUpperCase();
+  switch (norm) {
+    case "ETH":
+      return ["ethereum-mainnet", "base-mainnet", "base-sepolia"];
+    case "USDC":
+      return [
+        "ethereum-mainnet",
+        "base-mainnet",
+        "solana-mainnet",
+        "near-mainnet",
+        "base-sepolia",
+        "solana-devnet",
+        "near-testnet",
+      ];
+    case "USDT":
+      return ["ethereum-mainnet", "solana-mainnet", "near-mainnet"];
+    case "SOL":
+      return ["solana-mainnet", "solana-devnet"];
+    case "NEAR":
+      return ["near-mainnet", "near-testnet"];
+    default:
+      return [];
+  }
+}
+
+/**
+ * Validates whether an asset symbol is supported on the specified network.
+ */
+export function isAssetSupportedOnNetwork(
+  assetKeyOrSymbol: string,
+  networkKey: string,
+): boolean {
+  const supported = getSupportedNetworksForAsset(assetKeyOrSymbol);
+  return supported.includes(networkKey);
+}
+
+/**
+ * Returns all curated deployments for a given asset symbol.
+ */
+export function getCanonicalDeploymentsForAsset(
+  assetKeyOrSymbol: string,
+): CatalogTokenDeployment[] {
+  const norm = assetKeyOrSymbol.trim().toUpperCase();
+  return CURATED_SUPPORTED_DEPLOYMENTS.filter(
+    (d) => d.symbol.toUpperCase() === norm,
+  );
+}
 
 export function getEcosystemForNetworkKey(networkKey: string): EcosystemFamily {
   const lower = networkKey.toLowerCase();

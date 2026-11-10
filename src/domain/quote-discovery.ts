@@ -81,6 +81,7 @@ export const ONE_CLICK_ASSET_MAPPINGS: Readonly<Record<string, string>> = {
     "nep141:sol-c800a4bd850783ccb82c2b2c7e84175443606352.omft.near",
 
   // NEAR Mainnet
+  "near-mainnet:NEAR": "nep141:wrap.near",
   "near-mainnet:wNEAR": "nep141:wrap.near",
   "near-mainnet:USDC":
     "nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1",

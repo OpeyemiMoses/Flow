@@ -501,6 +501,8 @@ BEGIN
 END;
 $$;
 
+DROP FUNCTION IF EXISTS flow.consume_payment_rehearsal_authorization(UUID, UUID, TEXT, TEXT, TEXT, TEXT, NUMERIC, TEXT, TEXT);
+
 -- 8. Stored procedure: flow.consume_payment_rehearsal_authorization with probe address check
 CREATE OR REPLACE FUNCTION flow.consume_payment_rehearsal_authorization(
     p_payment_request_id UUID,
@@ -596,6 +598,81 @@ BEGIN
         v_row.operator_auth_id::TEXT,
         v_row.max_atomic_amount::NUMERIC,
         CURRENT_TIMESTAMP::TIMESTAMPTZ;
+END;
+$$;
+
+-- Stored procedure: flow.check_active_payment_rehearsal_authorization
+CREATE OR REPLACE FUNCTION flow.check_active_payment_rehearsal_authorization(
+    p_payment_request_public_id text
+)
+RETURNS TABLE (
+    res_auth_id UUID,
+    res_max_atomic_amount NUMERIC,
+    res_expires_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, flow
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        a.id::UUID,
+        a.max_atomic_amount::NUMERIC,
+        a.expires_at::TIMESTAMPTZ
+    FROM flow.payment_rehearsal_authorizations a
+    JOIN flow.payment_requests pr ON pr.id = a.payment_request_id
+    WHERE pr.public_id = p_payment_request_public_id
+      AND a.environment = 'mainnet'
+      AND a.consumed_at IS NULL
+      AND a.expires_at > CURRENT_TIMESTAMP
+    ORDER BY a.created_at DESC
+    LIMIT 1;
+END;
+$$;
+
+-- Stored procedure: flow.get_payment_attempt_commitment_details
+CREATE OR REPLACE FUNCTION flow.get_payment_attempt_commitment_details(
+    p_payment_request_public_id text,
+    p_attempt_public_id text
+)
+RETURNS TABLE (
+    payment_request_id UUID,
+    attempt_id UUID,
+    destination_asset_id TEXT,
+    payer_refund_address TEXT,
+    recipient_address TEXT,
+    recipient_network TEXT,
+    recipient_chain_id TEXT,
+    wallet_environment TEXT,
+    wallet_status TEXT,
+    can_receive BOOLEAN
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, flow
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        pr.id AS payment_request_id,
+        pa.id AS attempt_id,
+        pr.destination_asset_id::TEXT,
+        pa.payer_refund_address::TEXT,
+        wa.address::TEXT AS recipient_address,
+        wa.network::TEXT AS recipient_network,
+        wa.chain_id::TEXT AS recipient_chain_id,
+        w.environment::TEXT AS wallet_environment,
+        w.status::TEXT AS wallet_status,
+        COALESCE(wc.can_receive, false)::BOOLEAN AS can_receive
+    FROM flow.payment_attempts pa
+    JOIN flow.payment_requests pr ON pr.id = pa.payment_request_id
+    LEFT JOIN flow.wallets w ON w.account_id = pr.account_id
+    LEFT JOIN flow.wallet_addresses wa ON wa.wallet_id = w.id AND wa.network = pr.destination_network
+    LEFT JOIN flow.wallet_capabilities wc ON wc.wallet_id = w.id AND wc.network = wa.network
+    WHERE pa.attempt_public_id = p_attempt_public_id
+      AND pr.public_id = p_payment_request_public_id
+    LIMIT 1;
 END;
 $$;
 

@@ -21,6 +21,7 @@ export interface EndpointPair {
 }
 
 export interface MultiChainRpcConfig {
+  readonly ethereum?: EndpointPair;
   readonly near?: EndpointPair;
   readonly base?: EndpointPair;
   readonly solana?: EndpointPair;
@@ -49,6 +50,12 @@ export function getDefaultRpcConfig(
   }
 
   return {
+    ethereum: {
+      primary:
+        process.env.FLOW_ETHEREUM_RPC_URL ||
+        "https://ethereum-rpc.publicnode.com",
+      fallback: "https://cloudflare-eth.com",
+    },
     near: {
       primary: process.env.FLOW_NEAR_RPC_URL || "https://rpc.mainnet.near.org",
       fallback: "https://mainnet.neardata.info/v1/rpc",
@@ -169,7 +176,36 @@ export async function reconcileWalletBalances(
     for (const asset of matchingAssets) {
       let obs: BalanceObservation;
 
-      if (asset.network === "near") {
+      if (asset.network === "ethereum") {
+        const ethRpc =
+          rpc.ethereum?.primary ?? "https://ethereum-rpc.publicnode.com";
+        const fallback = rpc.ethereum?.fallback ?? "https://cloudflare-eth.com";
+
+        if (asset.tokenStandard === "NATIVE") {
+          obs = await fetchBaseNativeBalance(
+            ethRpc,
+            addr.address,
+            asset.chainId,
+            {
+              networkAssetId: asset.id,
+              fallbackEndpoint: fallback,
+            },
+          );
+        } else if (asset.contractAddress) {
+          obs = await fetchBaseTokenBalance(
+            ethRpc,
+            addr.address,
+            asset.contractAddress,
+            asset.chainId,
+            {
+              networkAssetId: asset.id,
+              fallbackEndpoint: fallback,
+            },
+          );
+        } else {
+          continue;
+        }
+      } else if (asset.network === "near") {
         const nearRpc = rpc.near?.primary ?? "https://rpc.testnet.near.org";
         const fallback = rpc.near?.fallback;
         const net = asset.chainId as "near-mainnet" | "near-testnet";

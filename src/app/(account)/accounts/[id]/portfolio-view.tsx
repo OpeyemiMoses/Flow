@@ -16,6 +16,7 @@ import {
   CURATED_SUPPORTED_DEPLOYMENTS,
   ECOSYSTEM_METADATA,
   type EcosystemFamily,
+  isAssetSupportedOnNetwork,
   validateEcosystemAddress,
 } from "../../../../domain/supported-assets-catalog.ts";
 import type {
@@ -123,8 +124,9 @@ export function PortfolioView({
   const [recipientAddress, setRecipientAddress] = useState<string>("");
 
   // Receive / Create Payment Link state
-  const [receiveDeploymentId, setReceiveDeploymentId] =
-    useState<string>("base-mainnet:USDC");
+  const [receiveDeploymentId, setReceiveDeploymentId] = useState<string>(
+    "ethereum-mainnet:USDC",
+  );
   const [paymentRequests, setPaymentRequests] = useState<
     SerializedPaymentRequest[]
   >([]);
@@ -456,22 +458,51 @@ export function PortfolioView({
     wallet?.addresses.find((a) => a.network.includes("near"))?.address ??
     "Not provisioned";
 
-  const usdcBalanceTotal = useMemo(() => {
+  const stableBalanceTotal = useMemo(() => {
     return balances
-      .filter((b) => b.networkAsset.asset.symbol.toUpperCase() === "USDC")
+      .filter((b) =>
+        ["USDC", "USDT"].includes(b.networkAsset.asset.symbol.toUpperCase()),
+      )
       .reduce((acc, b) => acc + (Number(b.displayBalance) || 0), 0);
   }, [balances]);
 
-  const totalStableFormatted = `$${usdcBalanceTotal.toLocaleString("en-US", {
+  const totalStableFormatted = `$${stableBalanceTotal.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
 
+  const ethNativeBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network === "ethereum" &&
+        b.networkAsset.asset.symbol.toUpperCase() === "ETH",
+    );
+    return match?.displayBalance ?? "0.00";
+  }, [balances]);
+
   const ethUsdcBalance = useMemo(() => {
     const match = balances.find(
       (b) =>
-        b.networkAsset.network.includes("ethereum") &&
+        b.networkAsset.network === "ethereum" &&
         b.networkAsset.asset.symbol.toUpperCase() === "USDC",
+    );
+    return match?.displayBalance ?? "0.00";
+  }, [balances]);
+
+  const ethUsdtBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network === "ethereum" &&
+        b.networkAsset.asset.symbol.toUpperCase() === "USDT",
+    );
+    return match?.displayBalance ?? "0.00";
+  }, [balances]);
+
+  const baseEthBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network === "base" &&
+        b.networkAsset.asset.symbol.toUpperCase() === "ETH",
     );
     return match?.displayBalance ?? "0.00";
   }, [balances]);
@@ -479,7 +510,7 @@ export function PortfolioView({
   const baseUsdcBalance = useMemo(() => {
     const match = balances.find(
       (b) =>
-        b.networkAsset.network.includes("base") &&
+        b.networkAsset.network === "base" &&
         b.networkAsset.asset.symbol.toUpperCase() === "USDC",
     );
     return match?.displayBalance ?? "0.00";
@@ -494,6 +525,24 @@ export function PortfolioView({
     return match?.displayBalance ?? "0";
   }, [balances]);
 
+  const solUsdcBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network.includes("solana") &&
+        b.networkAsset.asset.symbol.toUpperCase() === "USDC",
+    );
+    return match?.displayBalance ?? "0.00";
+  }, [balances]);
+
+  const solUsdtBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network.includes("solana") &&
+        b.networkAsset.asset.symbol.toUpperCase() === "USDT",
+    );
+    return match?.displayBalance ?? "0.00";
+  }, [balances]);
+
   const nearNativeBalance = useMemo(() => {
     const match = balances.find(
       (b) =>
@@ -501,6 +550,24 @@ export function PortfolioView({
         b.networkAsset.asset.symbol.toUpperCase() === "NEAR",
     );
     return match?.displayBalance ?? "0";
+  }, [balances]);
+
+  const nearUsdcBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network.includes("near") &&
+        b.networkAsset.asset.symbol.toUpperCase() === "USDC",
+    );
+    return match?.displayBalance ?? "0.00";
+  }, [balances]);
+
+  const nearUsdtBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network.includes("near") &&
+        b.networkAsset.asset.symbol.toUpperCase() === "USDT",
+    );
+    return match?.displayBalance ?? "0.00";
   }, [balances]);
 
   const settledRequests = useMemo(
@@ -1143,10 +1210,10 @@ export function PortfolioView({
                   <div className="relative z-10">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-medium text-neutral-400">
-                        Observed USDC balance
+                        Observed Stablecoin Balance (USDC &amp; USDT)
                       </span>
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-0.5 text-[11px] font-medium text-neutral-200">
-                        USDC · RPC
+                        5 Assets · Multi-Chain RPC
                       </span>
                     </div>
 
@@ -1199,8 +1266,11 @@ export function PortfolioView({
                         <span className="h-2 w-2 rounded-full bg-indigo-400" />
                         <span>Ethereum</span>
                       </div>
-                      <p className="mt-1 font-display text-sm font-bold text-white">
-                        {ethUsdcBalance} USDC
+                      <p className="mt-1 font-display text-xs sm:text-sm font-bold text-white">
+                        {ethNativeBalance} ETH
+                      </p>
+                      <p className="text-[10px] text-neutral-400">
+                        {ethUsdcBalance} USDC · {ethUsdtBalance} USDT
                       </p>
                     </div>
                     <div className="border-l border-white/10 pl-3">
@@ -1208,17 +1278,23 @@ export function PortfolioView({
                         <span className="h-2 w-2 rounded-full bg-blue-500" />
                         <span>Base</span>
                       </div>
-                      <p className="mt-1 font-display text-sm font-bold text-white">
+                      <p className="mt-1 font-display text-xs sm:text-sm font-bold text-white">
+                        {baseEthBalance} ETH
+                      </p>
+                      <p className="text-[10px] text-neutral-400">
                         {baseUsdcBalance} USDC
                       </p>
                     </div>
                     <div className="border-l border-white/10 pl-3">
                       <div className="flex items-center gap-1.5 text-[11px] text-neutral-400">
                         <span className="h-2 w-2 rounded-full bg-purple-500" />
-                        <span>SOL</span>
+                        <span>Solana</span>
                       </div>
-                      <p className="mt-1 font-display text-sm font-bold text-white">
+                      <p className="mt-1 font-display text-xs sm:text-sm font-bold text-white">
                         {solNativeBalance} SOL
+                      </p>
+                      <p className="text-[10px] text-neutral-400">
+                        {solUsdcBalance} USDC · {solUsdtBalance} USDT
                       </p>
                     </div>
                     <div className="border-l border-white/10 pl-3">
@@ -1226,8 +1302,11 @@ export function PortfolioView({
                         <span className="h-2 w-2 rounded-full bg-emerald-400" />
                         <span>NEAR</span>
                       </div>
-                      <p className="mt-1 font-display text-sm font-bold text-white">
+                      <p className="mt-1 font-display text-xs sm:text-sm font-bold text-white">
                         {nearNativeBalance} NEAR
+                      </p>
+                      <p className="text-[10px] text-neutral-400">
+                        {nearUsdcBalance} USDC · {nearUsdtBalance} USDT
                       </p>
                     </div>
                   </div>
@@ -2295,64 +2374,110 @@ export function PortfolioView({
                       ))}
                     </select>
 
-                    {/* Quick Network Pills matching 08_26_18 PM-7.png */}
+                    {/* Quick Network Pills */}
                     <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setReceiveDeploymentId("ethereum-mainnet:USDC")
-                        }
-                        className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
-                          receiveDeployment.networkKey === "ethereum-mainnet"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
-                        }`}
-                      >
-                        <ChainBadge chainKey="ethereum-mainnet" size={16} />
-                        <span>Ethereum</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setReceiveDeploymentId("base-mainnet:USDC")
-                        }
-                        className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
-                          receiveDeployment.networkKey === "base-mainnet"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
-                        }`}
-                      >
-                        <ChainBadge chainKey="base-mainnet" size={16} />
-                        <span>Base</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setReceiveDeploymentId("solana-mainnet:USDC")
-                        }
-                        className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
-                          receiveDeployment.networkKey === "solana-mainnet"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
-                        }`}
-                      >
-                        <ChainBadge chainKey="solana-mainnet" size={16} />
-                        <span>Solana</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setReceiveDeploymentId("near-mainnet:NEAR")
-                        }
-                        className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
-                          receiveDeployment.networkKey === "near-mainnet"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
-                        }`}
-                      >
-                        <ChainBadge chainKey="near-mainnet" size={16} />
-                        <span>NEAR</span>
-                      </button>
+                      {[
+                        { key: "ethereum-mainnet", label: "Ethereum" },
+                        { key: "base-mainnet", label: "Base" },
+                        { key: "solana-mainnet", label: "Solana" },
+                        { key: "near-mainnet", label: "NEAR" },
+                      ].map((net) => {
+                        const isSupported = isAssetSupportedOnNetwork(
+                          receiveDeployment.symbol,
+                          net.key,
+                        );
+                        const isSelected =
+                          receiveDeployment.networkKey === net.key;
+
+                        return (
+                          <button
+                            key={net.key}
+                            type="button"
+                            onClick={() => {
+                              const sameSymbolMatch =
+                                MAINNET_SUPPORTED_DEPLOYMENTS.find(
+                                  (d) =>
+                                    d.networkKey === net.key &&
+                                    d.symbol === receiveDeployment.symbol,
+                                );
+                              if (sameSymbolMatch) {
+                                setReceiveDeploymentId(sameSymbolMatch.id);
+                              } else {
+                                const fallbackMatch =
+                                  MAINNET_SUPPORTED_DEPLOYMENTS.find(
+                                    (d) =>
+                                      d.networkKey === net.key &&
+                                      d.symbol === "USDC",
+                                  ) ??
+                                  MAINNET_SUPPORTED_DEPLOYMENTS.find(
+                                    (d) => d.networkKey === net.key,
+                                  );
+                                if (fallbackMatch) {
+                                  setReceiveDeploymentId(fallbackMatch.id);
+                                }
+                              }
+                            }}
+                            className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
+                              isSelected
+                                ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 font-bold"
+                                : !isSupported
+                                  ? "border-neutral-200 bg-neutral-50/60 text-neutral-400 hover:bg-neutral-100"
+                                  : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                            }`}
+                          >
+                            <ChainBadge chainKey={net.key} size={16} />
+                            <span>{net.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Direct Wallet Deposit Address */}
+                    <div className="mt-4 rounded-[16px] border border-neutral-200/90 bg-neutral-50 p-3.5 space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold text-neutral-800">
+                          Direct {receiveDeployment.networkName} Deposit Address
+                        </span>
+                        <span className="rounded bg-neutral-200/70 px-1.5 py-0.5 text-[10px] font-bold text-neutral-700">
+                          {receiveDeployment.standard} ·{" "}
+                          {receiveDeployment.symbol}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between rounded-[12px] border border-neutral-200 bg-white px-3 py-2">
+                        <span className="truncate font-mono text-xs text-neutral-900 mr-2">
+                          {receiveDeployment.ecosystem === "evm"
+                            ? ethAddr
+                            : receiveDeployment.ecosystem === "solana"
+                              ? solAddr
+                              : nearAddr}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const addr =
+                              receiveDeployment.ecosystem === "evm"
+                                ? ethAddr
+                                : receiveDeployment.ecosystem === "solana"
+                                  ? solAddr
+                                  : nearAddr;
+                            copyAddress("direct-receive", addr);
+                          }}
+                          className="shrink-0 rounded-full border border-neutral-200 bg-neutral-50 px-2.5 py-1 text-xs font-semibold text-neutral-900 hover:bg-neutral-100"
+                        >
+                          {copiedKey === "direct-receive" ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-neutral-500">
+                        Send only{" "}
+                        <strong className="font-semibold text-neutral-700">
+                          {receiveDeployment.symbol}
+                        </strong>{" "}
+                        ({receiveDeployment.name}) on{" "}
+                        <strong className="font-semibold text-neutral-700">
+                          {receiveDeployment.networkName}
+                        </strong>{" "}
+                        to this address.
+                      </p>
                     </div>
                   </div>
 

@@ -115,7 +115,7 @@ export function assertValidNetwork(
   if (!VALID_NETWORKS.has(network)) {
     throw new FlowError(
       "INVALID_CONFIGURATION",
-      `Unsupported network identifier: ${network}. Allowed: near, base, solana.`,
+      `Unsupported network identifier: ${network}. Allowed: near, base, solana, ethereum.`,
     );
   }
 }

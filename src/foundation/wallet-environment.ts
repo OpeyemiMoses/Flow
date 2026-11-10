@@ -50,6 +50,7 @@ const walletConfigSchema = z.object({
   FLOW_NEAR_RPC_URL: z.url().optional(),
   FLOW_BASE_RPC_URL: z.url().optional(),
   FLOW_SOLANA_RPC_URL: z.url().optional(),
+  FLOW_ETHEREUM_RPC_URL: z.url().optional(),
 
   // Optional future NEAR Intents 1Click endpoint
   FLOW_NEAR_INTENTS_API_URL: z.url().optional(),
@@ -103,6 +104,7 @@ export function readWalletConfig(
     FLOW_NEAR_RPC_URL,
     FLOW_BASE_RPC_URL,
     FLOW_SOLANA_RPC_URL,
+    FLOW_ETHEREUM_RPC_URL,
     FLOW_NEAR_INTENTS_API_URL,
   } = parsed.data;
 
@@ -219,6 +221,7 @@ export function readWalletConfig(
       nearRpcUrl: FLOW_NEAR_RPC_URL,
       baseRpcUrl: FLOW_BASE_RPC_URL,
       solanaRpcUrl: FLOW_SOLANA_RPC_URL,
+      ethereumRpcUrl: FLOW_ETHEREUM_RPC_URL,
       nearIntentsApiUrl: FLOW_NEAR_INTENTS_API_URL,
     },
   };
