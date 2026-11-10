@@ -800,10 +800,12 @@ export function CheckoutView({ request }: CheckoutViewProps) {
 
                     {instructions.status === "EXCEPTION_REFUND_REQUIRED" && (
                       <div className="rounded-[14px] border border-red-200 bg-red-50 p-3 text-xs text-[#FF1A1A]">
-                        <strong>Refund Required — Do Not Send Additional Funds:</strong> Deposit was
-                        received outside the valid quote window or could not be
-                        routed. Funds are queued for refund to the configured
-                        refund address.
+                        <strong>
+                          Refund Required — Do Not Send Additional Funds:
+                        </strong>{" "}
+                        Deposit was received outside the valid quote window or
+                        could not be routed. Funds are queued for refund to the
+                        configured refund address.
                       </div>
                     )}
 
