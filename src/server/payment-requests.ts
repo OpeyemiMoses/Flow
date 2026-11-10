@@ -1,5 +1,8 @@
 import "server-only";
-import { parseDisplayToAtomic } from "../domain/atomic-amounts.ts";
+import {
+  formatAtomicToDisplay,
+  parseDisplayToAtomic,
+} from "../domain/atomic-amounts.ts";
 import {
   type PaymentAmountMode,
   type PaymentRequestRecord,
@@ -11,8 +14,12 @@ import {
   serializePaymentRequest,
   serializePublicPaymentRequest,
 } from "../domain/payment-requests.ts";
+import type {
+  PaymentAttemptStatus,
+  PaymentDepositInstructions,
+} from "../domain/quote-discovery.ts";
 import { CURATED_SUPPORTED_DEPLOYMENTS } from "../domain/supported-assets-catalog.ts";
-import { runtime, type FlowDb } from "../foundation/prisma.ts";
+import { getPrismaClient, runtime, type FlowDb } from "../foundation/prisma.ts";
 import { access, principal } from "./accounts.ts";
 import { clientBudget } from "./auth/limits.ts";
 import { ApiFailure, reply } from "./http.ts";
@@ -529,5 +536,111 @@ export async function readPublicPaymentRequest(
     row,
     origin,
   );
-  return reply(200, publicData);
+
+  // Check if there is an active or settled committed payment attempt for returning payer recovery
+  let activeAttempt: PaymentDepositInstructions | null = null;
+  try {
+    const workerDb = getPrismaClient("worker");
+    const url = new URL(request.url);
+    const requestedAttemptId = url.searchParams.get("attempt");
+
+    const attemptRows = await workerDb.$queryRaw<
+      Array<{
+        attempt_public_id: string;
+        status: string;
+        deposit_address: string | null;
+        deposit_memo: string | null;
+        deposit_deadline: Date | null;
+        deposit_instructions: Record<string, unknown> | null;
+        source_network: string;
+        source_asset_id: string;
+        source_asset_symbol: string;
+        source_decimals: number;
+        quoted_source_atomic_amount: string | null;
+        quoted_destination_atomic_amount: string | null;
+        source_tx_hash: string | null;
+        destination_tx_hash: string | null;
+        settled_at: Date | null;
+      }>
+    >`
+      SELECT
+        pa.attempt_public_id,
+        pa.status::text AS status,
+        pa.deposit_address,
+        pa.deposit_memo,
+        pa.deposit_deadline,
+        pa.deposit_instructions,
+        pa.source_network,
+        pa.source_asset_id,
+        pa.source_asset_symbol,
+        pa.source_decimals,
+        pa.quoted_source_atomic_amount::text,
+        pa.quoted_destination_atomic_amount::text,
+        pa.source_tx_hash,
+        pa.destination_tx_hash,
+        pa.settled_at
+      FROM flow.payment_attempts pa
+      JOIN flow.payment_requests pr ON pr.id = pa.payment_request_id
+      WHERE pr.public_id = ${publicId}
+        AND (
+          (${requestedAttemptId}::text IS NOT NULL AND pa.attempt_public_id = ${requestedAttemptId})
+          OR (
+            ${requestedAttemptId}::text IS NULL
+            AND pa.deposit_address IS NOT NULL
+            AND pa.status IN ('DEPOSIT_COMMITTED', 'DETECTED', 'SETTLING', 'SETTLED', 'EXCEPTION_REFUND_REQUIRED', 'FAILED')
+          )
+        )
+      ORDER BY pa.updated_at DESC
+      LIMIT 1
+    `;
+
+    const att = attemptRows[0];
+    if (att) {
+      const sourceDisplayAmount = formatAtomicToDisplay(
+        BigInt(att.quoted_source_atomic_amount ?? "0"),
+        att.source_decimals,
+      );
+      const destDisplayAmount = formatAtomicToDisplay(
+        BigInt(att.quoted_destination_atomic_amount ?? "0"),
+        row.destination_decimals,
+      );
+      activeAttempt = {
+        attemptPublicId: att.attempt_public_id,
+        status: att.status as PaymentAttemptStatus,
+        depositAddress: att.deposit_address ?? "",
+        depositMemo: att.deposit_memo,
+        depositDeadline: att.deposit_deadline
+          ? new Date(att.deposit_deadline).toISOString()
+          : "",
+        sourceNetwork: att.source_network,
+        sourceAssetId: att.source_asset_id,
+        sourceAssetSymbol: att.source_asset_symbol,
+        sourceDecimals: att.source_decimals,
+        destinationNetwork: row.destination_network,
+        destinationAssetSymbol: row.destination_asset_symbol,
+        requiredAtomicAmount: att.quoted_source_atomic_amount ?? "0",
+        requiredDisplayAmount: sourceDisplayAmount,
+        destinationDisplayAmount: destDisplayAmount,
+        qrData:
+          att.deposit_instructions &&
+          typeof att.deposit_instructions === "object"
+            ? ((att.deposit_instructions.qrData as string) ?? "")
+            : "",
+        instructionsNotice: `Payment status: ${att.status}`,
+        isExecutionDisabled: true,
+        sourceTxHash: att.source_tx_hash,
+        destinationTxHash: att.destination_tx_hash,
+        settledAt: att.settled_at
+          ? new Date(att.settled_at).toISOString()
+          : null,
+      };
+    }
+  } catch {
+    // Non-fatal if worker DB is unavailable in unit context
+  }
+
+  return reply(200, {
+    ...publicData,
+    ...(activeAttempt ? { activeAttempt } : {}),
+  });
 }

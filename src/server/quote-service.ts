@@ -46,13 +46,17 @@ export async function requestPaymentQuote(
     throw new ApiFailure(400, "INVALID_JSON");
   }
 
-  const {
-    sourceDeploymentId,
-    payerMode,
-    refundAddress,
-    payerAmount,
-    customSourceDisplayAmount,
-  } = body;
+  const rawBody = body as RequestQuoteInput & {
+    readonly sourceAssetId?: string;
+    readonly checkoutMode?: PayerCheckoutMode;
+  };
+
+  const sourceDeploymentId =
+    rawBody.sourceDeploymentId || rawBody.sourceAssetId;
+  const payerMode = rawBody.payerMode || rawBody.checkoutMode;
+  const refundAddress = rawBody.refundAddress;
+  const payerAmount = rawBody.payerAmount;
+  const customSourceDisplayAmount = rawBody.customSourceDisplayAmount;
 
   if (!sourceDeploymentId || typeof sourceDeploymentId !== "string") {
     throw new ApiFailure(400, "SOURCE_DEPLOYMENT_ID_REQUIRED");

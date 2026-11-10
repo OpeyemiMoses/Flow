@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { formatAtomicToDisplay } from "./atomic-amounts.ts";
+import type { PaymentDepositInstructions } from "./quote-discovery.ts";
 import {
   CURATED_SUPPORTED_DEPLOYMENTS,
   type CatalogTokenDeployment,
@@ -85,6 +86,7 @@ export interface PublicPaymentRequest {
   readonly payerMemoRequired: boolean;
   readonly isExpired: boolean;
   readonly eligibleSourceRoutes: readonly EligibleSourceRoute[];
+  readonly activeAttempt?: PaymentDepositInstructions | null;
 }
 
 export function generatePublicPaymentId(): string {

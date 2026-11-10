@@ -25,6 +25,8 @@ export type PaymentAttemptStatus =
   | "DETECTED"
   | "SETTLING"
   | "SETTLED"
+  | "EXPIRED"
+  | "EXCEPTION_REFUND_REQUIRED"
   | "FAILED";
 
 export interface PaymentDepositInstructions {

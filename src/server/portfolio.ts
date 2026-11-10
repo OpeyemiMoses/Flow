@@ -5,12 +5,19 @@ import {
   serializePortfolio,
 } from "../domain/portfolio.ts";
 import { getPrismaClient, runtime, type FlowDb } from "../foundation/prisma.ts";
-import { access, principal } from "./accounts.ts";
+import { readWalletConfig } from "../foundation/wallet-environment.ts";
+import { access, accountProvisioningKey, principal } from "./accounts.ts";
 import { getAccountBalances } from "./assets/asset-service.ts";
 import {
   getDefaultRpcConfig,
   reconcileWalletBalances,
 } from "./assets/connectors/multi-chain-reconciler.ts";
+import {
+  ensureProvisioningJobForAccount,
+  getAccountWalletPublicProjection,
+} from "./custody/job-repository.ts";
+import { OutLayerAdapter } from "./custody/outlayer-adapter.ts";
+import { WalletProvisioningWorker } from "./custody/provisioning-worker.ts";
 import { ApiFailure, reply } from "./http.ts";
 
 export type {
@@ -253,14 +260,17 @@ export async function refreshPortfolio(
   } else {
     let success = false;
     try {
-      const wallets = await db.$queryRaw<
-        Array<{ id: string; environment: string }>
+      const workerDb = getPrismaClient("worker");
+      const wallets = await workerDb.$queryRaw<
+        Array<{ id: string; environment: string; status: string }>
       >`
-        SELECT id, environment FROM flow.wallets WHERE account_id = ${accountId}::uuid LIMIT 1
+        SELECT id, environment, status::text AS status
+        FROM flow.wallets
+        WHERE account_id = ${accountId}::uuid
+        LIMIT 1
       `;
       const wallet = wallets[0];
-      if (wallet) {
-        const workerDb = getPrismaClient("worker");
+      if (wallet && wallet.status === "ACTIVE") {
         const config = getDefaultRpcConfig(
           wallet.environment as "testnet" | "mainnet",
         );
@@ -287,5 +297,89 @@ export async function refreshPortfolio(
   return reply(200, {
     ...serialized,
     cooldownRemainingSeconds: Math.ceil(REFRESH_COOLDOWN_MS / 1000),
+  });
+}
+
+export async function provisionAccountWallet(
+  request: Request,
+  accountId: string,
+): Promise<Response> {
+  const { db } = runtime();
+  const actor = await principal(db, request.headers);
+  await access(db, actor, accountId);
+
+  if (!actor.session.token) {
+    throw new ApiFailure(401, "AUTH_REQUIRED");
+  }
+
+  const workerDb = getPrismaClient("worker");
+
+  await ensureProvisioningJobForAccount(
+    workerDb,
+    accountId,
+    accountProvisioningKey(accountId),
+  );
+
+  let walletConfig;
+  try {
+    walletConfig = readWalletConfig(process.env);
+  } catch (err) {
+    throw new ApiFailure(
+      503,
+      err instanceof Error ? err.message : "CUSTODY_CONFIGURATION_ERROR",
+    );
+  }
+
+  const adapter = new OutLayerAdapter(
+    process.env.FLOW_OUTLAYER_API_URL || walletConfig.apiUrl,
+    5_000,
+    { compatibilityConfig: walletConfig.compatibility },
+  );
+
+  const worker = new WalletProvisioningWorker({
+    db: workerDb,
+    adapter,
+    walletConfig,
+    workerId: `api-provision-${randomUUID().slice(0, 8)}`,
+  });
+
+  const result = await worker.processAccountJob(accountId);
+
+  // If wallet is now ACTIVE, reconcile initial balances from RPC
+  const wallets = await workerDb.$queryRaw<
+    Array<{ id: string; environment: string; status: string }>
+  >`
+    SELECT id, environment, status::text AS status
+    FROM flow.wallets
+    WHERE account_id = ${accountId}::uuid
+    LIMIT 1
+  `;
+  const activeWallet = wallets[0];
+  if (activeWallet && activeWallet.status === "ACTIVE") {
+    try {
+      const rpcConfig = getDefaultRpcConfig(
+        activeWallet.environment as "testnet" | "mainnet",
+      );
+      await reconcileWalletBalances(workerDb, activeWallet.id, rpcConfig);
+    } catch {
+      // Non-fatal if initial RPC balance check times out; wallet provisioning itself is complete
+    }
+  }
+
+  const walletProjection = await getAccountWalletPublicProjection(
+    workerDb,
+    accountId,
+  );
+  const portfolioProjection = await getAccountBalances(db, accountId, {
+    sessionToken: actor.session.token,
+  });
+
+  return reply(200, {
+    outcome: result.outcome,
+    walletStatus: walletProjection
+      ? walletProjection.status.toLowerCase()
+      : "setup_pending",
+    wallet: walletProjection,
+    portfolio: serializePortfolio(portfolioProjection),
   });
 }

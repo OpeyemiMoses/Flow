@@ -122,11 +122,13 @@ export async function securityServer() {
     );
     const authSecret = randomBytes(32).toString("hex");
     const otpKey = randomBytes(32).toString("hex");
+    const walletEncryptionKey = randomBytes(32).toString("hex");
     const googleSecret = `flow-fixture-${randomBytes(16).toString("hex")}`;
     const mailKey = `re_flow_fixture_${randomBytes(16).toString("hex")}`;
     for (const value of [
       authSecret,
       otpKey,
+      walletEncryptionKey,
       googleSecret,
       mailKey,
       process.env.FLOW_DATABASE_URL,
@@ -157,6 +159,9 @@ export async function securityServer() {
           FLOW_APP_ORIGIN: origin,
           FLOW_AUTH_SECRET: authSecret,
           FLOW_OTP_KEY: otpKey,
+          FLOW_WALLET_ENCRYPTION_KEY: walletEncryptionKey,
+          FLOW_WALLET_KEY_ID: "v1",
+          FLOW_OUTLAYER_API_URL: "http://127.0.0.1/outlayer-fixture",
           FLOW_GOOGLE_CLIENT_ID: googleId,
           FLOW_GOOGLE_CLIENT_SECRET: googleSecret,
           FLOW_MAIL_API_KEY: mailKey,

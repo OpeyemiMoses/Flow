@@ -27,6 +27,7 @@ export function SecurityPanel({
   googleLinked,
   mailboxPaused,
   sessions,
+  accounts = [],
 }: {
   email: string;
   emailEnrolled: boolean;
@@ -38,12 +39,35 @@ export function SecurityPanel({
     expiresAt: string;
     current: boolean;
   }[];
+  accounts?: {
+    id: string;
+    kind: "PERSONAL" | "BUSINESS" | "personal" | "business";
+    name: string;
+    role: string;
+    walletStatus: string;
+  }[];
 }) {
   const [action, setAction] = useState<keyof typeof actions>();
   const [message, setMessage] = useState("");
   const [revoking, setRevoking] = useState(false);
   const [workspaceDropdownOpen, setWorkspaceDropdownOpen] = useState(true);
   const router = useRouter();
+
+  const personalAccount = accounts.find(
+    (a) => a.kind.toLowerCase() === "personal",
+  );
+  const primaryAccount = personalAccount ?? accounts[0];
+  const emailPrefix = email.split("@")[0] || "user";
+  const displayName =
+    personalAccount?.name &&
+    personalAccount.name.toLowerCase() !== "personal account"
+      ? personalAccount.name
+      : emailPrefix
+          .split(/[._-]+/)
+          .filter(Boolean)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ") || email;
+  const userHandle = `@${emailPrefix.toLowerCase().replace(/[^a-z0-9_]/g, "") || "user"}`;
 
   async function revoke(id: string, current: boolean) {
     setRevoking(true);
@@ -167,7 +191,7 @@ export function SecurityPanel({
               />
               <div className="min-w-0">
                 <p className="truncate text-xs font-semibold text-white">
-                  Amara Okafor
+                  {displayName}
                 </p>
                 <p className="truncate text-[11px] text-neutral-400">{email}</p>
               </div>
@@ -235,34 +259,37 @@ export function SecurityPanel({
                     alt=""
                     className="h-5 w-5 rounded-full object-cover"
                   />
-                  <span>Amara Personal</span>
+                  <span>{primaryAccount?.name ?? "Personal account"}</span>
                   <span className="text-neutral-400 text-[10px]">▾</span>
                 </button>
 
                 {workspaceDropdownOpen && (
                   <div className="hidden xl:block absolute right-0 mt-2 w-64 rounded-[20px] border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-3 shadow-xl z-30">
                     <div className="space-y-1 text-xs">
-                      <div className="flex items-center justify-between rounded-[12px] bg-neutral-100 dark:bg-neutral-800 px-3 py-2 font-semibold text-neutral-950 dark:text-white">
-                        <div>
-                          <p>Amara Personal</p>
-                          <p className="text-[10px] font-normal text-neutral-500">
-                            Personal · 3 wallets
-                          </p>
-                        </div>
-                        <span className="text-[#FF1A1A]">✓</span>
-                      </div>
-                      <Link
-                        prefetch={false}
-                        href="/accounts"
-                        className="flex items-center justify-between rounded-[12px] px-3 py-2 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
-                      >
-                        <div>
-                          <p className="font-semibold">Studio Kora</p>
-                          <p className="text-[10px] text-neutral-500">
-                            Business · 5 members
-                          </p>
-                        </div>
-                      </Link>
+                      {accounts.map((acc, idx) => (
+                        <Link
+                          key={acc.id}
+                          prefetch={false}
+                          href={`/accounts/${acc.id}`}
+                          className={`flex items-center justify-between rounded-[12px] px-3 py-2 ${
+                            idx === 0
+                              ? "bg-neutral-100 dark:bg-neutral-800 font-semibold text-neutral-950 dark:text-white"
+                              : "text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                          }`}
+                        >
+                          <div>
+                            <p className="font-semibold">{acc.name}</p>
+                            <p className="text-[10px] font-normal text-neutral-500">
+                              {acc.kind.toLowerCase() === "business"
+                                ? `Business · ${acc.role}`
+                                : `Personal · ${acc.walletStatus.replace(/_/g, " ")}`}
+                            </p>
+                          </div>
+                          {idx === 0 && (
+                            <span className="text-[#FF1A1A]">✓</span>
+                          )}
+                        </Link>
+                      ))}
                     </div>
                     <div className="mt-2 border-t border-neutral-100 dark:border-neutral-800 pt-2">
                       <Link
@@ -381,7 +408,7 @@ export function SecurityPanel({
                     />
                     <div className="min-w-0">
                       <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
-                        Amara Okafor
+                        {displayName}
                       </p>
                       <p className="truncate text-xs text-neutral-500">
                         {email}
@@ -393,7 +420,7 @@ export function SecurityPanel({
                     <div className="flex items-center justify-between rounded-[12px] bg-neutral-50 dark:bg-neutral-800/60 px-3.5 py-2.5">
                       <span className="text-neutral-500">Handle</span>
                       <span className="font-mono font-semibold text-neutral-900 dark:text-white">
-                        @amara
+                        {userHandle}
                       </span>
                     </div>
                     <div className="flex items-center justify-between rounded-[12px] bg-neutral-50 dark:bg-neutral-800/60 px-3.5 py-2.5">

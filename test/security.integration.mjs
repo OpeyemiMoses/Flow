@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -2591,4 +2591,244 @@ test("security: wallet persistence across re-authentication, duplicate preventio
     },
   );
   assert.equal(transferAttempt.status(), 404);
+});
+
+test("phase 6 end-to-end acceptance scenarios A–G: live OutLayer wallet provisioning, persistence, business isolation, quote/settlement recovery, exception handling, and UI truthfulness", async () => {
+  // =========================================================================
+  // SCENARIO A — Account & Wallet Persistence (Genuine 3-Stage OutLayer Worker)
+  // =========================================================================
+  const ownerEmail = "e2e-sprint-owner@flow.local";
+  const ownerClient = await app.createClient();
+  await emailLogin(ownerClient, ownerEmail);
+
+  const onb = await post(ownerClient, "/api/onboarding/complete", {}, 200);
+  const personalId = onb.account.id;
+  assert.equal(onb.account.walletStatus, "setup_pending");
+
+  // Trigger on-demand 3-stage OutLayer wallet provisioning + RPC balance reconciliation
+  const provRes = await ownerClient.post(
+    `/api/accounts/${personalId}/wallet/provision`,
+    { data: {} },
+  );
+  assert.equal(provRes.status(), 200);
+  const provData = await provRes.json();
+  assert.equal(provData.outcome, "activated");
+  assert.equal(provData.walletStatus, "active");
+  assert.ok(provData.wallet);
+  assert.equal(provData.wallet.addresses.length, 3);
+
+  const personalEvm = provData.wallet.addresses.find(
+    (a) => a.network.includes("base") || a.network.includes("ethereum"),
+  )?.address;
+  const personalSol = provData.wallet.addresses.find((a) =>
+    a.network.includes("solana"),
+  )?.address;
+  const personalNear = provData.wallet.addresses.find((a) =>
+    a.network.includes("near"),
+  )?.address;
+  assert.match(personalEvm, /^0x[0-9a-fA-F]{40}$/);
+  assert.match(personalSol, /^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+  assert.match(personalNear, /^[0-9a-f]{64}$/);
+
+  // Idempotent re-provisioning check: never replaces existing wallet
+  const provAgain = await ownerClient.post(
+    `/api/accounts/${personalId}/wallet/provision`,
+    { data: {} },
+  );
+  assert.equal(provAgain.status(), 200);
+  const provAgainData = await provAgain.json();
+  assert.equal(provAgainData.outcome, "skipped");
+  assert.equal(provAgainData.wallet.id, provData.wallet.id);
+
+  // Sign out and sign back in: verify addresses remain identical
+  await post(ownerClient, "/api/auth/sign-out", {}, 204);
+  const reloginClient = await app.createClient();
+  await emailLogin(reloginClient, ownerEmail);
+
+  const portAfterRelogin = await reloginClient.get(
+    `/api/accounts/${personalId}/portfolio`,
+  );
+  assert.equal(portAfterRelogin.status(), 200);
+  const portJson = await portAfterRelogin.json();
+  assert.equal(portJson.wallet.id, provData.wallet.id);
+  assert.ok(portJson.balances.length > 0, "Expected reconciled RPC balances");
+
+  // =========================================================================
+  // SCENARIO B — Business Workspace & Team Isolation
+  // =========================================================================
+  const bizAccount = await business(reloginClient, "Nova Labs Treasury");
+  const bizId = bizAccount.id;
+  assert.notEqual(bizId, personalId);
+
+  const bizProvRes = await reloginClient.post(
+    `/api/accounts/${bizId}/wallet/provision`,
+    { data: {} },
+  );
+  assert.equal(bizProvRes.status(), 200);
+  const bizProvData = await bizProvRes.json();
+  assert.equal(bizProvData.outcome, "activated");
+  assert.notEqual(bizProvData.wallet.id, provData.wallet.id);
+
+  const bizEvm = bizProvData.wallet.addresses.find(
+    (a) => a.network.includes("base") || a.network.includes("ethereum"),
+  )?.address;
+  assert.notEqual(bizEvm, personalEvm);
+
+  // Cross-account isolation check with stranger
+  const stranger = await person("e2e-stranger@flow.local");
+  const crossProv = await stranger.client.post(
+    `/api/accounts/${bizId}/wallet/provision`,
+    { data: {} },
+  );
+  assert.equal(crossProv.status(), 404);
+
+  // =========================================================================
+  // SCENARIO C, D, E, F — Payment Link, Quote Lifecycle, Active Attempt Recovery & Exceptions
+  // =========================================================================
+  const createPr = await reloginClient.post(
+    `/api/accounts/${bizId}/payment-requests`,
+    {
+      data: {
+        title: "Q4 Protocol Audit",
+        description: "Milestone 1 settlement",
+        destinationNetwork: "base-mainnet",
+        destinationAssetId: "base-mainnet:USDC",
+        amountMode: "FIXED",
+        requestedAmount: "100.00",
+        expiresInHours: 24,
+      },
+    },
+  );
+  assert.equal(createPr.status(), 201);
+  const pr = await createPr.json();
+  assert.match(pr.publicId, /^pr_/);
+
+  const guest = await app.createClient();
+
+  // Exchange mode without refund address fails validation
+  const missingRefundQuote = await guest.post(`/api/pay/${pr.publicId}/quote`, {
+    data: {
+      sourceDeploymentId: "solana-mainnet:SOL",
+      payerMode: "EXCHANGE",
+    },
+  });
+  assert.equal(missingRefundQuote.status(), 400);
+
+  // Exchange mode with valid Solana refund address succeeds
+  const validQuoteRes = await guest.post(`/api/pay/${pr.publicId}/quote`, {
+    data: {
+      sourceDeploymentId: "solana-mainnet:SOL",
+      payerMode: "EXCHANGE",
+      refundAddress: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+    },
+  });
+  assert.equal(validQuoteRes.status(), 200);
+  const validQuote = await validQuoteRes.json();
+  assert.equal(validQuote.routeStatus, "SUPPORTED_AND_QUOTABLE");
+
+  // Scenario E: Insert an in-progress DEPOSIT_COMMITTED attempt and verify GET /api/pay/[id] recovers activeAttempt
+  const recoveryAttemptId = `pa_rec_${randomBytes(12).toString("hex")}`;
+  await workerDb.query(
+    `INSERT INTO flow.payment_attempts (
+      payment_request_id, attempt_public_id, payer_mode,
+      source_network, source_asset_id, source_asset_symbol, source_decimals,
+      route_type, route_status, swap_type, quoted_source_atomic_amount, quoted_destination_atomic_amount,
+      payer_refund_address, deposit_address, quote_expires_at,
+      status, verification_tier, is_provider_verified
+    ) VALUES (
+      $1::uuid, $2, 'WALLET',
+      'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
+      'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 'EXACT_OUTPUT', 680000000, 100000000,
+      '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU', '9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin',
+      CURRENT_TIMESTAMP + INTERVAL '15 minutes',
+      'DEPOSIT_COMMITTED', 'PROVIDER_VERIFIED', true
+    )`,
+    [pr.id, recoveryAttemptId],
+  );
+
+  const pubRead = await guest.get(`/api/pay/${pr.publicId}`);
+  assert.equal(pubRead.status(), 200);
+  const pubReadJson = await pubRead.json();
+  assert.ok(pubReadJson.activeAttempt, "Expected activeAttempt to be returned");
+  assert.equal(pubReadJson.activeAttempt.attemptPublicId, recoveryAttemptId);
+  assert.equal(pubReadJson.activeAttempt.status, "DEPOSIT_COMMITTED");
+  assert.equal(
+    pubReadJson.activeAttempt.depositAddress,
+    "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+  );
+
+  // Scenario F: Transition attempt to EXCEPTION_REFUND_REQUIRED and verify truthful status recovery
+  await workerDb.query(
+    `UPDATE flow.payment_attempts SET status = 'EXCEPTION_REFUND_REQUIRED', settlement_error = 'UNDERPAID_DEPOSIT' WHERE attempt_public_id = $1`,
+    [recoveryAttemptId],
+  );
+  const pubExceptionRead = await guest.get(
+    `/api/pay/${pr.publicId}?attempt=${recoveryAttemptId}`,
+  );
+  assert.equal(pubExceptionRead.status(), 200);
+  const pubExceptionJson = await pubExceptionRead.json();
+  assert.equal(
+    pubExceptionJson.activeAttempt.status,
+    "EXCEPTION_REFUND_REQUIRED",
+  );
+
+  // =========================================================================
+  // SCENARIO G — Desktop & Mobile UI Truthfulness & Layout Verification
+  // =========================================================================
+  const ctx = await app.browser.newContext({
+    ignoreHTTPSErrors: true,
+    viewport: { width: 1440, height: 900 },
+  });
+  try {
+    const page = await ctx.newPage();
+    await page.goto(`${app.origin}/sign-in`);
+    await page.getByLabel("Email address").fill(ownerEmail);
+    const otp = await codeFor(ownerEmail, () =>
+      page.getByRole("button", { name: /Send verification code/i }).click(),
+    );
+    await page.getByLabel("Email code").fill(otp);
+    await page.getByRole("button", { name: /Verify and continue/i }).click();
+    await page.getByRole("heading", { name: /Welcome back\./i }).waitFor();
+
+    // Verify provisioned status and zero fabricated mockup numbers on Dashboard
+    assert.ok(
+      await page
+        .getByText("Wallet provisioned (execution disabled)")
+        .first()
+        .isVisible(),
+    );
+    const bodyText = await page.locator("body").innerText();
+    for (const forbidden of [
+      "$2,840.00",
+      "$1,420.00",
+      "$1,360.00",
+      "$12,480.00",
+      "#INV-1042",
+      "Received from Studio Kora",
+    ]) {
+      assert.ok(
+        !bodyText.includes(forbidden),
+        `Fabricated mockup string "${forbidden}" must not appear in live workspace UI`,
+      );
+    }
+
+    // Verify Settings page displays the authenticated user's real email, not Amara Okafor
+    await page.goto(`${app.origin}/security`);
+    await page
+      .getByRole("heading", { name: "Settings", exact: true })
+      .waitFor();
+    const secBody = await page.locator("body").innerText();
+    assert.ok(secBody.includes(ownerEmail));
+    assert.ok(!secBody.includes("Amara Okafor"));
+
+    // Verify guest checkout displays Refund Required banner for EXCEPTION_REFUND_REQUIRED attempt
+    await page.goto(
+      `${app.origin}/pay/${pr.publicId}?attempt=${recoveryAttemptId}`,
+    );
+    await page
+      .getByText(/Refund Required — Do Not Send Additional Funds/i)
+      .waitFor();
+  } finally {
+    await ctx.close();
+  }
 });

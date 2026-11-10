@@ -1,10 +1,15 @@
 import { log } from "../src/foundation/logger.ts";
+import { getPrismaClient } from "../src/foundation/prisma.ts";
+import { readWalletConfig } from "../src/foundation/wallet-environment.ts";
+import { OutLayerAdapter } from "../src/server/custody/outlayer-adapter.ts";
+import { WalletProvisioningWorker } from "../src/server/custody/provisioning-worker.ts";
 import { PaymentMonitoringWorker } from "../src/server/payments/payment-monitoring-worker.ts";
 
 /**
- * Dedicated Background Payment Monitoring Worker Runner.
+ * Dedicated Background Payment & Wallet Provisioning Worker Runner.
  *
  * Continuously monitors active payment links and claims PostgreSQL leases via SKIP LOCKED.
+ * Also processes queued OutLayer wallet provisioning jobs when custody environment is configured.
  * Performs truthful reconciliation against provider status APIs and on-chain RPC verification.
  * Gracefully shuts down on SIGINT or SIGTERM signals.
  */
@@ -22,10 +27,40 @@ async function main(): Promise<void> {
   );
 
   const abortController = new AbortController();
+  let walletWorker: WalletProvisioningWorker | null = null;
+
+  if (
+    process.env.FLOW_OUTLAYER_API_URL &&
+    process.env.FLOW_WALLET_ENCRYPTION_KEY
+  ) {
+    try {
+      const walletConfig = readWalletConfig(process.env);
+      const adapter = new OutLayerAdapter(
+        process.env.FLOW_OUTLAYER_API_URL || walletConfig.apiUrl,
+        5_000,
+        { compatibilityConfig: walletConfig.compatibility },
+      );
+      walletWorker = new WalletProvisioningWorker({
+        db: getPrismaClient("worker"),
+        adapter,
+        walletConfig,
+        workerId: `${workerId}-custody`,
+      });
+      walletWorker.start(pollIntervalMs);
+    } catch (err) {
+      log("info", "wallet_provisioning_worker_not_started", {
+        workerId,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   const shutdown = (signal: string) => {
     log("info", "worker_shutdown_signal_received", { workerId, signal });
     abortController.abort();
+    if (walletWorker) {
+      void walletWorker.stop();
+    }
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));

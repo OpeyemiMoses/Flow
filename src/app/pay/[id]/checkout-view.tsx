@@ -46,7 +46,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
 
   // Deposit Instructions & Settlement Lifecycle State
   const [instructions, setInstructions] =
-    useState<PaymentDepositInstructions | null>(null);
+    useState<PaymentDepositInstructions | null>(request.activeAttempt ?? null);
   const [committing, setCommitting] = useState<boolean>(false);
   const [commitError, setCommitError] = useState<string | null>(null);
   const [copiedAddress, setCopiedAddress] = useState<boolean>(false);
@@ -109,7 +109,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
 
   // Trigger quote discovery when route, mode, or amount changes
   useEffect(() => {
-    if (!activeRoute || isExpired) return;
+    if (instructions || !activeRoute || isExpired) return;
 
     if (payerMode === "EXCHANGE" && refundValidationMessage) {
       return;
@@ -173,6 +173,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   }, [
     activeRoute,
     customAmount,
+    instructions,
     isExpired,
     payerMode,
     refundAddress,
@@ -766,13 +767,61 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                           Send exact amount to deposit address
                         </h3>
                       </div>
-                      <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 border border-amber-200 px-3 py-1 text-[11px] font-semibold text-amber-800">
-                        <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
-                        {instructions.status === "SETTLING"
+                      <span
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                          instructions.status === "FAILED" ||
+                          instructions.status === "EXPIRED" ||
+                          instructions.status === "EXCEPTION_REFUND_REQUIRED"
+                            ? "bg-red-50 border-red-200 text-[#FF1A1A]"
+                            : "bg-amber-50 border-amber-200 text-amber-800"
+                        }`}
+                      >
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            instructions.status === "FAILED" ||
+                            instructions.status === "EXPIRED" ||
+                            instructions.status === "EXCEPTION_REFUND_REQUIRED"
+                              ? "bg-[#FF1A1A]"
+                              : "bg-amber-500 animate-pulse"
+                          }`}
+                        />
+                        {instructions.status === "SETTLING" ||
+                        instructions.status === "DETECTED"
                           ? "SETTLING"
-                          : "AWAITING DEPOSIT"}
+                          : instructions.status === "EXCEPTION_REFUND_REQUIRED"
+                            ? "REFUND REQUIRED"
+                            : instructions.status === "EXPIRED"
+                              ? "QUOTE EXPIRED"
+                              : instructions.status === "FAILED"
+                                ? "ROUTE FAILED"
+                                : "AWAITING DEPOSIT"}
                       </span>
                     </div>
+
+                    {instructions.status === "EXCEPTION_REFUND_REQUIRED" && (
+                      <div className="rounded-[14px] border border-red-200 bg-red-50 p-3 text-xs text-[#FF1A1A]">
+                        <strong>Refund Required — Do Not Send Additional Funds:</strong> Deposit was
+                        received outside the valid quote window or could not be
+                        routed. Funds are queued for refund to the configured
+                        refund address.
+                      </div>
+                    )}
+
+                    {instructions.status === "EXPIRED" && (
+                      <div className="rounded-[14px] border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                        <strong>Deposit Window Expired:</strong> Do not send
+                        funds to this expired deposit address. Click &ldquo;Back
+                        to Quote Preview&rdquo; below to request a fresh quote.
+                      </div>
+                    )}
+
+                    {instructions.status === "FAILED" && (
+                      <div className="rounded-[14px] border border-red-200 bg-red-50 p-3 text-xs text-[#FF1A1A]">
+                        <strong>Route Execution Failed:</strong> This payment
+                        attempt could not be completed. Click &ldquo;Back to
+                        Quote Preview&rdquo; to select another route.
+                      </div>
+                    )}
 
                     <div className="grid grid-cols-1 sm:grid-cols-12 gap-4 items-center rounded-[18px] border border-neutral-200 bg-white p-4">
                       <div className="sm:col-span-5 flex flex-col items-center justify-center">

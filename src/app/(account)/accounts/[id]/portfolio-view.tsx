@@ -67,107 +67,6 @@ function formatTimestamp(iso: string | null): string {
   }
 }
 
-const REFERENCE_TRANSACTIONS = [
-  {
-    id: "ref-1",
-    dateTime: "Apr 10, 2026 · 2:14 PM",
-    title: "Received from Studio Kora",
-    subtitle: "Design system retainer — Q2",
-    type: "In" as const,
-    network: "Base",
-    ecosystem: "evm" as EcosystemFamily,
-    asset: "USDC",
-    amount: "+$420.00",
-    tokenAmount: "420.00 USDC",
-    status: "Completed" as const,
-    category: "received",
-  },
-  {
-    id: "ref-2",
-    dateTime: "Apr 9, 2026 · 5:48 PM",
-    title: "Payment link — Design sprint",
-    subtitle: "flow.pay/amara/design-sprint",
-    type: "In" as const,
-    network: "Solana",
-    ecosystem: "solana" as EcosystemFamily,
-    asset: "SOL",
-    amount: "+$1,250.00",
-    tokenAmount: "8.45 SOL",
-    status: "Completed" as const,
-    category: "links",
-  },
-  {
-    id: "ref-3",
-    dateTime: "Apr 8, 2026 · 11:20 AM",
-    title: "Sent to @devon.near",
-    subtitle: "Frontend contractor payout",
-    type: "Out" as const,
-    network: "NEAR",
-    ecosystem: "near" as EcosystemFamily,
-    asset: "NEAR",
-    amount: "-$85.00",
-    tokenAmount: "14.20 NEAR",
-    status: "Completed" as const,
-    category: "sent",
-  },
-  {
-    id: "ref-4",
-    dateTime: "Apr 7, 2026 · 9:05 AM",
-    title: "Invoice #INV-2048 — Web App Retainer",
-    subtitle: "Billed to Northstar Labs",
-    type: "In" as const,
-    network: "Base",
-    ecosystem: "evm" as EcosystemFamily,
-    asset: "USDC",
-    amount: "+$2,400.00",
-    tokenAmount: "2,400.00 USDC",
-    status: "Pending" as const,
-    category: "invoices",
-  },
-  {
-    id: "ref-5",
-    dateTime: "Apr 5, 2026 · 4:32 PM",
-    title: "Received from @lena.sol",
-    subtitle: "Split dinner & flights",
-    type: "In" as const,
-    network: "Solana",
-    ecosystem: "solana" as EcosystemFamily,
-    asset: "USDC",
-    amount: "+$310.00",
-    tokenAmount: "310.00 USDC",
-    status: "Completed" as const,
-    category: "received",
-  },
-  {
-    id: "ref-6",
-    dateTime: "Apr 3, 2026 · 1:15 PM",
-    title: "Sent to Treasury Vault",
-    subtitle: "Monthly reserve allocation",
-    type: "Out" as const,
-    network: "Ethereum",
-    ecosystem: "evm" as EcosystemFamily,
-    asset: "ETH",
-    amount: "-$640.00",
-    tokenAmount: "0.24 ETH",
-    status: "Completed" as const,
-    category: "sent",
-  },
-  {
-    id: "ref-7",
-    dateTime: "Apr 1, 2026 · 6:50 PM",
-    title: "Payment link — Brand Strategy Workshop",
-    subtitle: "flow.pay/amara/brand-workshop",
-    type: "In" as const,
-    network: "Base",
-    ecosystem: "evm" as EcosystemFamily,
-    asset: "USDC",
-    amount: "+$780.00",
-    tokenAmount: "780.00 USDC",
-    status: "Completed" as const,
-    category: "links",
-  },
-];
-
 export function PortfolioView({
   accountId,
   initialPortfolio,
@@ -185,6 +84,10 @@ export function PortfolioView({
     useState<SerializedAccountPortfolio>(initialPortfolio);
   const [activeTab, setActiveTab] = useState<WorkspaceTab>(initialView);
   const [refreshing, setRefreshing] = useState(false);
+  const [provisioningWallet, setProvisioningWallet] = useState(false);
+  const [walletStatusOverride, setWalletStatusOverride] = useState<
+    WorkspaceAccountSummary["walletStatus"] | null
+  >(null);
   const [message, setMessage] = useState("");
   const [cooldown, setCooldown] = useState(
     initialPortfolio.cooldownRemainingSeconds ?? 0,
@@ -235,6 +138,30 @@ export function PortfolioView({
   const [activityTotal, setActivityTotal] = useState<number>(0);
   const [activityLoading, setActivityLoading] = useState<boolean>(false);
 
+  const handleProvisionWallet = useCallback(async () => {
+    if (provisioningWallet) return;
+    setProvisioningWallet(true);
+    setMessage("");
+    try {
+      const res = await send<{
+        outcome: string;
+        walletStatus: WorkspaceAccountSummary["walletStatus"];
+        portfolio: SerializedAccountPortfolio;
+      }>(`/api/accounts/${accountId}/wallet/provision`, {}, "POST");
+      setPortfolio(res.portfolio);
+      setWalletStatusOverride(res.walletStatus);
+      setMessage(
+        res.walletStatus === "active"
+          ? "OutLayer wallet provisioned and addresses verified across Ethereum/Base, Solana, and NEAR."
+          : `Wallet provisioning status: ${res.walletStatus}`,
+      );
+    } catch (error) {
+      setMessage(describe(error));
+    } finally {
+      setProvisioningWallet(false);
+    }
+  }, [accountId, provisioningWallet]);
+
   const handleSyncActivities = useCallback(async () => {
     setActivityLoading(true);
     setMessage("");
@@ -255,7 +182,6 @@ export function PortfolioView({
   }, [accountId]);
 
   useEffect(() => {
-    if (activeTab !== "activity") return;
     let active = true;
     send<ActivityFeedResponse>(
       `/api/accounts/${accountId}/activities?limit=50`,
@@ -275,7 +201,6 @@ export function PortfolioView({
   }, [accountId, activeTab]);
 
   useEffect(() => {
-    if (activeTab !== "receive") return;
     let active = true;
     send<{ requests: SerializedPaymentRequest[] }>(
       `/api/accounts/${accountId}/payment-requests`,
@@ -487,29 +412,90 @@ export function PortfolioView({
   const personalAccounts = allAccounts.filter((a) => a.kind === "PERSONAL");
   const businessAccounts = allAccounts.filter((a) => a.kind === "BUSINESS");
 
+  const effectiveWalletStatus =
+    walletStatusOverride ?? (wallet ? "active" : currentAccount.walletStatus);
+
   const walletStatusLabel =
-    currentAccount.walletStatus === "active"
+    effectiveWalletStatus === "active"
       ? "Wallet provisioned (execution disabled)"
-      : currentAccount.walletStatus === "provisioning"
+      : effectiveWalletStatus === "provisioning"
         ? "Wallet provisioning in progress"
-        : currentAccount.walletStatus === "setup_failed"
+        : effectiveWalletStatus === "setup_failed"
           ? "Wallet setup failed"
           : "Wallet setup pending";
 
   const evmAddr =
     wallet?.addresses.find(
       (a) => a.network.includes("ethereum") || a.network.includes("base"),
-    )?.address ?? "0x71C...9A23";
+    )?.address ?? "Not provisioned";
   const solAddr =
     wallet?.addresses.find((a) => a.network.includes("solana"))?.address ??
-    "7xKX...gAsU";
+    "Not provisioned";
   const nearAddr =
     wallet?.addresses.find((a) => a.network.includes("near"))?.address ??
-    "amara.near";
+    "Not provisioned";
+
+  const usdcBalanceTotal = useMemo(() => {
+    return balances
+      .filter((b) => b.networkAsset.asset.symbol.toUpperCase() === "USDC")
+      .reduce((acc, b) => acc + (Number(b.displayBalance) || 0), 0);
+  }, [balances]);
+
+  const totalStableFormatted = `$${usdcBalanceTotal.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+  const evmUsdcBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        (b.networkAsset.network.includes("base") ||
+          b.networkAsset.network.includes("ethereum")) &&
+        b.networkAsset.asset.symbol.toUpperCase() === "USDC",
+    );
+    return match?.displayBalance ?? "0.00";
+  }, [balances]);
+
+  const solNativeBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network.includes("solana") &&
+        b.networkAsset.asset.symbol.toUpperCase() === "SOL",
+    );
+    return match?.displayBalance ?? "0";
+  }, [balances]);
+
+  const nearNativeBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network.includes("near") &&
+        b.networkAsset.asset.symbol.toUpperCase() === "NEAR",
+    );
+    return match?.displayBalance ?? "0";
+  }, [balances]);
+
+  const settledRequests = useMemo(
+    () => paymentRequests.filter((r) => r.status === "COMPLETED"),
+    [paymentRequests],
+  );
+  const openRequests = useMemo(
+    () => paymentRequests.filter((r) => r.status === "ACTIVE"),
+    [paymentRequests],
+  );
+  const settledTotalUsd = useMemo(() => {
+    const sum = settledRequests.reduce(
+      (acc, r) => acc + (Number(r.displayAmount) || 0),
+      0,
+    );
+    return `$${sum.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  }, [settledRequests]);
 
   const latestShareUrl =
     paymentRequests[0]?.shareUrl ??
-    `https://flow.pay/${currentAccount.name.toLowerCase().replace(/\s+/g, "-")}/design-deposit`;
+    "Create a payment request to generate a shareable link";
 
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-neutral-950 flex flex-col lg:flex-row">
@@ -777,7 +763,7 @@ export function PortfolioView({
       {/* =====================================================================
           MAIN WORKSPACE AREA
          ===================================================================== */}
-      <div className="flex-1 min-w-0 pb-28 lg:pb-12 relative overflow-hidden">
+      <div className="flex-1 min-w-0 pb-36 lg:pb-16 relative overflow-hidden">
         {/* Top-Right Decorative Red Wave (Shown on Assets / Activity / Settings) */}
         {(activeTab === "assets" || activeTab === "activity") && (
           <div
@@ -811,9 +797,27 @@ export function PortfolioView({
               </div>
               <div className="hidden sm:flex items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3 py-1 text-[11px] font-medium text-neutral-700 shadow-2xs">
-                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      effectiveWalletStatus === "active"
+                        ? "bg-emerald-500"
+                        : "bg-amber-500"
+                    }`}
+                  />
                   {walletStatusLabel}
                 </span>
+                {effectiveWalletStatus !== "active" && (
+                  <button
+                    type="button"
+                    onClick={handleProvisionWallet}
+                    disabled={provisioningWallet}
+                    className="inline-flex items-center gap-1 rounded-full bg-[#FF1A1A] px-3 py-1 text-[11px] font-semibold text-white shadow-2xs hover:bg-[#E01515] disabled:opacity-50"
+                  >
+                    {provisioningWallet
+                      ? "Provisioning..."
+                      : "Complete Wallet Setup"}
+                  </button>
+                )}
                 {portfolio.lastSyncedAt && (
                   <span className="text-[11px] text-neutral-500">
                     Synced {formatTimestamp(portfolio.lastSyncedAt)}
@@ -938,27 +942,6 @@ export function PortfolioView({
                 </Link>
               )}
 
-              <button
-                type="button"
-                aria-label="Notifications"
-                className="relative inline-flex h-9 w-9 items-center justify-center rounded-full border border-neutral-200 bg-white text-neutral-700 shadow-2xs"
-              >
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-                  <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-                </svg>
-                <span className="absolute -top-0.5 -right-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-[#FF1A1A] text-[9px] font-bold text-white">
-                  3
-                </span>
-              </button>
-
               <Link prefetch={false} href="/security" className="shrink-0">
                 <img
                   src="/assets/amara-avatar.png"
@@ -972,9 +955,27 @@ export function PortfolioView({
           {/* Mobile Status Badge (For Playwright & Mobile Visibility) */}
           <div className="sm:hidden mb-4 flex flex-wrap items-center gap-2">
             <span className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3 py-1 text-[11px] font-medium text-neutral-700">
-              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  effectiveWalletStatus === "active"
+                    ? "bg-emerald-500"
+                    : "bg-amber-500"
+                }`}
+              />
               {walletStatusLabel}
             </span>
+            {effectiveWalletStatus !== "active" && (
+              <button
+                type="button"
+                onClick={handleProvisionWallet}
+                disabled={provisioningWallet}
+                className="inline-flex items-center gap-1 rounded-full bg-[#FF1A1A] px-3 py-1 text-[11px] font-semibold text-white"
+              >
+                {provisioningWallet
+                  ? "Provisioning..."
+                  : "Complete Wallet Setup"}
+              </button>
+            )}
           </div>
 
           {message && (
@@ -1016,18 +1017,18 @@ export function PortfolioView({
                       Total received
                     </p>
                     <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
-                      $12,480.00
+                      {settledTotalUsd}
                     </p>
                     <p className="mt-1 text-[11px] font-semibold text-emerald-600">
-                      +18.4% this month
+                      {settledRequests.length} settled requests
                     </p>
                   </div>
                   <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs">
                     <p className="text-[11px] font-medium text-neutral-500">
-                      Payments
+                      On-chain transfers
                     </p>
                     <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
-                      246
+                      {activities.length}
                     </p>
                     <p className="mt-1 text-[11px] text-neutral-500">
                       Across Base, Solana &amp; NEAR
@@ -1035,22 +1036,23 @@ export function PortfolioView({
                   </div>
                   <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs">
                     <p className="text-[11px] font-medium text-neutral-500">
-                      Invoices
+                      Payment links
                     </p>
                     <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
-                      18
+                      {paymentRequests.length}
                     </p>
                     <p className="mt-1 text-[11px] text-neutral-500">
-                      15 settled · 3 open
+                      {settledRequests.length} settled · {openRequests.length}{" "}
+                      open
                     </p>
                   </div>
                   <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs flex flex-col justify-between">
                     <div>
                       <p className="text-[11px] font-medium text-neutral-500">
-                        Team members
+                        Workspace role
                       </p>
                       <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
-                        12
+                        {currentAccount.role}
                       </p>
                     </div>
                     {canManageTeam && (
@@ -1077,22 +1079,26 @@ export function PortfolioView({
                   <div className="relative z-10">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-medium text-neutral-400">
-                        Total balance
+                        Observed USDC balance
                       </span>
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-0.5 text-[11px] font-medium text-neutral-200">
-                        USD ▾
+                        USDC · RPC
                       </span>
                     </div>
 
                     <div className="mt-2 flex flex-wrap items-baseline gap-3">
                       <span className="font-display text-4xl sm:text-[44px] font-bold tracking-tight text-white">
-                        $2,840.00
+                        {totalStableFormatted}
                       </span>
                       <span className="inline-flex items-center rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-xs font-semibold text-emerald-400">
-                        ↗ +5.24%
+                        {effectiveWalletStatus === "active"
+                          ? "OutLayer Active"
+                          : "Setup Pending"}
                       </span>
                       <span className="text-xs text-neutral-400">
-                        +$141.50 (24h)
+                        {balances.length > 0
+                          ? `${balances.length} RPC balances synced`
+                          : "Read-only RPC"}
                       </span>
                     </div>
                   </div>
@@ -1130,7 +1136,7 @@ export function PortfolioView({
                         <span>USDC</span>
                       </div>
                       <p className="mt-1 font-display text-sm font-bold text-white">
-                        $1,420.00
+                        {evmUsdcBalance} USDC
                       </p>
                     </div>
                     <div className="border-l border-white/10 pl-3">
@@ -1139,7 +1145,7 @@ export function PortfolioView({
                         <span>SOL</span>
                       </div>
                       <p className="mt-1 font-display text-sm font-bold text-white">
-                        $1,360.00
+                        {solNativeBalance} SOL
                       </p>
                     </div>
                     <div className="border-l border-white/10 pl-3">
@@ -1148,7 +1154,7 @@ export function PortfolioView({
                         <span>NEAR</span>
                       </div>
                       <p className="mt-1 font-display text-sm font-bold text-white">
-                        $60.00
+                        {nearNativeBalance} NEAR
                       </p>
                     </div>
                   </div>
@@ -1235,8 +1241,10 @@ export function PortfolioView({
                       Your assets
                     </h2>
                     <span className="text-xs font-medium text-neutral-500">
-                      Total{" "}
-                      <strong className="text-neutral-900">$2,840.00</strong>
+                      Observed USDC{" "}
+                      <strong className="text-neutral-900">
+                        {totalStableFormatted}
+                      </strong>
                     </span>
                   </div>
                   <button
@@ -1270,8 +1278,9 @@ export function PortfolioView({
                       </div>
                       <button
                         type="button"
+                        disabled={!wallet}
                         onClick={() => copyAddress("dash-evm", evmAddr)}
-                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900"
+                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-40"
                       >
                         {copiedKey === "dash-evm" ? "Copied" : "Copy"}
                       </button>
@@ -1280,14 +1289,14 @@ export function PortfolioView({
                     <div className="mt-4 flex items-end justify-between">
                       <div>
                         <p className="font-display text-2xl font-bold text-neutral-950">
-                          $1,420.00
+                          {evmUsdcBalance} USDC
                         </p>
                         <div className="mt-1 flex items-center gap-2 text-[11px]">
                           <span className="text-neutral-500">
-                            50.0% of total
+                            {wallet ? "Read-only RPC" : "Pending setup"}
                           </span>
                           <span className="font-semibold text-emerald-600">
-                            +2.4% (24h)
+                            EVM
                           </span>
                         </div>
                       </div>
@@ -1328,8 +1337,9 @@ export function PortfolioView({
                       </div>
                       <button
                         type="button"
+                        disabled={!wallet}
                         onClick={() => copyAddress("dash-sol", solAddr)}
-                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900"
+                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-40"
                       >
                         {copiedKey === "dash-sol" ? "Copied" : "Copy"}
                       </button>
@@ -1338,14 +1348,14 @@ export function PortfolioView({
                     <div className="mt-4 flex items-end justify-between">
                       <div>
                         <p className="font-display text-2xl font-bold text-neutral-950">
-                          $1,360.00
+                          {solNativeBalance} SOL
                         </p>
                         <div className="mt-1 flex items-center gap-2 text-[11px]">
                           <span className="text-neutral-500">
-                            47.9% of total
+                            {wallet ? "Read-only RPC" : "Pending setup"}
                           </span>
                           <span className="font-semibold text-emerald-600">
-                            +8.6% (24h)
+                            Solana
                           </span>
                         </div>
                       </div>
@@ -1386,8 +1396,9 @@ export function PortfolioView({
                       </div>
                       <button
                         type="button"
+                        disabled={!wallet}
                         onClick={() => copyAddress("dash-near", nearAddr)}
-                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900"
+                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-40"
                       >
                         {copiedKey === "dash-near" ? "Copied" : "Copy"}
                       </button>
@@ -1396,14 +1407,14 @@ export function PortfolioView({
                     <div className="mt-4 flex items-end justify-between">
                       <div>
                         <p className="font-display text-2xl font-bold text-neutral-950">
-                          $60.00
+                          {nearNativeBalance} NEAR
                         </p>
                         <div className="mt-1 flex items-center gap-2 text-[11px]">
                           <span className="text-neutral-500">
-                            2.1% of total
+                            {wallet ? "Read-only RPC" : "Pending setup"}
                           </span>
                           <span className="font-semibold text-emerald-600">
-                            +1.1% (24h)
+                            NEAR
                           </span>
                         </div>
                       </div>
@@ -1442,48 +1453,99 @@ export function PortfolioView({
                     </button>
                   </div>
 
-                  <div className="divide-y divide-neutral-100">
-                    {REFERENCE_TRANSACTIONS.slice(0, 4).map((tx) => (
-                      <div
-                        key={tx.id}
-                        className="flex items-center justify-between py-3.5 first:pt-1 last:pb-1"
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <span
-                            className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
-                              tx.type === "In"
-                                ? "bg-emerald-50 text-emerald-600"
-                                : "bg-red-50 text-[#FF1A1A]"
-                            }`}
-                          >
-                            {tx.type === "In" ? "↙" : "↗"}
-                          </span>
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold text-neutral-950">
-                              {tx.title}
+                  {activities.length === 0 && paymentRequests.length === 0 ? (
+                    <div className="rounded-[18px] border border-dashed border-neutral-200 bg-neutral-50/70 p-6 text-center">
+                      <p className="text-sm font-semibold text-neutral-800">
+                        No transactions or payment requests recorded yet.
+                      </p>
+                      <p className="mt-1 text-xs text-neutral-500">
+                        Create a payment link or sync on-chain activity to see
+                        verified transfers here.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-neutral-100">
+                      {activities.slice(0, 3).map((act) => (
+                        <div
+                          key={act.id}
+                          className="flex items-center justify-between py-3.5 first:pt-1 last:pb-1"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <span
+                              className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                                act.direction === "INCOMING"
+                                  ? "bg-emerald-50 text-emerald-600"
+                                  : "bg-red-50 text-[#FF1A1A]"
+                              }`}
+                            >
+                              {act.direction === "INCOMING" ? "↙" : "↗"}
+                            </span>
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold text-neutral-950">
+                                {act.direction === "INCOMING"
+                                  ? "Inbound Transfer"
+                                  : "Outbound Transfer"}
+                              </p>
+                              <p className="text-xs text-neutral-500">
+                                {act.assetSymbol} · {act.network} ·{" "}
+                                {act.finality}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0 pl-3">
+                            <p
+                              className={`font-display text-sm font-bold ${
+                                act.direction === "INCOMING"
+                                  ? "text-emerald-600"
+                                  : "text-neutral-950"
+                              }`}
+                            >
+                              {act.direction === "INCOMING" ? "+" : "-"}
+                              {act.displayAmount} {act.assetSymbol}
                             </p>
-                            <p className="text-xs text-neutral-500">
-                              {tx.asset} · {tx.network} · Completed
+                            <p className="text-[11px] font-mono text-neutral-400">
+                              {truncateMiddle(act.txHash, 6, 4)}
                             </p>
                           </div>
                         </div>
-                        <div className="text-right shrink-0 pl-3">
-                          <p
-                            className={`font-display text-sm font-bold ${
-                              tx.type === "In"
-                                ? "text-emerald-600"
-                                : "text-neutral-950"
-                            }`}
-                          >
-                            {tx.amount}
-                          </p>
-                          <p className="text-[11px] text-neutral-400">
-                            {tx.tokenAmount}
-                          </p>
+                      ))}
+                      {paymentRequests.slice(0, 3).map((req) => (
+                        <div
+                          key={req.id}
+                          className="flex items-center justify-between py-3.5 first:pt-1 last:pb-1"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-xs font-bold text-neutral-800">
+                              🔗
+                            </span>
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold text-neutral-950">
+                                {req.title}
+                              </p>
+                              <p className="text-xs text-neutral-500">
+                                {req.destinationAssetSymbol} ·{" "}
+                                {req.destinationNetwork} · {req.status}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0 pl-3">
+                            <p className="font-display text-sm font-bold text-neutral-950">
+                              {req.amountMode === "FIXED"
+                                ? `${req.displayAmount} ${req.destinationAssetSymbol}`
+                                : "Open amount"}
+                            </p>
+                            <Link
+                              prefetch={false}
+                              href={`/pay/${req.publicId}`}
+                              className="text-[11px] font-semibold text-[#FF1A1A] hover:underline"
+                            >
+                              View link →
+                            </Link>
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* Right Card: "GET PAID EASILY / Turn any payment into a simple link or QR." */}
@@ -1599,7 +1661,7 @@ export function PortfolioView({
                     </div>
 
                     <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
-                      $1,420.00
+                      {evmUsdcBalance} USDC
                     </p>
                     <p className="mt-1 font-mono text-xs text-neutral-500">
                       {truncateMiddle(evmAddr, 8, 6)}
@@ -1609,8 +1671,9 @@ export function PortfolioView({
                   <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
                     <button
                       type="button"
+                      disabled={!wallet}
                       onClick={() => copyAddress("wallet-evm", evmAddr)}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950 disabled:opacity-40"
                     >
                       {copiedKey === "wallet-evm" ? (
                         <>
@@ -1653,7 +1716,7 @@ export function PortfolioView({
                     </div>
 
                     <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
-                      $1,360.00
+                      {solNativeBalance} SOL
                     </p>
                     <p className="mt-1 font-mono text-xs text-neutral-500">
                       {truncateMiddle(solAddr, 8, 6)}
@@ -1663,8 +1726,9 @@ export function PortfolioView({
                   <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
                     <button
                       type="button"
+                      disabled={!wallet}
                       onClick={() => copyAddress("wallet-sol", solAddr)}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950 disabled:opacity-40"
                     >
                       {copiedKey === "wallet-sol" ? (
                         <>
@@ -1707,7 +1771,7 @@ export function PortfolioView({
                     </div>
 
                     <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
-                      $60.00
+                      {nearNativeBalance} NEAR
                     </p>
                     <p className="mt-1 font-mono text-xs text-neutral-500">
                       {truncateMiddle(nearAddr, 8, 6)}
@@ -1717,8 +1781,9 @@ export function PortfolioView({
                   <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
                     <button
                       type="button"
+                      disabled={!wallet}
                       onClick={() => copyAddress("wallet-near", nearAddr)}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950 disabled:opacity-40"
                     >
                       {copiedKey === "wallet-near" ? (
                         <>
@@ -2478,8 +2543,7 @@ export function PortfolioView({
                     Last 30 days ▾
                   </span>
                   <span className="rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-medium text-neutral-700">
-                    All networks (
-                    {activityTotal + REFERENCE_TRANSACTIONS.length})
+                    All networks ({activityTotal + paymentRequests.length})
                   </span>
                 </div>
               </div>
@@ -2499,160 +2563,215 @@ export function PortfolioView({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-neutral-100 text-xs">
-                      {/* Real On-Chain Activities if any */}
-                      {activities.map((act) => {
-                        const explorer = getExplorerUrl(
-                          act.network,
-                          act.txHash,
-                        );
-                        return (
+                      {/* Real On-Chain Activities */}
+                      {activities
+                        .filter((act) => {
+                          if (
+                            activityCategory === "sent" &&
+                            act.direction !== "OUTGOING"
+                          ) {
+                            return false;
+                          }
+                          if (
+                            activityCategory === "received" &&
+                            act.direction !== "INCOMING"
+                          ) {
+                            return false;
+                          }
+                          if (
+                            activityCategory === "links" ||
+                            activityCategory === "invoices"
+                          ) {
+                            return false;
+                          }
+                          const q = searchQuery.trim().toLowerCase();
+                          if (!q) return true;
+                          return (
+                            act.txHash.toLowerCase().includes(q) ||
+                            act.network.toLowerCase().includes(q) ||
+                            act.assetSymbol.toLowerCase().includes(q)
+                          );
+                        })
+                        .map((act) => {
+                          const explorer = getExplorerUrl(
+                            act.network,
+                            act.txHash,
+                          );
+                          return (
+                            <tr
+                              key={act.id}
+                              className="hover:bg-neutral-50/80 transition-colors"
+                            >
+                              <td className="py-4 pl-6 pr-3 text-neutral-500 whitespace-nowrap">
+                                {formatTimestamp(act.blockTimestamp)}
+                              </td>
+                              <td className="py-4 px-3">
+                                <p className="font-display font-bold text-neutral-950">
+                                  {act.direction === "INCOMING"
+                                    ? "Inbound Transfer"
+                                    : "Outbound Transfer"}
+                                </p>
+                                <p className="font-mono text-[11px] text-neutral-400">
+                                  {truncateMiddle(act.txHash, 8, 6)}
+                                  {explorer && (
+                                    <a
+                                      href={explorer}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="ml-2 text-[#FF1A1A] hover:underline"
+                                    >
+                                      Explorer ↗
+                                    </a>
+                                  )}
+                                </p>
+                              </td>
+                              <td className="py-4 px-3">
+                                <span
+                                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                                    act.direction === "INCOMING"
+                                      ? "bg-emerald-50 text-emerald-700"
+                                      : "bg-red-50 text-[#FF1A1A]"
+                                  }`}
+                                >
+                                  {act.direction === "INCOMING"
+                                    ? "↓ In"
+                                    : "↑ Out"}
+                                </span>
+                              </td>
+                              <td className="py-4 px-3">
+                                <span className="inline-flex items-center gap-1.5 font-medium text-neutral-800">
+                                  <ChainBadge
+                                    chainKey={act.network}
+                                    size={16}
+                                  />
+                                  {act.network}
+                                </span>
+                              </td>
+                              <td className="py-4 px-3 text-right font-display font-bold text-neutral-950">
+                                {act.displayAmount} {act.assetSymbol}
+                              </td>
+                              <td className="py-4 pl-3 pr-6 text-right">
+                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                  {act.finality}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                      {/* Real Payment Requests & Links */}
+                      {paymentRequests
+                        .filter((req) => {
+                          if (activityCategory === "sent") return false;
+                          if (
+                            activityCategory === "received" &&
+                            req.status !== "COMPLETED"
+                          ) {
+                            return false;
+                          }
+                          const q = searchQuery.trim().toLowerCase();
+                          if (!q) return true;
+                          return (
+                            req.title.toLowerCase().includes(q) ||
+                            req.publicId.toLowerCase().includes(q) ||
+                            req.destinationNetwork.toLowerCase().includes(q) ||
+                            req.destinationAssetSymbol.toLowerCase().includes(q)
+                          );
+                        })
+                        .map((req) => (
                           <tr
-                            key={act.id}
+                            key={req.id}
                             className="hover:bg-neutral-50/80 transition-colors"
                           >
                             <td className="py-4 pl-6 pr-3 text-neutral-500 whitespace-nowrap">
-                              {formatTimestamp(act.blockTimestamp)}
+                              {formatTimestamp(req.createdAt)}
                             </td>
                             <td className="py-4 px-3">
                               <p className="font-display font-bold text-neutral-950">
-                                {act.direction === "INCOMING"
-                                  ? "Inbound Transfer"
-                                  : "Outbound Transfer"}
+                                {req.title}
                               </p>
-                              <p className="font-mono text-[11px] text-neutral-400">
-                                {truncateMiddle(act.txHash, 8, 6)}
-                                {explorer && (
-                                  <a
-                                    href={explorer}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="ml-2 text-[#FF1A1A] hover:underline"
-                                  >
-                                    Explorer ↗
-                                  </a>
-                                )}
+                              <p className="text-[11px] text-neutral-500">
+                                <Link
+                                  prefetch={false}
+                                  href={`/pay/${req.publicId}`}
+                                  className="font-mono text-neutral-500 hover:text-[#FF1A1A] hover:underline"
+                                >
+                                  /pay/{req.publicId}
+                                </Link>
                               </p>
                             </td>
                             <td className="py-4 px-3">
-                              <span
-                                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
-                                  act.direction === "INCOMING"
-                                    ? "bg-emerald-50 text-emerald-700"
-                                    : "bg-red-50 text-[#FF1A1A]"
-                                }`}
-                              >
-                                {act.direction === "INCOMING"
-                                  ? "↓ In"
-                                  : "↑ Out"}
+                              <span className="inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2.5 py-0.5 text-[11px] font-semibold text-neutral-800">
+                                🔗 Link
                               </span>
                             </td>
                             <td className="py-4 px-3">
                               <span className="inline-flex items-center gap-1.5 font-medium text-neutral-800">
-                                <ChainBadge chainKey={act.network} size={16} />
-                                {act.network}
+                                <ChainBadge
+                                  chainKey={req.destinationNetwork}
+                                  size={16}
+                                />
+                                {req.destinationNetwork}
                               </span>
                             </td>
-                            <td className="py-4 px-3 text-right font-display font-bold text-neutral-950">
-                              {act.displayAmount} {act.assetSymbol}
+                            <td className="py-4 px-3 text-right">
+                              <p className="font-display font-bold text-neutral-950">
+                                {req.amountMode === "FIXED"
+                                  ? `${req.displayAmount} ${req.destinationAssetSymbol}`
+                                  : "Open amount"}
+                              </p>
                             </td>
                             <td className="py-4 pl-3 pr-6 text-right">
-                              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
-                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                                {act.finality}
+                              <span
+                                className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+                                  req.status === "COMPLETED"
+                                    ? "bg-emerald-50 text-emerald-700"
+                                    : req.status === "ACTIVE"
+                                      ? "bg-amber-50 text-amber-700"
+                                      : "bg-neutral-100 text-neutral-600"
+                                }`}
+                              >
+                                <span
+                                  className={`h-1.5 w-1.5 rounded-full ${
+                                    req.status === "COMPLETED"
+                                      ? "bg-emerald-500"
+                                      : req.status === "ACTIVE"
+                                        ? "bg-amber-500"
+                                        : "bg-neutral-400"
+                                  }`}
+                                />
+                                {req.status}
                               </span>
                             </td>
                           </tr>
-                        );
-                      })}
+                        ))}
 
-                      {/* Reference Transactions matching 08_26_21 PM-9.png */}
-                      {REFERENCE_TRANSACTIONS.filter(
-                        (tx) =>
-                          activityCategory === "all" ||
-                          tx.category === activityCategory,
-                      ).map((tx) => (
-                        <tr
-                          key={tx.id}
-                          className="hover:bg-neutral-50/80 transition-colors"
-                        >
-                          <td className="py-4 pl-6 pr-3 text-neutral-500 whitespace-nowrap">
-                            {tx.dateTime}
-                          </td>
-                          <td className="py-4 px-3">
-                            <p className="font-display font-bold text-neutral-950">
-                              {tx.title}
-                            </p>
-                            <p className="text-[11px] text-neutral-500">
-                              {tx.subtitle}
-                            </p>
-                          </td>
-                          <td className="py-4 px-3">
-                            <span
-                              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
-                                tx.type === "In"
-                                  ? "bg-emerald-50 text-emerald-700"
-                                  : "bg-red-50 text-[#FF1A1A]"
-                              }`}
+                      {activities.length === 0 &&
+                        paymentRequests.length === 0 && (
+                          <tr>
+                            <td
+                              colSpan={6}
+                              className="py-10 text-center text-xs text-neutral-500"
                             >
-                              {tx.type === "In" ? "↓ In" : "↑ Out"}
-                            </span>
-                          </td>
-                          <td className="py-4 px-3">
-                            <span className="inline-flex items-center gap-1.5 font-medium text-neutral-800">
-                              <ChainBadge chainKey={tx.network} size={16} />
-                              {tx.network}
-                            </span>
-                          </td>
-                          <td className="py-4 px-3 text-right">
-                            <p
-                              className={`font-display font-bold ${
-                                tx.type === "In"
-                                  ? "text-emerald-600"
-                                  : "text-neutral-950"
-                              }`}
-                            >
-                              {tx.amount}
-                            </p>
-                            <p className="text-[11px] text-neutral-400">
-                              {tx.tokenAmount}
-                            </p>
-                          </td>
-                          <td className="py-4 pl-3 pr-6 text-right">
-                            <span
-                              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                                tx.status === "Completed"
-                                  ? "bg-emerald-50 text-emerald-700"
-                                  : "bg-amber-50 text-amber-700"
-                              }`}
-                            >
-                              <span
-                                className={`h-1.5 w-1.5 rounded-full ${
-                                  tx.status === "Completed"
-                                    ? "bg-emerald-500"
-                                    : "bg-amber-500"
-                                }`}
-                              />
-                              {tx.status}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
+                              No on-chain transactions or payment requests
+                              recorded yet.
+                            </td>
+                          </tr>
+                        )}
                     </tbody>
                   </table>
                 </div>
 
                 {/* Pagination Bar */}
                 <div className="flex items-center justify-between border-t border-neutral-100 px-6 py-3.5 text-xs text-neutral-500">
-                  <span>Showing 1–7 of 48 transactions</span>
+                  <span>
+                    Showing {activities.length + paymentRequests.length} of{" "}
+                    {activityTotal + paymentRequests.length} records
+                  </span>
                   <div className="flex items-center gap-1">
                     <span className="rounded-lg bg-neutral-950 px-2.5 py-1 font-semibold text-white">
                       1
-                    </span>
-                    <span className="rounded-lg px-2.5 py-1 hover:bg-neutral-100">
-                      2
-                    </span>
-                    <span className="rounded-lg px-2.5 py-1 hover:bg-neutral-100">
-                      3
                     </span>
                   </div>
                 </div>
@@ -2836,56 +2955,48 @@ export function PortfolioView({
                     </button>
                   </div>
 
-                  <div className="divide-y divide-neutral-100 text-xs">
-                    <div className="py-3 flex items-center justify-between">
-                      <div>
-                        <p className="font-bold text-neutral-950">
-                          #INV-1042 · Studio Kora
-                        </p>
-                        <p className="text-neutral-500">USDC · Base</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="font-display font-bold text-neutral-950">
-                          $1,200.00
-                        </p>
-                        <span className="text-[10px] font-semibold text-emerald-600">
-                          Paid
-                        </span>
-                      </div>
+                  {paymentRequests.length === 0 ? (
+                    <div className="rounded-[16px] border border-dashed border-neutral-200 bg-neutral-50/70 p-5 text-center text-xs text-neutral-500">
+                      No payment requests or invoices created yet.
                     </div>
-                    <div className="py-3 flex items-center justify-between">
-                      <div>
-                        <p className="font-bold text-neutral-950">
-                          #INV-1041 · Northstar Labs
-                        </p>
-                        <p className="text-neutral-500">SOL · Solana</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="font-display font-bold text-neutral-950">
-                          $2,400.00
-                        </p>
-                        <span className="text-[10px] font-semibold text-amber-600">
-                          Pending
-                        </span>
-                      </div>
+                  ) : (
+                    <div className="divide-y divide-neutral-100 text-xs">
+                      {paymentRequests.slice(0, 4).map((req) => (
+                        <div
+                          key={req.id}
+                          className="py-3 flex items-center justify-between"
+                        >
+                          <div>
+                            <p className="font-bold text-neutral-950">
+                              {req.title}
+                            </p>
+                            <p className="text-neutral-500">
+                              {req.destinationAssetSymbol} ·{" "}
+                              {req.destinationNetwork}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="font-display font-bold text-neutral-950">
+                              {req.amountMode === "FIXED"
+                                ? `${req.displayAmount} ${req.destinationAssetSymbol}`
+                                : "Open"}
+                            </p>
+                            <span
+                              className={`text-[10px] font-semibold ${
+                                req.status === "COMPLETED"
+                                  ? "text-emerald-600"
+                                  : req.status === "ACTIVE"
+                                    ? "text-amber-600"
+                                    : "text-neutral-500"
+                              }`}
+                            >
+                              {req.status}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    <div className="py-3 flex items-center justify-between">
-                      <div>
-                        <p className="font-bold text-neutral-950">
-                          #INV-1040 · Atelier Nine
-                        </p>
-                        <p className="text-neutral-500">USDC · Base</p>
-                      </div>
-                      <div className="text-right">
-                        <p className="font-display font-bold text-neutral-950">
-                          $850.00
-                        </p>
-                        <span className="text-[10px] font-semibold text-emerald-600">
-                          Paid
-                        </span>
-                      </div>
-                    </div>
-                  </div>
+                  )}
                 </div>
               </div>
             </div>

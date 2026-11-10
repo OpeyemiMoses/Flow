@@ -16,6 +16,7 @@ import {
   updatePaymentRequest,
 } from "../../../../server/payment-requests.ts";
 import {
+  provisionAccountWallet,
   readPortfolio,
   refreshPortfolio,
 } from "../../../../server/portfolio.ts";
@@ -82,6 +83,13 @@ export async function GET(
         request.method === "POST"
       ) {
         return refreshPortfolio(request, accountId(id));
+      }
+      if (
+        section === "wallet" &&
+        child === "provision" &&
+        request.method === "POST"
+      ) {
+        return provisionAccountWallet(request, accountId(id));
       }
       if (
         section === "activities" &&
