@@ -2199,7 +2199,7 @@ test("M2 Phase 3 worker: end-to-end fixture-backed provisioning for personal onb
       assert.equal(proj.fundsReady, false);
       assert.equal(proj.canReceiveFunds, false);
       assert.equal(proj.canSignTransfers, false);
-      assert.equal(proj.addresses.length, 3);
+      assert.equal(proj.addresses.length, 4);
       assert.ok(
         !proj.handoffUrl?.includes("wk_"),
         "handoff_url must NEVER retain bearer key",
