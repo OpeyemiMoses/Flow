@@ -30,12 +30,19 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
-        IF OLD.consumed_at IS NOT NULL THEN
-            IF current_setting('flow.allow_test_cleanup', true) IS DISTINCT FROM 'on' THEN
-                RAISE EXCEPTION 'Deleting consumed payment rehearsal authorizations is strictly prohibited for audit integrity'
-                    USING ERRCODE = '42501';
-            END IF;
+        -- Production protection: No payment rehearsal authorization can EVER be deleted in production under any circumstance
+        -- Even if allow_test_cleanup is set, production immutability cannot be bypassed
+        IF current_database() NOT LIKE '%test%' AND COALESCE(current_setting('flow.environment', true), '') <> 'test' THEN
+            RAISE EXCEPTION 'Deleting payment rehearsal authorizations in production is strictly prohibited for audit integrity'
+                USING ERRCODE = '42501';
         END IF;
+
+        -- Even in a test database, test cleanup setting is strictly required
+        IF current_setting('flow.allow_test_cleanup', true) IS DISTINCT FROM 'on' THEN
+            RAISE EXCEPTION 'Deleting payment rehearsal authorizations is strictly prohibited outside test cleanup'
+                USING ERRCODE = '42501';
+        END IF;
+
         RETURN OLD;
     END IF;
 
@@ -207,15 +214,35 @@ DECLARE
     v_pr_dest_net TEXT;
     v_pr_dest_asset TEXT;
     v_pr_status flow.payment_request_status;
+    v_session_operator_id TEXT;
+    v_effective_operator_id TEXT;
 BEGIN
-    -- 1. Restrict creation strictly to active enrolled custody operators / security officers
+    -- 1. Independently authenticate operator identity bound to database session context
+    v_session_operator_id := NULLIF(current_setting('flow.operator_auth_id', true), '');
+    IF v_session_operator_id IS NULL THEN
+        RAISE EXCEPTION 'OPERATOR_SESSION_NOT_AUTHENTICATED: operator identity must be bound in session context flow.operator_auth_id'
+            USING ERRCODE = '42501';
+    END IF;
+
+    -- Prohibit operator identity spoofing: caller cannot supply an arbitrary ID differing from session context
+    IF p_operator_auth_id IS NOT NULL AND length(trim(p_operator_auth_id)) > 0 THEN
+        IF trim(p_operator_auth_id) <> v_session_operator_id THEN
+            RAISE EXCEPTION 'OPERATOR_IDENTITY_SPOOFED: caller-supplied operator id % does not match authenticated session operator %',
+                p_operator_auth_id, v_session_operator_id
+                USING ERRCODE = '42501';
+        END IF;
+    END IF;
+
+    v_effective_operator_id := v_session_operator_id;
+
+    -- 2. Restrict creation strictly to active enrolled custody operators / security officers
     IF NOT EXISTS (
         SELECT 1 FROM flow.custody_operators co
-        WHERE co.auth_user_id = p_operator_auth_id
+        WHERE co.auth_user_id = v_effective_operator_id
           AND co.status = 'ACTIVE'
           AND co.role IN ('SECURITY_OFFICER', 'CUSTODY_OPERATOR')
     ) THEN
-        RAISE EXCEPTION 'OPERATOR_NOT_AUTHORIZED: operator % is not an active custody operator or security officer', p_operator_auth_id
+        RAISE EXCEPTION 'OPERATOR_NOT_AUTHORIZED: operator % is not an active custody operator or security officer', v_effective_operator_id
             USING ERRCODE = '42501';
     END IF;
 
@@ -331,7 +358,7 @@ BEGIN
         expires_at
     ) VALUES (
         p_payment_request_id,
-        p_operator_auth_id,
+        v_effective_operator_id,
         'mainnet',
         p_source_network,
         p_source_asset_id,
@@ -453,11 +480,12 @@ BEGIN
         EXECUTE format('REVOKE EXECUTE ON FUNCTION flow.create_payment_rehearsal_authorization FROM %I', worker_role);
     END IF;
 
-    -- Operator Role: SELECT, INSERT, UPDATE, DELETE on authorizations, EXECUTE on create/check/get.
-    -- All table mutations are guarded by flow.prevent_payment_rehearsal_authorization_tampering() trigger.
+    -- Operator Role: SELECT on authorizations, EXECUTE on create/check/get.
+    -- Direct table mutations (INSERT, UPDATE, DELETE) are strictly revoked to prevent bypassing procedure validations.
+    -- Authorizations must be created exclusively via the validated SECURITY DEFINER procedure.
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = operator_role) THEN
         EXECUTE format('REVOKE ALL ON flow.payment_rehearsal_authorizations FROM %I', operator_role);
-        EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON flow.payment_rehearsal_authorizations TO %I', operator_role);
+        EXECUTE format('GRANT SELECT ON flow.payment_rehearsal_authorizations TO %I', operator_role);
         EXECUTE format('GRANT EXECUTE ON FUNCTION flow.create_payment_rehearsal_authorization TO %I', operator_role);
         EXECUTE format('GRANT EXECUTE ON FUNCTION flow.check_active_payment_rehearsal_authorization TO %I', operator_role);
         EXECUTE format('GRANT EXECUTE ON FUNCTION flow.get_payment_attempt_commitment_details TO %I', operator_role);

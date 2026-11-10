@@ -302,23 +302,30 @@ export async function prepareMainnetRehearsal(
       );
     }
 
-    // Issue Scoped Rehearsal Authorization strictly via operatorDb
-    const authRows = await operatorDb.$queryRaw<Array<{ id: string }>>`
-      SELECT flow.create_payment_rehearsal_authorization(
-        ${paymentReq.id}::uuid,
-        ${operatorAuthId},
-        'solana-mainnet',
-        'solana-mainnet:SOL',
-        'base-mainnet',
-        'base-mainnet:USDC',
-        ${maxAtomic.toString()}::numeric,
-        ${checksummedRecipient},
-        ${payerRefund},
-        ${durationSeconds}
-      ) AS id
-    `;
+    // Issue Scoped Rehearsal Authorization strictly via operatorDb within a dedicated transaction
+    const authorizationId = await operatorDb.$transaction(async (tx) => {
+      // Bind authenticated operator identity to database session context for this transaction
+      await tx.$executeRaw`
+        SELECT set_config('flow.operator_auth_id', ${operatorAuthId}, true)
+      `;
 
-    const authorizationId = authRows[0]?.id;
+      const authRows = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT flow.create_payment_rehearsal_authorization(
+          ${paymentReq.id}::uuid,
+          ${operatorAuthId},
+          'solana-mainnet',
+          'solana-mainnet:SOL',
+          'base-mainnet',
+          'base-mainnet:USDC',
+          ${maxAtomic.toString()}::numeric,
+          ${checksummedRecipient},
+          ${payerRefund},
+          ${durationSeconds}
+        ) AS id
+      `;
+
+      return authRows[0]?.id;
+    });
     console.log(
       `  - Issued Scoped Rehearsal Authorization: ${authorizationId}`,
     );
