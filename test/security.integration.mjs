@@ -2625,7 +2625,7 @@ test("phase 6 end-to-end acceptance scenarios A–G: live OutLayer wallet provis
   assert.equal(provData.outcome, "activated");
   assert.equal(provData.walletStatus, "active");
   assert.ok(provData.wallet);
-  assert.equal(provData.wallet.addresses.length, 3);
+  assert.equal(provData.wallet.addresses.length, 4);
 
   const personalEvm = provData.wallet.addresses.find(
     (a) => a.network.includes("base") || a.network.includes("ethereum"),
