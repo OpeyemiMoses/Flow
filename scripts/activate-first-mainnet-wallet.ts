@@ -28,6 +28,77 @@ export interface ActivateMainnetWalletOptions {
   readonly operatorSessionToken?: string;
 }
 
+export async function assertPreDispatchDatabaseWritePermissions(
+  db: ReturnType<typeof getPrismaClient>,
+  targetAccountId: string,
+): Promise<void> {
+  console.log(
+    "   - Step 0: Pre-dispatch Database Write Permission Test (Rollback-Only)...",
+  );
+  let rolledBack = false;
+  try {
+    await db.$transaction(async (tx) => {
+      // 1. Test update grant on wallet_provisioning_jobs
+      await tx.$executeRaw`
+        UPDATE flow.wallet_provisioning_jobs
+        SET updated_at = CURRENT_TIMESTAMP
+        WHERE account_id = ${targetAccountId}::uuid
+      `;
+      // 2. Test insert/update grant on wallets
+      await tx.$executeRaw`
+        INSERT INTO flow.wallets (
+          account_id, provider, environment, provider_wallet_id, near_account_id,
+          encrypted_credential, key_id, key_digest, status, policy_state
+        ) VALUES (
+          ${targetAccountId}::uuid, ${"OUTLAYER"}, ${"mainnet"}, ${"00000000-0000-0000-0000-000000000000"}, ${"predispatch-test.near"},
+          ${"test-envelope"}, ${"v1"}, ${"test-digest"}, ${"SETUP_PENDING"}::flow.wallet_status, ${"none"}
+        )
+        ON CONFLICT (account_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+      `;
+      // 3. Test insert/update grant on wallet_addresses
+      await tx.$executeRaw`
+        INSERT INTO flow.wallet_addresses (wallet_id, network, chain_id, address, public_key)
+        SELECT id, ${"near"}, ${"near-mainnet"}, ${"predispatch-test.near"}, ${"ed25519:test"}
+        FROM flow.wallets
+        WHERE account_id = ${targetAccountId}::uuid
+        ON CONFLICT (wallet_id, network) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+      `;
+      // 4. Test insert/update grant on wallet_capabilities
+      await tx.$executeRaw`
+        INSERT INTO flow.wallet_capabilities (wallet_id, network, can_receive)
+        SELECT id, ${"near"}, true
+        FROM flow.wallets
+        WHERE account_id = ${targetAccountId}::uuid
+        ON CONFLICT (wallet_id, network) DO UPDATE SET verified_at = CURRENT_TIMESTAMP
+      `;
+
+      throw new Error("__FLOW_PRE_DISPATCH_ROLLBACK_VERIFIED__");
+    });
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      err.message.includes("__FLOW_PRE_DISPATCH_ROLLBACK_VERIFIED__")
+    ) {
+      rolledBack = true;
+    } else {
+      throw new FlowError(
+        "INVALID_CONFIGURATION",
+        `Pre-dispatch database write permission test failed: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  if (!rolledBack) {
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      "Pre-dispatch database test failed to verify rollback safety.",
+    );
+  }
+  console.log(
+    "     [PASS] Verified worker INSERT/UPDATE permissions on jobs, wallets, addresses, and capabilities (Cleanly rolled back).\n",
+  );
+}
+
 export async function activateFirstMainnetWallet(
   options: ActivateMainnetWalletOptions = {},
 ): Promise<void> {
@@ -81,14 +152,24 @@ export async function activateFirstMainnetWallet(
     | undefined;
 
   const hasDbUrl =
+    Boolean(process.env.FLOW_WORKER_DATABASE_URL) ||
     Boolean(process.env.FLOW_OPERATOR_DATABASE_URL) ||
-    Boolean(process.env.FLOW_DATABASE_URL) ||
-    Boolean(process.env.FLOW_WORKER_DATABASE_URL);
+    Boolean(process.env.FLOW_DATABASE_URL);
 
   if (hasDbUrl) {
     try {
+      if (!process.env.FLOW_WORKER_DATABASE_URL && !options.dryRun) {
+        throw new FlowError(
+          "INVALID_CONFIGURATION",
+          "Wallet provisioning strictly requires FLOW_WORKER_DATABASE_URL (flow_worker role). Operator or app database roles are prohibited.",
+        );
+      }
       db = getPrismaClient(
-        process.env.FLOW_OPERATOR_DATABASE_URL ? "operator" : "worker",
+        process.env.FLOW_WORKER_DATABASE_URL
+          ? "worker"
+          : process.env.FLOW_OPERATOR_DATABASE_URL
+            ? "operator"
+            : "runtime",
       );
       if (!targetAccountId) {
         const candidateAccounts = await db.$queryRaw<
@@ -253,9 +334,60 @@ export async function activateFirstMainnetWallet(
     }
   }
 
-  // 5. Dry Run Check
+  // 5. Inspect Provisioning Job State (if DB connected)
+  let job:
+    | { id: string; status: string; attempts: number; idempotency_key: string }
+    | undefined;
+
+  if (db && targetAccountId) {
+    console.log("5. Provisioning Job Status Check:");
+    const existingJobs = await db.$queryRaw<
+      Array<{
+        id: string;
+        status: string;
+        attempts: number;
+        idempotency_key: string;
+      }>
+    >`
+      SELECT id, status, attempts, idempotency_key
+      FROM flow.wallet_provisioning_jobs
+      WHERE account_id = ${targetAccountId}::uuid
+      LIMIT 1
+    `;
+
+    if (existingJobs.length === 0) {
+      console.log(
+        "   [WARN] No provisioning job found for account. Creating PENDING job...",
+      );
+      const newJobId = crypto.randomUUID();
+      const newKey = crypto.randomUUID();
+      await db.$executeRaw`
+        INSERT INTO flow.wallet_provisioning_jobs (id, account_id, idempotency_key, status)
+        VALUES (${newJobId}::uuid, ${targetAccountId}::uuid, ${newKey}::uuid, 'PENDING')
+      `;
+      job = {
+        id: newJobId,
+        status: "PENDING",
+        attempts: 0,
+        idempotency_key: newKey,
+      };
+    } else {
+      job = existingJobs[0]!;
+      console.log(
+        `   [PASS] Existing Provisioning Job ID: ${job.id} (Status: ${job.status}, Attempts: ${job.attempts})\n`,
+      );
+      if (job.status === "UNKNOWN" || job.status === "MANUAL_REVIEW") {
+        throw new FlowError(
+          "INVALID_CONFIGURATION",
+          `Provisioning job ${job.id} is quarantined in ${job.status} state. Operator recovery required before activation.`,
+        );
+      }
+    }
+  }
+
+  // 6. Dry Run Check
   if (options.dryRun) {
-    console.log("5. Dry Run Preflight Verification:");
+    console.log("6. Dry Run Preflight Verification:");
     console.log(
       "   [DRY RUN] All custody and environment prerequisites verified.",
     );
@@ -264,13 +396,16 @@ export async function activateFirstMainnetWallet(
       `   - Target Account ID:       ${targetAccountId ?? "(Unspecified / First Account)"}`,
     );
     console.log(
+      `   - Provisioning Job ID:     ${job?.id ?? "None"} (Status: ${job?.status ?? "N/A"})`,
+    );
+    console.log(
       "   - Planned Procedure:       1) POST /register to allocate TEE wallet container.",
     );
     console.log(
       "                              2) Encrypt API key with master AES-256-GCM envelope and store in PostgreSQL.",
     );
     console.log(
-      "                              3) Derive Base (chain 8453), Solana, and NEAR addresses.",
+      "                              3) Derive Ethereum (chain 1), Base (chain 8453), Solana, and NEAR addresses.",
     );
     console.log(
       "                              4) Verify OutLayer policy and activate wallet (can_receive=true, can_sign=false).",
@@ -308,9 +443,29 @@ export async function activateFirstMainnetWallet(
     compatibilityConfig,
   });
 
+  // Pre-dispatch, rollback-only database write permission test
+  await assertPreDispatchDatabaseWritePermissions(db, targetAccountId);
+
   console.log(
     "   - Step 1: Registering TEE custody container on OutLayer (POST /register)...",
   );
+  if (job) {
+    const dispatchAttemptId = crypto.randomUUID();
+    await db.$executeRaw`
+      UPDATE flow.wallet_provisioning_jobs
+      SET
+        status = 'SUBMITTED',
+        dispatch_attempt_id = ${dispatchAttemptId}::uuid,
+        dispatched_at = CURRENT_TIMESTAMP,
+        attempts = attempts + 1,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${job.id}::uuid
+    `;
+    console.log(
+      `     [PASS] Provisioning Job ${job.id} transitioned to SUBMITTED (attempt ${job.attempts + 1}).`,
+    );
+  }
+
   let regResult;
   try {
     regResult = await adapter.register({});
@@ -319,6 +474,22 @@ export async function activateFirstMainnetWallet(
       "   [FAIL] OutLayer registration failed:",
       (err as Error).message,
     );
+    if (job) {
+      await db.$executeRaw`
+        UPDATE flow.wallet_provisioning_jobs
+        SET
+          status = 'UNKNOWN',
+          failure_classification = 'POST_DISPATCH_AMBIGUOUS',
+          last_error = ${(err as Error).message.slice(0, 500)},
+          lease_holder = NULL,
+          lease_expires_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${job.id}::uuid
+      `;
+      console.log(
+        `     [QUARANTINED] Job ${job.id} quarantined in UNKNOWN status.`,
+      );
+    }
     throw err;
   }
 
@@ -393,12 +564,15 @@ export async function activateFirstMainnetWallet(
   );
 
   const checksummedBaseAddress = toEip55ChecksumAddress(baseAddr.address);
-  console.log(`     [PASS] NEAR Address:   ${nearAddr.address}`);
+  console.log(`     [PASS] NEAR Address:     ${nearAddr.address}`);
   console.log(
-    `     [PASS] Base Address:   ${checksummedBaseAddress} (Chain ID: 8453)`,
+    `     [PASS] Base Address:     ${checksummedBaseAddress} (Chain ID: 8453)`,
   );
   console.log(
-    `     [PASS] Solana Address: ${solanaAddr.address} (Chain ID: solana-mainnet)`,
+    `     [PASS] Ethereum Address: ${checksummedBaseAddress} (Chain ID: 1)`,
+  );
+  console.log(
+    `     [PASS] Solana Address:   ${solanaAddr.address} (Chain ID: solana-mainnet)`,
   );
 
   // Persist addresses and capabilities
@@ -409,6 +583,7 @@ export async function activateFirstMainnetWallet(
       VALUES
         (${walletId}::uuid, 'near', 'near-mainnet', ${nearAddr.address}, ${nearAddr.public_key}),
         (${walletId}::uuid, 'base', '8453', ${checksummedBaseAddress}, ${baseAddr.public_key}),
+        (${walletId}::uuid, 'ethereum', '1', ${checksummedBaseAddress}, ${baseAddr.public_key}),
         (${walletId}::uuid, 'solana', 'solana-mainnet', ${solanaAddr.address}, ${solanaAddr.public_key})
       ON CONFLICT (wallet_id, network) DO UPDATE SET
         chain_id = EXCLUDED.chain_id,
@@ -425,6 +600,7 @@ export async function activateFirstMainnetWallet(
       ) VALUES
         (${walletId}::uuid, 'near', true, true, true, true, false, ${OUTLAYER_CAPABILITIES.near.broadcastMode}, true, CURRENT_TIMESTAMP),
         (${walletId}::uuid, 'base', true, true, true, true, false, ${OUTLAYER_CAPABILITIES.base.broadcastMode}, true, CURRENT_TIMESTAMP),
+        (${walletId}::uuid, 'ethereum', true, true, false, false, false, ${OUTLAYER_CAPABILITIES.ethereum.broadcastMode}, true, CURRENT_TIMESTAMP),
         (${walletId}::uuid, 'solana', true, true, true, true, false, ${OUTLAYER_CAPABILITIES.solana.broadcastMode}, true, CURRENT_TIMESTAMP)
       ON CONFLICT (wallet_id, network) DO UPDATE SET
         can_receive = true,
@@ -445,7 +621,9 @@ export async function activateFirstMainnetWallet(
   );
 
   // Step 5: Activate wallet
-  console.log("   - Step 5: Activating wallet record in PostgreSQL...");
+  console.log(
+    "   - Step 5: Activating wallet and provisioning job in PostgreSQL...",
+  );
   await db.$executeRaw`
     UPDATE flow.wallets
     SET
@@ -455,6 +633,23 @@ export async function activateFirstMainnetWallet(
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ${walletId}::uuid
   `;
+
+  if (job) {
+    await db.$executeRaw`
+      UPDATE flow.wallet_provisioning_jobs
+      SET
+        status = 'ACTIVE',
+        lease_holder = NULL,
+        lease_expires_at = NULL,
+        last_error = NULL,
+        failure_classification = NULL,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${job.id}::uuid
+    `;
+    console.log(
+      `     [PASS] Provisioning Job ${job.id} transitioned to ACTIVE.`,
+    );
+  }
 
   console.log(
     "\n===============================================================",
@@ -468,9 +663,10 @@ export async function activateFirstMainnetWallet(
   );
   console.log(` - Wallet Database ID:      ${walletId}`);
   console.log(` - OutLayer Container ID:   ${providerWalletId}`);
-  console.log(` - Base Mainnet Address:    ${checksummedBaseAddress}`);
-  console.log(` - Solana Mainnet Address:  ${solanaAddr.address}`);
-  console.log(` - NEAR Mainnet Address:    ${nearAddr.address}`);
+  console.log(` - Ethereum Mainnet Address: ${checksummedBaseAddress}`);
+  console.log(` - Base Mainnet Address:     ${checksummedBaseAddress}`);
+  console.log(` - Solana Mainnet Address:   ${solanaAddr.address}`);
+  console.log(` - NEAR Mainnet Address:     ${nearAddr.address}`);
   console.log(` - Capability Receive:      true (Ready for deposits/invoices)`);
   console.log(
     ` - Capability Sign:         false (Outgoing signing strictly blocked)`,

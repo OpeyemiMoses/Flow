@@ -100,7 +100,7 @@ export function SignOutButton() {
     setBusy(true);
     try {
       await send("/api/auth/sign-out");
-      window.location.replace("/sign-in");
+      window.location.replace("/");
     } catch (error) {
       setMessage(describe(error));
       setBusy(false);

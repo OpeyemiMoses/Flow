@@ -645,6 +645,12 @@ export class WalletProvisioningWorker {
                 publicKey: baseAddr.public_key,
               },
               {
+                network: "ethereum",
+                chainId: "1",
+                address: checksummedBaseAddress,
+                publicKey: baseAddr.public_key,
+              },
+              {
                 network: "solana",
                 chainId: solanaChainId,
                 address: solanaAddr.address,
@@ -677,6 +683,20 @@ export class WalletProvisioningWorker {
                 broadcastMode: OUTLAYER_CAPABILITIES.base.broadcastMode,
                 canRotateCredentials:
                   OUTLAYER_CAPABILITIES.base.canRotateCredentials,
+              },
+              {
+                network: "ethereum",
+                canDeriveAddress:
+                  OUTLAYER_CAPABILITIES.ethereum.canDeriveAddress,
+                canReceive: false,
+                canReadNativeBalance:
+                  OUTLAYER_CAPABILITIES.ethereum.canReadNativeBalance,
+                canReadIntentsBalance:
+                  OUTLAYER_CAPABILITIES.ethereum.canReadIntentsBalance,
+                canSignTransfer: false,
+                broadcastMode: OUTLAYER_CAPABILITIES.ethereum.broadcastMode,
+                canRotateCredentials:
+                  OUTLAYER_CAPABILITIES.ethereum.canRotateCredentials,
               },
               {
                 network: "solana",

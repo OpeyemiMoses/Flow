@@ -1516,6 +1516,7 @@ export const ALLOWED_PROVIDER_INSPECTION_SUMMARIES = [
   "NO_REMOTE_WALLET_FOUND",
   "REMOTE_WALLET_LOCATED",
   "PROVIDER_AUDIT_PENDING",
+  "REMOTE_CONTAINER_ORPHANED_CREDENTIAL_LOST",
 ] as const;
 
 export type ProviderInspectionSummary =
@@ -1729,6 +1730,19 @@ export type QuarantinedJobResolutionInput =
       readonly accountId: string;
       readonly expectedAccountKind: "PERSONAL" | "BUSINESS";
       readonly expectedDispatchAttemptId: string;
+      readonly initiatorOperatorAuthId: string;
+      readonly approverOperatorAuthId: string;
+      readonly requestId: string;
+      readonly verifyOperatorInDatabase?: boolean;
+      readonly approvalToken?: string;
+    }
+  | {
+      readonly resolution: "REMOTE_CONTAINER_ORPHANED_CREDENTIAL_LOST";
+      readonly jobId: string;
+      readonly accountId: string;
+      readonly expectedAccountKind: "PERSONAL" | "BUSINESS";
+      readonly expectedDispatchAttemptId: string;
+      readonly abandonedContainerId: string;
       readonly initiatorOperatorAuthId: string;
       readonly approverOperatorAuthId: string;
       readonly requestId: string;
@@ -2097,81 +2111,176 @@ export async function resolveQuarantinedProvisioningJob(
     }
 
     // Resolution Mode B: RESET_CONFIRMED_PRE_CREATION_FAILURE
-    if (
-      job.status !== "MANUAL_REVIEW" ||
-      previousInspectionSummary !== "NO_REMOTE_WALLET_FOUND"
-    ) {
-      throw new FlowError(
-        "INVALID_STATE_TRANSITION",
-        "Resetting a quarantined job to PENDING requires prior escalation to MANUAL_REVIEW with providerInspectionSummary='NO_REMOTE_WALLET_FOUND'.",
-      );
+    if (input.resolution === "RESET_CONFIRMED_PRE_CREATION_FAILURE") {
+      if (
+        job.status !== "MANUAL_REVIEW" ||
+        previousInspectionSummary !== "NO_REMOTE_WALLET_FOUND"
+      ) {
+        throw new FlowError(
+          "INVALID_STATE_TRANSITION",
+          "Resetting a quarantined job to PENDING requires prior escalation to MANUAL_REVIEW with providerInspectionSummary='NO_REMOTE_WALLET_FOUND'.",
+        );
+      }
+
+      const existingWallets = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM flow.wallets WHERE account_id = ${input.accountId}::uuid
+      `;
+      if (existingWallets.length > 0) {
+        throw new FlowError(
+          "INVALID_STATE_TRANSITION",
+          "Cannot reset job to PENDING when a wallet record already exists for the account.",
+        );
+      }
+
+      const resetEvidence = JSON.stringify({
+        stage: "RESOLVED_RESET_PRE_CREATION",
+        resolution: input.resolution,
+        accountKind: account.kind,
+        initiatorOperatorAuthId: initiator,
+        approverOperatorAuthId: approver,
+        previousDispatchAttemptId: job.dispatchAttemptId,
+        requestId: input.requestId.trim().toLowerCase(),
+        resolvedAt: new Date().toISOString(),
+      });
+
+      await tx.$executeRaw`
+        UPDATE flow.wallet_provisioning_jobs
+        SET
+          status = 'PENDING',
+          fencing_token = ${nextFencingToken},
+          lease_holder = NULL,
+          lease_expires_at = NULL,
+          dispatched_at = NULL,
+          dispatch_attempt_id = NULL,
+          last_error = NULL,
+          failure_classification = NULL,
+          recovery_evidence = ${resetEvidence},
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${input.jobId}::uuid
+          AND account_id = ${input.accountId}::uuid
+      `;
+
+      await tx.$executeRaw`
+        INSERT INTO flow.security_audit_events (
+          kind, actor_auth_id, account_id, target_id, request_id, created_at
+        ) VALUES
+          (
+            'wallet_recovery_initiated',
+            ${initiator},
+            ${input.accountId}::uuid,
+            ${input.jobId},
+            ${input.requestId.trim()}::uuid,
+            CURRENT_TIMESTAMP
+          ),
+          (
+            'wallet_recovery_approved_reset',
+            ${approver},
+            ${input.accountId}::uuid,
+            ${input.jobId},
+            ${input.requestId.trim()}::uuid,
+            CURRENT_TIMESTAMP
+          )
+      `;
+
+      return {
+        jobId: input.jobId,
+        status: "PENDING",
+        fencingToken: nextFencingToken,
+      };
     }
 
-    const existingWallets = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT id FROM flow.wallets WHERE account_id = ${input.accountId}::uuid
-    `;
-    if (existingWallets.length > 0) {
-      throw new FlowError(
-        "INVALID_STATE_TRANSITION",
-        "Cannot reset job to PENDING when a wallet record already exists for the account.",
-      );
+    // Resolution Mode C: REMOTE_CONTAINER_ORPHANED_CREDENTIAL_LOST
+    if (input.resolution === "REMOTE_CONTAINER_ORPHANED_CREDENTIAL_LOST") {
+      if (
+        job.status !== "MANUAL_REVIEW" ||
+        previousInspectionSummary !==
+          "REMOTE_CONTAINER_ORPHANED_CREDENTIAL_LOST"
+      ) {
+        throw new FlowError(
+          "INVALID_STATE_TRANSITION",
+          "Resetting an orphaned container job to PENDING requires prior escalation to MANUAL_REVIEW with providerInspectionSummary='REMOTE_CONTAINER_ORPHANED_CREDENTIAL_LOST'.",
+        );
+      }
+
+      if (!UUID_REGEX.test(input.abandonedContainerId.trim())) {
+        throw new FlowError(
+          "INVALID_CONFIGURATION",
+          "Abandoned container ID must be a valid UUID.",
+        );
+      }
+
+      const existingWallets = await tx.$queryRaw<Array<{ id: string }>>`
+        SELECT id FROM flow.wallets WHERE account_id = ${input.accountId}::uuid
+      `;
+      if (existingWallets.length > 0) {
+        throw new FlowError(
+          "INVALID_STATE_TRANSITION",
+          "Cannot reset job to PENDING when a wallet record already exists for the account.",
+        );
+      }
+
+      const resetEvidence = JSON.stringify({
+        stage: "RESOLVED_RESET_ORPHANED_CONTAINER",
+        resolution: input.resolution,
+        abandonedContainerId: input.abandonedContainerId.trim(),
+        accountKind: account.kind,
+        initiatorOperatorAuthId: initiator,
+        approverOperatorAuthId: approver,
+        previousDispatchAttemptId: job.dispatchAttemptId,
+        requestId: input.requestId.trim().toLowerCase(),
+        resolvedAt: new Date().toISOString(),
+      });
+
+      await tx.$executeRaw`
+        UPDATE flow.wallet_provisioning_jobs
+        SET
+          status = 'PENDING',
+          fencing_token = ${nextFencingToken},
+          lease_holder = NULL,
+          lease_expires_at = NULL,
+          dispatched_at = NULL,
+          dispatch_attempt_id = NULL,
+          last_error = NULL,
+          failure_classification = NULL,
+          recovery_evidence = ${resetEvidence},
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${input.jobId}::uuid
+          AND account_id = ${input.accountId}::uuid
+      `;
+
+      await tx.$executeRaw`
+        INSERT INTO flow.security_audit_events (
+          kind, actor_auth_id, account_id, target_id, request_id, created_at
+        ) VALUES
+          (
+            'wallet_recovery_initiated',
+            ${initiator},
+            ${input.accountId}::uuid,
+            ${input.abandonedContainerId.trim()},
+            ${input.requestId.trim()}::uuid,
+            CURRENT_TIMESTAMP
+          ),
+          (
+            'wallet_recovery_approved_reset',
+            ${approver},
+            ${input.accountId}::uuid,
+            ${input.abandonedContainerId.trim()},
+            ${input.requestId.trim()}::uuid,
+            CURRENT_TIMESTAMP
+          )
+      `;
+
+      return {
+        jobId: input.jobId,
+        status: "PENDING",
+        fencingToken: nextFencingToken,
+      };
     }
 
-    const resetEvidence = JSON.stringify({
-      stage: "RESOLVED_RESET_PRE_CREATION",
-      resolution: input.resolution,
-      accountKind: account.kind,
-      initiatorOperatorAuthId: initiator,
-      approverOperatorAuthId: approver,
-      previousDispatchAttemptId: job.dispatchAttemptId,
-      requestId: input.requestId.trim().toLowerCase(),
-      resolvedAt: new Date().toISOString(),
-    });
-
-    await tx.$executeRaw`
-      UPDATE flow.wallet_provisioning_jobs
-      SET
-        status = 'PENDING',
-        fencing_token = ${nextFencingToken},
-        lease_holder = NULL,
-        lease_expires_at = NULL,
-        dispatched_at = NULL,
-        dispatch_attempt_id = NULL,
-        last_error = NULL,
-        failure_classification = NULL,
-        recovery_evidence = ${resetEvidence},
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ${input.jobId}::uuid
-        AND account_id = ${input.accountId}::uuid
-    `;
-
-    await tx.$executeRaw`
-      INSERT INTO flow.security_audit_events (
-        kind, actor_auth_id, account_id, target_id, request_id, created_at
-      ) VALUES
-        (
-          'wallet_recovery_initiated',
-          ${initiator},
-          ${input.accountId}::uuid,
-          ${input.jobId},
-          ${input.requestId.trim()}::uuid,
-          CURRENT_TIMESTAMP
-        ),
-        (
-          'wallet_recovery_approved_reset',
-          ${approver},
-          ${input.accountId}::uuid,
-          ${input.jobId},
-          ${input.requestId.trim()}::uuid,
-          CURRENT_TIMESTAMP
-        )
-    `;
-
-    return {
-      jobId: input.jobId,
-      status: "PENDING",
-      fencingToken: nextFencingToken,
-    };
+    throw new FlowError(
+      "INVALID_CONFIGURATION",
+      "Unrecognized recovery resolution mode.",
+    );
   });
 }
 
@@ -2486,7 +2595,9 @@ export interface CreateCustodyRecoveryApprovalInput {
   readonly approverAuthId: string;
   readonly expectedDispatchAttemptId: string;
   readonly resolution:
-    "ATTACH_RECOVERED_WALLET" | "RESET_CONFIRMED_PRE_CREATION_FAILURE";
+    | "ATTACH_RECOVERED_WALLET"
+    | "RESET_CONFIRMED_PRE_CREATION_FAILURE"
+    | "REMOTE_CONTAINER_ORPHANED_CREDENTIAL_LOST";
   readonly approvalToken?: string;
   readonly validityMinutes?: number;
   readonly initiatorSessionToken?: string;

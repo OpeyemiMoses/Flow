@@ -5,7 +5,7 @@ export type AssetKind = "NATIVE" | "FUNGIBLE_TOKEN";
 export type TokenStandard =
   "NATIVE" | "NEP141" | "ERC20" | "SPL" | "TOKEN_2022";
 
-export type NetworkId = "near" | "base" | "solana";
+export type NetworkId = "near" | "base" | "solana" | "ethereum";
 
 export type SyncStatus =
   "NOT_SYNCED" | "SYNCED" | "STALE" | "UNAVAILABLE" | "ERROR";
@@ -86,6 +86,7 @@ export const VALID_NETWORKS: ReadonlySet<string> = new Set([
   "near",
   "base",
   "solana",
+  "ethereum",
 ]);
 export const VALID_TOKEN_STANDARDS: ReadonlySet<string> = new Set([
   "NATIVE",

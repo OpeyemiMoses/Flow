@@ -7,7 +7,13 @@ import { describe, Feedback, send } from "../../controls.tsx";
 export function RefreshSession() {
   const path = usePathname();
   useEffect(() => {
-    void fetch("/api/me", { cache: "no-store" }).catch(() => undefined);
+    void fetch("/api/me", { cache: "no-store" })
+      .then((res) => {
+        if (res.status === 401) {
+          window.location.replace("/sign-in");
+        }
+      })
+      .catch(() => undefined);
   }, [path]);
   return null;
 }

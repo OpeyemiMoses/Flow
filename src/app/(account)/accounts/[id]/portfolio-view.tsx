@@ -34,6 +34,13 @@ import { AccountNameForm } from "../forms.tsx";
 export type WorkspaceTab =
   "dashboard" | "assets" | "send" | "receive" | "activity";
 
+export const MAINNET_SUPPORTED_DEPLOYMENTS: readonly [
+  CatalogTokenDeployment,
+  ...CatalogTokenDeployment[],
+] = CURATED_SUPPORTED_DEPLOYMENTS.filter(
+  (d) => d.environment === "mainnet",
+) as unknown as readonly [CatalogTokenDeployment, ...CatalogTokenDeployment[]];
+
 export interface WorkspaceAccountSummary {
   readonly id: string;
   readonly name: string;
@@ -101,22 +108,23 @@ export function PortfolioView({
   >("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedAssetId, setSelectedAssetId] = useState<string>(
-    CURATED_SUPPORTED_DEPLOYMENTS[0].id,
+    MAINNET_SUPPORTED_DEPLOYMENTS[0]?.id ?? CURATED_SUPPORTED_DEPLOYMENTS[0].id,
   );
   const [activityCategory, setActivityCategory] = useState<string>("all");
 
   // Send / Convert state
   const [sendMode, setSendMode] = useState<"send" | "convert">("send");
   const [sourceDeploymentId, setSourceDeploymentId] =
-    useState<string>("base-sepolia:USDC");
-  const [destDeploymentId, setDestDeploymentId] =
-    useState<string>("solana-devnet:USDC");
+    useState<string>("base-mainnet:USDC");
+  const [destDeploymentId, setDestDeploymentId] = useState<string>(
+    "solana-mainnet:USDC",
+  );
   const [sendAmount, setSendAmount] = useState<string>("");
   const [recipientAddress, setRecipientAddress] = useState<string>("");
 
   // Receive / Create Payment Link state
   const [receiveDeploymentId, setReceiveDeploymentId] =
-    useState<string>("solana-devnet:USDC");
+    useState<string>("base-mainnet:USDC");
   const [paymentRequests, setPaymentRequests] = useState<
     SerializedPaymentRequest[]
   >([]);
@@ -424,10 +432,23 @@ export function PortfolioView({
           ? "Wallet setup failed"
           : "Wallet setup pending";
 
-  const evmAddr =
+  const ethAddr =
     wallet?.addresses.find(
-      (a) => a.network.includes("ethereum") || a.network.includes("base"),
-    )?.address ?? "Not provisioned";
+      (a) => a.network === "ethereum" || a.network.includes("ethereum"),
+    )?.address ??
+    wallet?.addresses.find(
+      (a) => a.network === "base" || a.network.includes("base"),
+    )?.address ??
+    "Not provisioned";
+  const baseAddr =
+    wallet?.addresses.find(
+      (a) => a.network === "base" || a.network.includes("base"),
+    )?.address ??
+    wallet?.addresses.find(
+      (a) => a.network === "ethereum" || a.network.includes("ethereum"),
+    )?.address ??
+    "Not provisioned";
+  const evmAddr = baseAddr !== "Not provisioned" ? baseAddr : ethAddr;
   const solAddr =
     wallet?.addresses.find((a) => a.network.includes("solana"))?.address ??
     "Not provisioned";
@@ -446,11 +467,19 @@ export function PortfolioView({
     maximumFractionDigits: 2,
   })}`;
 
-  const evmUsdcBalance = useMemo(() => {
+  const ethUsdcBalance = useMemo(() => {
     const match = balances.find(
       (b) =>
-        (b.networkAsset.network.includes("base") ||
-          b.networkAsset.network.includes("ethereum")) &&
+        b.networkAsset.network.includes("ethereum") &&
+        b.networkAsset.asset.symbol.toUpperCase() === "USDC",
+    );
+    return match?.displayBalance ?? "0.00";
+  }, [balances]);
+
+  const baseUsdcBalance = useMemo(() => {
+    const match = balances.find(
+      (b) =>
+        b.networkAsset.network.includes("base") &&
         b.networkAsset.asset.symbol.toUpperCase() === "USDC",
     );
     return match?.displayBalance ?? "0.00";
@@ -509,7 +538,11 @@ export function PortfolioView({
         <div>
           {/* Brand Logo */}
           <div className="px-2 pt-1 pb-7">
-            <Link href="/" prefetch={false} aria-label="FLOW Home">
+            <Link
+              href={`/accounts/${currentAccount.id}`}
+              prefetch={false}
+              aria-label="FLOW Dashboard"
+            >
               <FlowLogo size={26} variant="inverse" />
             </Link>
           </div>
@@ -748,14 +781,45 @@ export function PortfolioView({
                 </p>
               </div>
             </div>
-            <Link
-              prefetch={false}
-              href="/security"
-              aria-label="Workspace settings"
-              className="text-neutral-400 hover:text-white text-sm px-1"
-            >
-              •••
-            </Link>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <Link
+                prefetch={false}
+                href="/security"
+                aria-label="Workspace settings"
+                title="Security & Settings"
+                className="text-neutral-400 hover:text-white text-sm px-1 transition-colors"
+              >
+                •••
+              </Link>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await fetch("/api/auth/sign-out", { method: "POST" });
+                  } finally {
+                    window.location.replace("/");
+                  }
+                }}
+                title="Sign out"
+                aria-label="Sign out"
+                className="text-neutral-400 hover:text-rose-400 p-1 transition-colors"
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                  <polyline points="16 17 21 12 16 7" />
+                  <line x1="21" y1="12" x2="9" y2="12" />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </aside>
@@ -1128,15 +1192,24 @@ export function PortfolioView({
                     </button>
                   </div>
 
-                  {/* Bottom 3-Column Asset Breakdown Bar */}
-                  <div className="relative z-10 mt-6 grid grid-cols-3 gap-3 rounded-[16px] border border-white/10 bg-white/[0.04] p-3.5">
+                  {/* Bottom 4-Column Asset Breakdown Bar */}
+                  <div className="relative z-10 mt-6 grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-[16px] border border-white/10 bg-white/[0.04] p-3.5">
                     <div>
                       <div className="flex items-center gap-1.5 text-[11px] text-neutral-400">
-                        <span className="h-2 w-2 rounded-full bg-blue-500" />
-                        <span>USDC</span>
+                        <span className="h-2 w-2 rounded-full bg-indigo-400" />
+                        <span>Ethereum</span>
                       </div>
                       <p className="mt-1 font-display text-sm font-bold text-white">
-                        {evmUsdcBalance} USDC
+                        {ethUsdcBalance} USDC
+                      </p>
+                    </div>
+                    <div className="border-l border-white/10 pl-3">
+                      <div className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+                        <span className="h-2 w-2 rounded-full bg-blue-500" />
+                        <span>Base</span>
+                      </div>
+                      <p className="mt-1 font-display text-sm font-bold text-white">
+                        {baseUsdcBalance} USDC
                       </p>
                     </div>
                     <div className="border-l border-white/10 pl-3">
@@ -1256,7 +1329,66 @@ export function PortfolioView({
                   </button>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* Ethereum Card */}
+                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <ChainBadge chainKey="ethereum-mainnet" size={28} />
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-display text-sm font-bold text-neutral-950">
+                              Ethereum
+                            </span>
+                            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600">
+                              USDC
+                            </span>
+                          </div>
+                          <p className="text-[11px] font-mono text-neutral-400">
+                            {truncateMiddle(ethAddr, 6, 4)}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={!wallet}
+                        onClick={() => copyAddress("dash-eth", ethAddr)}
+                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-40"
+                      >
+                        {copiedKey === "dash-eth" ? "Copied" : "Copy"}
+                      </button>
+                    </div>
+
+                    <div className="mt-4 flex items-end justify-between">
+                      <div>
+                        <p className="font-display text-2xl font-bold text-neutral-950">
+                          {ethUsdcBalance} USDC
+                        </p>
+                        <div className="mt-1 flex items-center gap-2 text-[11px]">
+                          <span className="text-neutral-500">
+                            {wallet ? "Read-only RPC" : "Pending setup"}
+                          </span>
+                          <span className="font-semibold text-indigo-600">
+                            EVM
+                          </span>
+                        </div>
+                      </div>
+                      <svg
+                        width="84"
+                        height="32"
+                        viewBox="0 0 84 32"
+                        fill="none"
+                      >
+                        <path
+                          d="M2 24 C18 22, 28 14, 44 16 C58 18, 68 8, 82 6"
+                          stroke="#6366F1"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </div>
+                  </div>
+
                   {/* Base Card */}
                   <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
                     <div className="flex items-center justify-between">
@@ -1272,24 +1404,24 @@ export function PortfolioView({
                             </span>
                           </div>
                           <p className="text-[11px] font-mono text-neutral-400">
-                            {truncateMiddle(evmAddr, 6, 4)}
+                            {truncateMiddle(baseAddr, 6, 4)}
                           </p>
                         </div>
                       </div>
                       <button
                         type="button"
                         disabled={!wallet}
-                        onClick={() => copyAddress("dash-evm", evmAddr)}
+                        onClick={() => copyAddress("dash-base", baseAddr)}
                         className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-40"
                       >
-                        {copiedKey === "dash-evm" ? "Copied" : "Copy"}
+                        {copiedKey === "dash-base" ? "Copied" : "Copy"}
                       </button>
                     </div>
 
                     <div className="mt-4 flex items-end justify-between">
                       <div>
                         <p className="font-display text-2xl font-bold text-neutral-950">
-                          {evmUsdcBalance} USDC
+                          {baseUsdcBalance} USDC
                         </p>
                         <div className="mt-1 flex items-center gap-2 text-[11px]">
                           <span className="text-neutral-500">
@@ -1638,9 +1770,9 @@ export function PortfolioView({
                 </div>
               </div>
 
-              {/* 3 Ecosystem Wallet Cards + Add Wallet Card */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* Ethereum / Base Wallet */}
+              {/* 4 Ecosystem Wallet Cards (Ethereum, Base, Solana, NEAR) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                {/* Ethereum Wallet */}
                 <div className="rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between">
@@ -1648,10 +1780,10 @@ export function PortfolioView({
                         <ChainBadge chainKey="ethereum-mainnet" size={28} />
                         <div>
                           <p className="font-display text-sm font-bold text-neutral-950">
-                            Ethereum / Base
+                            Ethereum Mainnet
                           </p>
                           <p className="text-[11px] text-neutral-500">
-                            {ECOSYSTEM_METADATA[0]?.label ?? "Ethereum / Base"}
+                            Ethereum L1
                           </p>
                         </div>
                       </div>
@@ -1661,10 +1793,10 @@ export function PortfolioView({
                     </div>
 
                     <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
-                      {evmUsdcBalance} USDC
+                      {ethUsdcBalance} USDC
                     </p>
                     <p className="mt-1 font-mono text-xs text-neutral-500">
-                      {truncateMiddle(evmAddr, 8, 6)}
+                      {truncateMiddle(ethAddr, 8, 6)}
                     </p>
                   </div>
 
@@ -1672,10 +1804,65 @@ export function PortfolioView({
                     <button
                       type="button"
                       disabled={!wallet}
-                      onClick={() => copyAddress("wallet-evm", evmAddr)}
+                      onClick={() => copyAddress("wallet-eth", ethAddr)}
                       className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950 disabled:opacity-40"
                     >
-                      {copiedKey === "wallet-evm" ? (
+                      {copiedKey === "wallet-eth" ? (
+                        <>
+                          <IconCheck size={13} /> Copied
+                        </>
+                      ) : (
+                        <>
+                          <IconCopy size={13} /> Copy Address
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEcosystemFilter("evm")}
+                      className="text-xs font-semibold text-[#FF1A1A] hover:underline"
+                    >
+                      View Assets →
+                    </button>
+                  </div>
+                </div>
+
+                {/* Base Wallet */}
+                <div className="rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <ChainBadge chainKey="base-mainnet" size={28} />
+                        <div>
+                          <p className="font-display text-sm font-bold text-neutral-950">
+                            Base Mainnet
+                          </p>
+                          <p className="text-[11px] text-neutral-500">
+                            Base L2
+                          </p>
+                        </div>
+                      </div>
+                      <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700">
+                        EVM
+                      </span>
+                    </div>
+
+                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
+                      {baseUsdcBalance} USDC
+                    </p>
+                    <p className="mt-1 font-mono text-xs text-neutral-500">
+                      {truncateMiddle(baseAddr, 8, 6)}
+                    </p>
+                  </div>
+
+                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
+                    <button
+                      type="button"
+                      disabled={!wallet}
+                      onClick={() => copyAddress("wallet-base", baseAddr)}
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950 disabled:opacity-40"
+                    >
+                      {copiedKey === "wallet-base" ? (
                         <>
                           <IconCheck size={13} /> Copied
                         </>
@@ -2101,7 +2288,7 @@ export function PortfolioView({
                       onChange={(e) => setReceiveDeploymentId(e.target.value)}
                       className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 text-sm font-semibold text-neutral-950 focus:border-neutral-950 focus:outline-none"
                     >
-                      {CURATED_SUPPORTED_DEPLOYMENTS.map((d) => (
+                      {MAINNET_SUPPORTED_DEPLOYMENTS.map((d) => (
                         <option key={d.id} value={d.id}>
                           {d.symbol} — {d.name} ({d.networkName})
                         </option>
@@ -2109,28 +2296,28 @@ export function PortfolioView({
                     </select>
 
                     {/* Quick Network Pills matching 08_26_18 PM-7.png */}
-                    <div className="mt-3 grid grid-cols-3 gap-2.5">
+                    <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                       <button
                         type="button"
                         onClick={() =>
-                          setReceiveDeploymentId("solana-devnet:USDC")
+                          setReceiveDeploymentId("ethereum-mainnet:USDC")
                         }
                         className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
-                          receiveDeployment.ecosystem === "solana"
+                          receiveDeployment.networkKey === "ethereum-mainnet"
                             ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
                             : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
                         }`}
                       >
-                        <ChainBadge chainKey="solana-mainnet" size={16} />
-                        <span>Solana</span>
+                        <ChainBadge chainKey="ethereum-mainnet" size={16} />
+                        <span>Ethereum</span>
                       </button>
                       <button
                         type="button"
                         onClick={() =>
-                          setReceiveDeploymentId("base-sepolia:USDC")
+                          setReceiveDeploymentId("base-mainnet:USDC")
                         }
                         className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
-                          receiveDeployment.ecosystem === "evm"
+                          receiveDeployment.networkKey === "base-mainnet"
                             ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
                             : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
                         }`}
@@ -2141,10 +2328,24 @@ export function PortfolioView({
                       <button
                         type="button"
                         onClick={() =>
-                          setReceiveDeploymentId("near-testnet:NEAR")
+                          setReceiveDeploymentId("solana-mainnet:USDC")
                         }
                         className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
-                          receiveDeployment.ecosystem === "near"
+                          receiveDeployment.networkKey === "solana-mainnet"
+                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
+                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                        }`}
+                      >
+                        <ChainBadge chainKey="solana-mainnet" size={16} />
+                        <span>Solana</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setReceiveDeploymentId("near-mainnet:NEAR")
+                        }
+                        className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
+                          receiveDeployment.networkKey === "near-mainnet"
                             ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950"
                             : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
                         }`}
@@ -2244,12 +2445,14 @@ export function PortfolioView({
                   <button
                     type="button"
                     onClick={handleCreatePaymentRequest}
-                    disabled={prCreating}
+                    disabled={prCreating || wallet?.status !== "ACTIVE"}
                     className="w-full rounded-full bg-[#FF1A1A] py-3.5 text-sm font-semibold text-white shadow-md hover:bg-[#E01515] disabled:opacity-50 transition-colors"
                   >
-                    {prCreating
-                      ? "Generating Payment Link..."
-                      : "Create Payment Link →"}
+                    {wallet?.status !== "ACTIVE"
+                      ? "Wallet Setup Pending (Activation Required)"
+                      : prCreating
+                        ? "Generating Payment Link..."
+                        : "Create Payment Link →"}
                   </button>
                 </div>
 
@@ -2264,10 +2467,17 @@ export function PortfolioView({
                         Your payment link
                       </h2>
                     </div>
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                      Active
-                    </span>
+                    {wallet?.status === "ACTIVE" ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        Active
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
+                        <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                        Wallet Setup Pending
+                      </span>
+                    )}
                   </div>
 
                   {/* Dark Preview Card */}
@@ -2293,6 +2503,17 @@ export function PortfolioView({
                           : "Open Amount"}
                       </p>
                     </div>
+
+                    {wallet?.status !== "ACTIVE" && (
+                      <div className="relative z-10 mt-4 rounded-[12px] border border-amber-400/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+                        <p className="font-semibold">Wallet Setup Pending</p>
+                        <p className="mt-0.5 text-[11px] text-amber-300/80">
+                          This preview illustrates how payers will view your
+                          link. Payments cannot be accepted until wallet
+                          activation is completed.
+                        </p>
+                      </div>
+                    )}
 
                     <div className="relative z-10 mt-5 flex items-center justify-between rounded-[14px] border border-white/10 bg-white/[0.06] px-3.5 py-2.5 text-xs">
                       <span className="font-semibold text-white">
@@ -2320,12 +2541,15 @@ export function PortfolioView({
                   {/* Share URL Box */}
                   <div className="flex items-center justify-between rounded-[14px] border border-neutral-200 bg-neutral-50 px-3.5 py-2.5">
                     <span className="truncate font-mono text-xs text-neutral-700 mr-2">
-                      {latestShareUrl}
+                      {wallet?.status === "ACTIVE"
+                        ? latestShareUrl
+                        : "Payment link unavailable (wallet setup pending)"}
                     </span>
                     <button
                       type="button"
+                      disabled={wallet?.status !== "ACTIVE"}
                       onClick={() => copyAddress("share-url", latestShareUrl)}
-                      className="shrink-0 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-semibold text-neutral-900 hover:bg-neutral-100"
+                      className="shrink-0 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-semibold text-neutral-900 hover:bg-neutral-100 disabled:opacity-40"
                     >
                       {copiedKey === "share-url" ? "Copied" : "Copy"}
                     </button>
@@ -2335,19 +2559,21 @@ export function PortfolioView({
                   <div className="grid grid-cols-3 gap-2.5">
                     <button
                       type="button"
+                      disabled={wallet?.status !== "ACTIVE"}
                       onClick={() => copyAddress("share-btn", latestShareUrl)}
-                      className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                      className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50 disabled:opacity-40"
                     >
                       Copy Link
                     </button>
                     <button
                       type="button"
+                      disabled={wallet?.status !== "ACTIVE"}
                       onClick={() => copyAddress("qr-btn", latestShareUrl)}
-                      className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                      className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50 disabled:opacity-40"
                     >
                       Show QR
                     </button>
-                    {paymentRequests[0] ? (
+                    {paymentRequests[0] && wallet?.status === "ACTIVE" ? (
                       <Link
                         prefetch={false}
                         href={`/pay/${paymentRequests[0].publicId}`}
@@ -2358,10 +2584,10 @@ export function PortfolioView({
                     ) : (
                       <button
                         type="button"
-                        onClick={() => copyAddress("share-alt", latestShareUrl)}
-                        className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                        disabled
+                        className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-400 disabled:opacity-40"
                       >
-                        Share
+                        Open Link
                       </button>
                     )}
                   </div>
@@ -2838,7 +3064,7 @@ export function PortfolioView({
                         onChange={(e) => setSourceDeploymentId(e.target.value)}
                         className="w-full rounded-[14px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-neutral-950"
                       >
-                        {CURATED_SUPPORTED_DEPLOYMENTS.map((d) => (
+                        {MAINNET_SUPPORTED_DEPLOYMENTS.map((d) => (
                           <option key={d.id} value={d.id}>
                             {d.symbol} ({d.networkName})
                           </option>
@@ -2864,7 +3090,7 @@ export function PortfolioView({
                         onChange={(e) => setDestDeploymentId(e.target.value)}
                         className="w-full rounded-[14px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-neutral-950"
                       >
-                        {CURATED_SUPPORTED_DEPLOYMENTS.map((d) => (
+                        {MAINNET_SUPPORTED_DEPLOYMENTS.map((d) => (
                           <option key={d.id} value={d.id}>
                             {d.symbol} ({d.networkName})
                           </option>
