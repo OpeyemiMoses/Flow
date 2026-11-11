@@ -50,6 +50,7 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, flow
 AS $$
+#variable_conflict use_column
 DECLARE
     v_attempt RECORD;
     v_request RECORD;
@@ -108,7 +109,7 @@ BEGIN
         END IF;
 
         -- Insert verification record with idempotent ON CONFLICT update
-        INSERT INTO flow.payment_verifications (
+        INSERT INTO flow.payment_verifications AS pv (
             payment_attempt_id, verification_type, network, tx_hash, event_index, from_address, to_address,
             asset_id, token_contract, atomic_amount, block_height, block_hash, finality,
             memo, evidence_source, raw_evidence
@@ -120,10 +121,10 @@ BEGIN
         ON CONFLICT (network, tx_hash, event_index, verification_type)
         DO UPDATE SET
             finality = EXCLUDED.finality,
-            block_height = COALESCE(EXCLUDED.block_height, flow.payment_verifications.block_height),
-            block_hash = COALESCE(EXCLUDED.block_hash, flow.payment_verifications.block_hash),
-            raw_evidence = flow.payment_verifications.raw_evidence || EXCLUDED.raw_evidence
-        RETURNING flow.payment_verifications.id INTO v_verification_id;
+            block_height = COALESCE(EXCLUDED.block_height, pv.block_height),
+            block_hash = COALESCE(EXCLUDED.block_hash, pv.block_hash),
+            raw_evidence = pv.raw_evidence || EXCLUDED.raw_evidence
+        RETURNING pv.id INTO v_verification_id;
 
         IF v_is_late THEN
             UPDATE flow.payment_attempts
@@ -186,7 +187,7 @@ BEGIN
         END IF;
 
         -- Insert verification record with idempotent ON CONFLICT update
-        INSERT INTO flow.payment_verifications (
+        INSERT INTO flow.payment_verifications AS pv (
             payment_attempt_id, verification_type, network, tx_hash, event_index, from_address, to_address,
             asset_id, token_contract, atomic_amount, block_height, block_hash, finality,
             memo, evidence_source, raw_evidence
@@ -198,10 +199,10 @@ BEGIN
         ON CONFLICT (network, tx_hash, event_index, verification_type)
         DO UPDATE SET
             finality = EXCLUDED.finality,
-            block_height = COALESCE(EXCLUDED.block_height, flow.payment_verifications.block_height),
-            block_hash = COALESCE(EXCLUDED.block_hash, flow.payment_verifications.block_hash),
-            raw_evidence = flow.payment_verifications.raw_evidence || EXCLUDED.raw_evidence
-        RETURNING flow.payment_verifications.id INTO v_verification_id;
+            block_height = COALESCE(EXCLUDED.block_height, pv.block_height),
+            block_hash = COALESCE(EXCLUDED.block_hash, pv.block_hash),
+            raw_evidence = pv.raw_evidence || EXCLUDED.raw_evidence
+        RETURNING pv.id INTO v_verification_id;
 
         UPDATE flow.payment_attempts
         SET
@@ -212,7 +213,7 @@ BEGIN
 
     ELSIF p_verification_type = '1CLICK_EXECUTION' THEN
         -- Provider status observation with idempotent ON CONFLICT update
-        INSERT INTO flow.payment_verifications (
+        INSERT INTO flow.payment_verifications AS pv (
             payment_attempt_id, verification_type, network, tx_hash, event_index, from_address, to_address,
             asset_id, token_contract, atomic_amount, block_height, block_hash, finality,
             memo, evidence_source, raw_evidence
@@ -224,10 +225,10 @@ BEGIN
         ON CONFLICT (network, tx_hash, event_index, verification_type)
         DO UPDATE SET
             finality = EXCLUDED.finality,
-            block_height = COALESCE(EXCLUDED.block_height, flow.payment_verifications.block_height),
-            block_hash = COALESCE(EXCLUDED.block_hash, flow.payment_verifications.block_hash),
-            raw_evidence = flow.payment_verifications.raw_evidence || EXCLUDED.raw_evidence
-        RETURNING flow.payment_verifications.id INTO v_verification_id;
+            block_height = COALESCE(EXCLUDED.block_height, pv.block_height),
+            block_hash = COALESCE(EXCLUDED.block_hash, pv.block_hash),
+            raw_evidence = pv.raw_evidence || EXCLUDED.raw_evidence
+        RETURNING pv.id INTO v_verification_id;
 
         v_new_status := v_attempt.status;
     ELSE
