@@ -16,7 +16,7 @@ CREATE OR REPLACE FUNCTION flow.commit_payment_attempt(
     p_deposit_memo text,
     p_deposit_deadline timestamptz,
     p_deposit_instructions jsonb,
-    p_quoted_source_atomic numeric DEFAULT NULL
+    p_quoted_source_atomic numeric
 )
 RETURNS TABLE (
     id UUID,
