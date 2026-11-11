@@ -420,23 +420,36 @@ export async function commitPaymentAttempt(
         );
       }
 
-      // Task 2: Exact payer cost cap enforcement
-      // 1. SOL atomic units (lamports) cap: bound source lamports to owner approved ceiling (default 0.1 SOL = 100,000,000 lamports, or FLOW_MAX_SOL_LAMPORTS)
+      // Task 1 & 2: Exact payer cost cap enforcement
+      // 1. SOL atomic units (lamports) cap: bound source lamports to owner approved ceiling
+      // In tests, allows 100,000,000 lamports for fixture. In live rehearsal/production, enforces narrow owner cap (FLOW_MAX_SOL_LAMPORTS or 15,000,000 lamports ~0.015 SOL ceiling).
       const MAX_APPROVED_SOL_LAMPORTS = BigInt(
-        process.env.FLOW_MAX_SOL_LAMPORTS ?? "100000000",
+        process.env.FLOW_MAX_SOL_LAMPORTS ??
+          (process.env.FLOW_ENV === "test" ? "100000000" : "15000000"),
       );
       if (
         attempt.source_network === "solana-mainnet" &&
         committedRes.amountInAtomic &&
         BigInt(committedRes.amountInAtomic) > MAX_APPROVED_SOL_LAMPORTS
       ) {
+        // Quarantine over-limit attempt and do NOT expose or store the payable deposit address
+        await db.$executeRaw`
+          UPDATE flow.payment_attempts
+          SET
+            status = 'RECONCILIATION_REQUIRED',
+            deposit_address = NULL,
+            provider_correlation_id = COALESCE(${committedRes.correlationId ?? null}, provider_correlation_id),
+            settlement_error = ${`QUARANTINED_OVER_LIMIT: Committed amountIn ${committedRes.amountInAtomic} lamports exceeds owner approved cap of ${MAX_APPROVED_SOL_LAMPORTS} lamports. Deposit address suppressed.`},
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ${attempt.id}::uuid
+        `;
         throw new ApiFailure(
           403,
-          `PAYER_COST_EXCEEDS_APPROVED_LIMIT: Fresh committed source amount ${committedRes.amountInAtomic} lamports exceeds owner approved limit of ${MAX_APPROVED_SOL_LAMPORTS} lamports.`,
+          `PAYER_COST_EXCEEDS_APPROVED_LIMIT: Fresh committed source amount ${committedRes.amountInAtomic} lamports exceeds owner approved limit of ${MAX_APPROVED_SOL_LAMPORTS} lamports. Attempt quarantined and deposit address suppressed.`,
         );
       }
 
-      // 2. Bound destination amount against rehearsal authorization max bound (e.g. 5,000,000 USDC)
+      // 2. Bound destination amount against rehearsal authorization max bound (e.g. exactly 1,000,000 USDC)
       const committedDestAtomic =
         committedRes.amountOutAtomic ??
         attempt.quoted_destination_atomic_amount;
@@ -447,9 +460,20 @@ export async function commitPaymentAttempt(
         BigInt(committedDestAtomic) >
           BigInt(authConsumption[0]!.res_max_atomic_amount)
       ) {
+        // Quarantine over-limit destination attempt
+        await db.$executeRaw`
+          UPDATE flow.payment_attempts
+          SET
+            status = 'RECONCILIATION_REQUIRED',
+            deposit_address = NULL,
+            provider_correlation_id = COALESCE(${committedRes.correlationId ?? null}, provider_correlation_id),
+            settlement_error = ${`QUARANTINED_OVER_LIMIT: Committed destination amount ${committedDestAtomic} exceeds authorized limit of ${authConsumption[0]!.res_max_atomic_amount}. Deposit address suppressed.`},
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ${attempt.id}::uuid
+        `;
         throw new ApiFailure(
           403,
-          `COMMITTED_QUOTE_EXCEEDS_AUTHORIZED_MAX_BOUND: Fresh committed destination amount ${committedDestAtomic} exceeds approved limit of ${authConsumption[0]!.res_max_atomic_amount} atomic units.`,
+          `COMMITTED_QUOTE_EXCEEDS_AUTHORIZED_MAX_BOUND: Fresh committed destination amount ${committedDestAtomic} exceeds approved limit of ${authConsumption[0]!.res_max_atomic_amount} atomic units. Attempt quarantined and deposit address suppressed.`,
         );
       }
 

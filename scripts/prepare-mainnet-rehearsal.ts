@@ -80,9 +80,9 @@ export async function prepareMainnetRehearsal(
 
   const invoiceAmountUsdc = options.invoiceUsdc || "1.00";
   const invoiceAtomic = BigInt(Math.round(parseFloat(invoiceAmountUsdc) * 1e6));
-  const maxAmountUsdc = options.maxUsdc || "5.00";
+  const maxAmountUsdc = options.maxUsdc || "1.00";
   const maxAtomic = BigInt(Math.round(parseFloat(maxAmountUsdc) * 1e6));
-  const durationSeconds = options.durationSeconds || 3600;
+  const durationSeconds = options.durationSeconds || 1800; // 30 minutes default for rehearsal window
 
   console.log("STEP 1: Target Rehearsal Parameters");
   if (recipient) {
@@ -102,7 +102,7 @@ export async function prepareMainnetRehearsal(
     `  - Hard Maximum Safety Ceiling:   ${maxAmountUsdc} USDC (${maxAtomic.toString()} atomic)`,
   );
   console.log(
-    `  - Authorization Duration:        ${durationSeconds} seconds (1 hour)\n`,
+    `  - Authorization Duration:        ${durationSeconds} seconds\n`,
   );
 
   // Step 2: Database Tenant & Custody Provisioning Verification
@@ -155,8 +155,8 @@ export async function prepareMainnetRehearsal(
         wa.chain_id,
         wc.can_receive
       FROM flow.wallets w
-      LEFT JOIN flow.wallet_addresses wa ON wa.wallet_id = w.id AND wa.network = 'base-mainnet'
-      LEFT JOIN flow.wallet_capabilities wc ON wc.wallet_id = w.id AND wc.network = wa.network
+      LEFT JOIN flow.wallet_addresses wa ON wa.wallet_id = w.id AND wa.network IN ('base', 'base-mainnet')
+      LEFT JOIN flow.wallet_capabilities wc ON wc.wallet_id = w.id AND (wc.network = wa.network OR wc.network IN ('base', 'base-mainnet'))
       WHERE w.account_id = ${accountId}::uuid
       LIMIT 1
     `;
