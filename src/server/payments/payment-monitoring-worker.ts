@@ -677,11 +677,8 @@ export class PaymentMonitoringWorker {
         LIMIT 1
       `;
 
-      if (
-        existingDest.length > 0 &&
-        existingDest[0]!.finality === "FINALIZED"
-      ) {
-        destFinalized = true;
+      if (existingDest.length > 0) {
+        destFinalized = existingDest[0]!.finality === "FINALIZED";
       } else {
         const registeredRecipient = await this.getRecipientRegisteredAddress(
           attempt.id,
