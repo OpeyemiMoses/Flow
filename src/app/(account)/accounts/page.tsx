@@ -1,5 +1,10 @@
 import Link from "next/link";
 import { FlowLogo } from "../../../components/flow-logo.tsx";
+import {
+  SidebarSignOutButton,
+  ThemeToggle,
+} from "../../../components/theme-toggle.tsx";
+import { UserAvatar } from "../../../components/user-avatar.tsx";
 import { runtime } from "../../../foundation/prisma.ts";
 import { accessibleAccounts } from "../../../server/accounts.ts";
 import { pageData, pagePrincipal } from "../../../server/pages.ts";
@@ -25,11 +30,11 @@ export default async function AccountsPage() {
   const primaryAccount = personalAccounts[0] ?? accounts[0];
 
   return (
-    <main className="min-h-screen bg-[#FAF8F5] text-neutral-950 flex flex-col lg:flex-row">
+    <main className="min-h-screen bg-[#FAF8F5] dark:bg-[#0B0B0B] text-neutral-950 dark:text-white flex flex-col lg:flex-row">
       {/* Left Dark Sidebar */}
       <aside
         aria-label="Workspaces navigation"
-        className="hidden lg:flex lg:w-[250px] lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 lg:min-h-screen lg:sticky lg:top-0"
+        className="hidden lg:flex lg:fixed lg:inset-y-0 lg:left-0 lg:w-[250px] lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 lg:z-30 lg:overflow-y-auto border-r border-neutral-900"
       >
         <div>
           <div className="px-2 pt-1 pb-7">
@@ -70,9 +75,7 @@ export default async function AccountsPage() {
 
         <div className="flex items-center justify-between border-t border-white/10 pt-4">
           <div className="flex items-center gap-2.5 min-w-0">
-            <img
-              src="/assets/amara-avatar.png"
-              alt="Profile"
+            <UserAvatar
               className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0"
             />
             <div className="min-w-0">
@@ -84,18 +87,22 @@ export default async function AccountsPage() {
               </p>
             </div>
           </div>
-          <Link
-            prefetch={false}
-            href="/security"
-            className="text-neutral-400 hover:text-white text-sm px-1"
-          >
-            •••
-          </Link>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <ThemeToggle variant="sidebar" />
+            <Link
+              prefetch={false}
+              href="/security"
+              className="text-neutral-400 hover:text-white text-sm px-1"
+            >
+              •••
+            </Link>
+            <SidebarSignOutButton />
+          </div>
         </div>
       </aside>
 
       {/* Main Content */}
-      <div className="flex-1 min-w-0 pb-20 relative overflow-hidden">
+      <div className="flex-1 min-w-0 pb-20 relative overflow-hidden lg:pl-[250px]">
         <div
           aria-hidden="true"
           className="pointer-events-none absolute -top-10 right-0 w-[340px] sm:w-[460px] h-[180px] z-0 overflow-hidden"
@@ -116,17 +123,19 @@ export default async function AccountsPage() {
         </div>
 
         <div className="relative z-10 mx-auto max-w-[1120px] px-4 sm:px-8 pt-7 space-y-8">
-          <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
-              WORKSPACES
-            </p>
-            <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950">
-              Your FLOW accounts
-            </h1>
-            <p className="mt-1 text-sm text-neutral-600">
-              Switch between your personal account and your business workspaces,
-              or create a new business organization.
-            </p>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                WORKSPACES
+              </p>
+              <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950 dark:text-white">
+                Your FLOW accounts
+              </h1>
+              <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+                Switch between your personal account and your business workspaces,
+                or create a new business organization.
+              </p>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-7 items-start">
@@ -143,23 +152,23 @@ export default async function AccountsPage() {
                       <Link
                         prefetch={false}
                         href={`/accounts/${account.id}`}
-                        className="block rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs hover:border-neutral-900 transition-all"
+                        className="block rounded-[22px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs hover:border-neutral-900 dark:hover:border-neutral-700 transition-all"
                       >
                         <div className="flex flex-wrap items-center justify-between gap-4">
                           <div className="flex items-center gap-3.5">
-                            <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-red-50 text-[#FF1A1A] font-bold">
+                            <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-red-50 dark:bg-red-950/40 text-[#FF1A1A] font-bold">
                               👤
                             </span>
                             <div>
                               <div className="flex items-center gap-2">
-                                <strong className="font-display text-base font-bold text-neutral-950">
+                                <strong className="font-display text-base font-bold text-neutral-950 dark:text-white">
                                   {account.name}
                                 </strong>
-                                <span className="rounded-full bg-red-50 px-2.5 py-0.5 text-[10px] font-bold uppercase text-[#FF1A1A]">
+                                <span className="rounded-full bg-red-50 dark:bg-red-950/40 px-2.5 py-0.5 text-[10px] font-bold uppercase text-[#FF1A1A]">
                                   Personal account
                                 </span>
                               </div>
-                              <p className="mt-1 text-xs text-neutral-500">
+                              <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
                                 {walletLabels[account.walletStatus] ??
                                   "Wallet setup pending"}{" "}
                                 · {account.role.toLowerCase()}
@@ -167,7 +176,7 @@ export default async function AccountsPage() {
                             </div>
                           </div>
 
-                          <span className="rounded-full bg-neutral-950 px-4 py-1.5 text-xs font-semibold text-white">
+                          <span className="rounded-full bg-neutral-950 dark:bg-white px-4 py-1.5 text-xs font-semibold text-white dark:text-neutral-950">
                             Open →
                           </span>
                         </div>
@@ -183,11 +192,11 @@ export default async function AccountsPage() {
                 </h2>
 
                 {businessAccounts.length === 0 ? (
-                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-6 text-center shadow-2xs">
-                    <p className="font-display text-sm font-bold text-neutral-950">
+                  <div className="rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 text-center shadow-2xs">
+                    <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                       No business accounts yet
                     </p>
-                    <p className="mt-1 text-xs text-neutral-500">
+                    <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
                       Create a business workspace on the right to manage team
                       payments and invoices.
                     </p>
@@ -199,23 +208,23 @@ export default async function AccountsPage() {
                         <Link
                           prefetch={false}
                           href={`/accounts/${account.id}`}
-                          className="block rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs hover:border-neutral-900 transition-all"
+                          className="block rounded-[22px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs hover:border-neutral-900 dark:hover:border-neutral-700 transition-all"
                         >
                           <div className="flex flex-wrap items-center justify-between gap-4">
                             <div className="flex items-center gap-3.5">
-                              <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-neutral-100 text-neutral-900 font-bold">
+                              <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 font-bold">
                                 🏢
                               </span>
                               <div>
                                 <div className="flex items-center gap-2">
-                                  <strong className="font-display text-base font-bold text-neutral-950">
+                                  <strong className="font-display text-base font-bold text-neutral-950 dark:text-white">
                                     {account.name}
                                   </strong>
-                                  <span className="rounded-full bg-neutral-100 px-2.5 py-0.5 text-[10px] font-bold uppercase text-neutral-800">
+                                  <span className="rounded-full bg-neutral-100 dark:bg-neutral-800 px-2.5 py-0.5 text-[10px] font-bold uppercase text-neutral-800 dark:text-neutral-200">
                                     Business account
                                   </span>
                                 </div>
-                                <p className="mt-1 text-xs text-neutral-500">
+                                <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
                                   {walletLabels[account.walletStatus] ??
                                     "Wallet setup pending"}{" "}
                                   · {account.role.toLowerCase()}
@@ -223,7 +232,7 @@ export default async function AccountsPage() {
                               </div>
                             </div>
 
-                            <span className="rounded-full bg-neutral-950 px-4 py-1.5 text-xs font-semibold text-white">
+                            <span className="rounded-full bg-neutral-950 dark:bg-white px-4 py-1.5 text-xs font-semibold text-white dark:text-neutral-950">
                               Open →
                             </span>
                           </div>
@@ -237,14 +246,14 @@ export default async function AccountsPage() {
 
             {/* Right 5 Columns: Create Business Account Card */}
             <div className="lg:col-span-5">
-              <section className="rounded-[26px] border border-neutral-200/90 bg-white p-6 sm:p-7 shadow-sm space-y-4">
+              <section className="rounded-[26px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 sm:p-7 shadow-sm space-y-4">
                 <span className="inline-block text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
                   FOR BUSINESS
                 </span>
-                <h2 className="font-serif text-2xl text-neutral-950">
+                <h2 className="font-serif text-2xl text-neutral-950 dark:text-white">
                   Create a business account
                 </h2>
-                <p className="text-xs leading-relaxed text-neutral-600">
+                <p className="text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
                   Accept payments from customers, send invoices, manage team
                   access, and track business activity in one place.
                 </p>

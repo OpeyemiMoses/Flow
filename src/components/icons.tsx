@@ -452,6 +452,294 @@ export function IconExternalLink({
   );
 }
 
+export function UsdcIcon({
+  size = 32,
+  className = "",
+}: {
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={`shrink-0 ${className}`}
+      aria-label="USD Coin (USDC)"
+    >
+      <circle cx="16" cy="16" r="16" fill="#2775CA" />
+      <circle
+        cx="16"
+        cy="16"
+        r="11.5"
+        stroke="#FFFFFF"
+        strokeWidth="1.2"
+        strokeOpacity="0.45"
+        strokeDasharray="2.5 1.5"
+      />
+      <path
+        d="M17.6 13.1c-1.1-.2-1.8-.4-1.8-1 0-.6.6-.9 1.5-.9 1 0 1.7.3 2.1.6l.7-1.3c-.6-.5-1.5-.8-2.5-.9V8h-1.4v1.5c-1.5.2-2.5 1.1-2.5 2.3 0 1.6 1.3 2.2 2.8 2.5 1.2.3 1.6.6 1.6 1.1 0 .6-.6 1-1.6 1-1.1 0-1.9-.4-2.5-.9l-.8 1.3c.7.7 1.7 1.1 2.9 1.2v1.5h1.4v-1.5c1.5-.2 2.6-1.1 2.6-2.5 0-1.8-1.4-2.3-2.8-2.6z"
+        fill="#FFFFFF"
+      />
+      <path
+        d="M12.6 10.5c-2.1 1.4-3.4 3.7-3.4 6.3s1.3 4.9 3.4 6.3l.9-1.3c-1.7-1.1-2.7-3-2.7-5s1-3.9 2.7-5l-.9-1.3zm6.8 0l-.9 1.3c1.7 1.1 2.7 3 2.7 5s-1 3.9-2.7 5l.9 1.3c2.1-1.4 3.4-3.7 3.4-6.3s-1.3-4.9-3.4-6.3z"
+        fill="#FFFFFF"
+      />
+    </svg>
+  );
+}
+
+export function UsdtIcon({
+  size = 32,
+  className = "",
+}: {
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={`shrink-0 ${className}`}
+      aria-label="Tether (USDT)"
+    >
+      <circle cx="16" cy="16" r="16" fill="#26A17B" />
+      <path
+        d="M17.92 14.73c-.1.01-.58.04-1.92.04-1.07 0-1.74-.03-1.94-.04v-2.07h3.86v2.07zm0-3.08v-.95h4.15V7.47H9.93v3.23h4.13v.95c-3.73.18-6.53.94-6.53 1.86s2.8 1.68 6.53 1.86v6.6h3.86v-6.6c3.72-.18 6.51-.94 6.51-1.86s-2.79-1.68-6.51-1.86zm0 4.09c3.06-.15 5.23-.71 5.23-1.37 0-.66-2.17-1.22-5.23-1.37v1.84c-.32.02-.75.03-1.17.03-.49 0-.89-.01-1.23-.03v-1.84c-3.06.15-5.23.71-5.23 1.37 0 .66 2.17 1.22 5.23 1.37v1.85c.34.02.74.03 1.23.03.42 0 .85-.01 1.17-.03v-1.85z"
+        fill="#FFFFFF"
+      />
+    </svg>
+  );
+}
+
+export function EthIcon({
+  size = 32,
+  className = "",
+}: {
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={`shrink-0 ${className}`}
+      aria-label="Ethereum (ETH)"
+    >
+      <circle cx="16" cy="16" r="16" fill="#1C1C1C" />
+      <g transform="translate(6, 4) scale(0.82)">
+        <polygon
+          points="12,1 11.7,1.8 11.7,17.2 12,17.5 18.5,13.5"
+          fill="#8A92B2"
+        />
+        <polygon points="12,1 5.5,12 12,17.5 12,9" fill="#FFFFFF" />
+        <polygon
+          points="12,18.5 11.8,18.8 11.8,25 12,25.4 18.5,16"
+          fill="#8A92B2"
+        />
+        <polygon points="12,25.4 12,18.5 5.5,16" fill="#FFFFFF" />
+        <polygon points="12,17.5 18.5,13.5 12,10.2" fill="#62688F" />
+        <polygon points="5.5,13.5 12,17.5 12,10.2" fill="#E0E2EC" />
+      </g>
+    </svg>
+  );
+}
+
+export function SolIcon({
+  size = 32,
+  className = "",
+}: {
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={`shrink-0 ${className}`}
+      aria-label="Solana (SOL)"
+    >
+      <circle cx="16" cy="16" r="16" fill="#000000" />
+      <defs>
+        <linearGradient
+          id="sol-icon-grad"
+          x1="0%"
+          y1="0%"
+          x2="100%"
+          y2="100%"
+        >
+          <stop offset="0%" stopColor="#00FFA3" />
+          <stop offset="100%" stopColor="#DC1FFF" />
+        </linearGradient>
+      </defs>
+      <g transform="translate(4, 5.5) scale(0.75)">
+        <path
+          d="M6.5 21.6c.15-.15.35-.23.56-.23h18.1c.36 0 .54.43.28.69l-2.4 2.4c-.15.15-.35.23-.56.23H4.4c-.36 0-.54-.43-.28-.69l2.4-2.4zm0-13.4c.15-.15.35-.23.56-.23h18.1c.36 0 .54.43.28.69l-2.4 2.4c-.15.15-.35.23-.56.23H4.4c-.36 0-.54-.43-.28-.69l2.4-2.4zm20.8 6.7c-.15-.15-.35-.23-.56-.23H8.7c-.36 0-.54.43-.28.69l2.4 2.4c.15.15.35.23.56.23h18.1c.36 0 .54-.43.28-.69l-2.4-2.4z"
+          fill="url(#sol-icon-grad)"
+        />
+      </g>
+    </svg>
+  );
+}
+
+export function NearIcon({
+  size = 32,
+  className = "",
+}: {
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={`shrink-0 ${className}`}
+      aria-label="NEAR Protocol"
+    >
+      <circle cx="16" cy="16" r="16" fill="#000000" />
+      <path
+        d="M21.5 8.2c-.4-.3-1-.2-1.3.2L14.7 17c-.2.2-.5.3-.7.3s-.5-.1-.7-.3l-2.6-3.4c-.6-.8-1.7-1-2.5-.4-.8.6-1 1.7-.4 2.5l3.2 4.2c.8 1.1 2.2 1.7 3.6 1.6 1.4-.1 2.7-.9 3.3-2.1L21.7 9.5c.3-.4.2-1-.2-1.3z"
+        fill="#FFFFFF"
+      />
+      <path
+        d="M20.8 11.2c-.5-.7-1.5-.9-2.2-.4-.7.5-.9 1.5-.4 2.2l2.6 3.4c.2.2.3.5.2.8-.1.3-.3.5-.6.6-.3.1-.6 0-.8-.2L13.8 9.5c-.7-1-1.9-1.6-3.1-1.5-1.3.1-2.4.9-2.9 2.1l-1.6 4.3c-.3.8.1 1.7.9 2 .8.3 1.7-.1 2-.9l1.4-3.7c.1-.3.4-.5.7-.6.3-.1.6 0 .8.2l7.1 8.5c.6.7 1.4 1.1 2.3 1.1h.4c1-.1 1.9-.7 2.4-1.5l1.6-4.3c.5-1.4.1-3-.9-3.9z"
+        fill="#FFFFFF"
+      />
+    </svg>
+  );
+}
+
+export function BaseChainIcon({
+  size = 24,
+  className = "",
+}: {
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 32 32"
+      fill="none"
+      className={`shrink-0 ${className}`}
+      aria-label="Base"
+    >
+      <circle cx="16" cy="16" r="16" fill="#0052FF" />
+      <path
+        d="M16 6.5C10.75 6.5 6.5 10.75 6.5 16S10.75 25.5 16 25.5 25.5 21.25 25.5 16 21.25 6.5 16 6.5zm-1.8 13.8c-2.4 0-4.3-1.9-4.3-4.3s1.9-4.3 4.3-4.3c2.3 0 4.1 1.7 4.3 3.9h-2.1c-.2-1.1-1.1-1.9-2.2-1.9-1.2 0-2.2 1-2.2 2.3s1 2.3 2.2 2.3c1.1 0 2-.8 2.2-1.9h2.1c-.2 2.2-2 3.9-4.3 3.9z"
+        fill="#FFFFFF"
+      />
+    </svg>
+  );
+}
+
+export const COINGECKO_ASSET_IMAGES: Record<
+  string,
+  { src: string; coingeckoUrl: string; alt: string; bg?: string }
+> = {
+  USDC: {
+    src: "/assets/tokens/usdc.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/6319/large/USDC.png",
+    alt: "USD Coin (USDC)",
+  },
+  USDT: {
+    src: "/assets/tokens/usdt.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/325/large/Tether.png",
+    alt: "Tether (USDT)",
+  },
+  ETH: {
+    src: "/assets/tokens/eth.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/279/large/ethereum.png",
+    alt: "Ethereum (ETH)",
+    bg: "bg-neutral-900",
+  },
+  WETH: {
+    src: "/assets/tokens/eth.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/279/large/ethereum.png",
+    alt: "Wrapped Ether (WETH)",
+    bg: "bg-neutral-900",
+  },
+  CBETH: {
+    src: "/assets/tokens/eth.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/279/large/ethereum.png",
+    alt: "Coinbase Wrapped Staked ETH (cbETH)",
+    bg: "bg-neutral-900",
+  },
+  SOL: {
+    src: "/assets/tokens/sol.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/4128/large/solana.png",
+    alt: "Solana (SOL)",
+    bg: "bg-black",
+  },
+  MSOL: {
+    src: "/assets/tokens/sol.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/4128/large/solana.png",
+    alt: "Marinade staked SOL (mSOL)",
+    bg: "bg-black",
+  },
+  NEAR: {
+    src: "/assets/tokens/near.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/10365/large/near.jpg",
+    alt: "NEAR Protocol (NEAR)",
+  },
+  WNEAR: {
+    src: "/assets/tokens/near.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/10365/large/near.jpg",
+    alt: "Wrapped NEAR (wNEAR)",
+  },
+};
+
+export const COINGECKO_CHAIN_IMAGES: Record<
+  string,
+  { src: string; coingeckoUrl: string; alt: string; bg?: string }
+> = {
+  ethereum: {
+    src: "/assets/tokens/eth.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/279/large/ethereum.png",
+    alt: "Ethereum Mainnet",
+    bg: "bg-neutral-900",
+  },
+  base: {
+    src: "/assets/tokens/base.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/131/large/base.png",
+    alt: "Base Mainnet",
+  },
+  solana: {
+    src: "/assets/tokens/sol.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/5/large/solana.png",
+    alt: "Solana Mainnet",
+    bg: "bg-black",
+  },
+  near: {
+    src: "/assets/tokens/near.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/34/large/near.jpeg",
+    alt: "NEAR Mainnet",
+  },
+};
+
 export function ChainBadge({
   chainKey,
   size = 24,
@@ -462,58 +750,35 @@ export function ChainBadge({
   className?: string;
 }) {
   const lower = chainKey.toLowerCase();
-  if (lower.includes("base")) {
+  let matchKey: string | null = null;
+  if (lower.includes("base")) matchKey = "base";
+  else if (lower.includes("sol")) matchKey = "solana";
+  else if (lower.includes("near")) matchKey = "near";
+  else if (lower.includes("eth") || lower.includes("evm")) matchKey = "ethereum";
+
+  const chain = matchKey ? COINGECKO_CHAIN_IMAGES[matchKey] : undefined;
+  if (chain) {
     return (
       <span
-        className={`inline-flex items-center justify-center rounded-full bg-[#0052FF] text-white font-bold select-none shrink-0 ${className}`}
-        style={{ width: size, height: size, fontSize: Math.round(size * 0.48) }}
-        title="Base (EVM)"
-      >
-        B
-      </span>
-    );
-  }
-  if (lower.includes("eth") || lower.includes("evm")) {
-    return (
-      <span
-        className={`inline-flex items-center justify-center rounded-full bg-[#3C3C3D] text-white font-bold select-none shrink-0 ${className}`}
+        className={`inline-flex items-center justify-center rounded-full overflow-hidden shrink-0 select-none shadow-2xs ${chain.bg ?? "bg-white"} ${className}`}
         style={{ width: size, height: size }}
-        title="Ethereum (EVM)"
       >
-        <svg
-          width={Math.round(size * 0.58)}
-          height={Math.round(size * 0.58)}
-          viewBox="0 0 24 24"
-          fill="currentColor"
-          aria-hidden="true"
-        >
-          <path d="M12 2L5.5 12.5 12 16.2l6.5-3.7L12 2zm0 16.2l-6.5-3.7L12 22l6.5-7.5-6.5 3.7z" />
-        </svg>
+        <img
+          src={chain.src}
+          alt={chain.alt}
+          width={size}
+          height={size}
+          className="h-full w-full object-cover"
+          onError={(e) => {
+            if (e.currentTarget.src !== chain.coingeckoUrl) {
+              e.currentTarget.src = chain.coingeckoUrl;
+            }
+          }}
+        />
       </span>
     );
   }
-  if (lower.includes("sol")) {
-    return (
-      <span
-        className={`inline-flex items-center justify-center rounded-full bg-gradient-to-br from-[#9945FF] to-[#14F195] text-[#0B1F4B] font-extrabold select-none shrink-0 ${className}`}
-        style={{ width: size, height: size, fontSize: Math.round(size * 0.46) }}
-        title="Solana"
-      >
-        S
-      </span>
-    );
-  }
-  if (lower.includes("near")) {
-    return (
-      <span
-        className={`inline-flex items-center justify-center rounded-full bg-[#0B1F4B] text-[#34D8B2] font-extrabold select-none shrink-0 ${className}`}
-        style={{ width: size, height: size, fontSize: Math.round(size * 0.46) }}
-        title="NEAR Protocol"
-      >
-        N
-      </span>
-    );
-  }
+
   return (
     <span
       className={`inline-flex items-center justify-center rounded-full bg-slate-200 text-slate-700 font-bold select-none shrink-0 ${className}`}
@@ -583,26 +848,33 @@ export function AssetAvatar({
   className?: string;
 }) {
   const upper = symbol.toUpperCase();
-  const palette: Record<string, { bg: string; text: string }> = {
-    ETH: { bg: "bg-[#EEF2FF] border-[#C7D2FE]", text: "text-[#3730A3]" },
-    WETH: { bg: "bg-[#E0E7FF] border-[#A5B4FC]", text: "text-[#1E1B4B]" },
-    CBETH: { bg: "bg-[#DBEAFE] border-[#93C5FD]", text: "text-[#1D4ED8]" },
-    USDC: { bg: "bg-[#EFF6FF] border-[#BFDBFE]", text: "text-[#2563FF]" },
-    USDT: { bg: "bg-[#ECFDF5] border-[#A7F3D0]", text: "text-[#047857]" },
-    SOL: { bg: "bg-[#F3E8FF] border-[#D8B4FE]", text: "text-[#6B21A8]" },
-    MSOL: { bg: "bg-[#FAE8FF] border-[#F0ABFC]", text: "text-[#86198F]" },
-    JUP: { bg: "bg-[#ECFEFF] border-[#A5F3FC]", text: "text-[#0E7490]" },
-    PYTH: { bg: "bg-[#F5F3FF] border-[#DDD6FE]", text: "text-[#5B21B6]" },
-    NEAR: { bg: "bg-[#E6FBF6] border-[#99F6E4]", text: "text-[#0B1F4B]" },
-    WNEAR: { bg: "bg-[#CCFBF1] border-[#5EEAD4]", text: "text-[#115E59]" },
-  };
-  const style = palette[upper] ?? {
-    bg: "bg-slate-100 border-slate-200",
-    text: "text-slate-700",
-  };
+  const token = COINGECKO_ASSET_IMAGES[upper];
+
+  if (token) {
+    return (
+      <span
+        className={`inline-flex items-center justify-center rounded-full overflow-hidden shrink-0 select-none shadow-2xs ${token.bg ?? "bg-transparent"} ${className}`}
+        style={{ width: size, height: size }}
+      >
+        <img
+          src={token.src}
+          alt={token.alt}
+          width={size}
+          height={size}
+          className={`h-full w-full ${token.bg ? "object-contain p-1" : "object-cover"}`}
+          onError={(e) => {
+            if (e.currentTarget.src !== token.coingeckoUrl) {
+              e.currentTarget.src = token.coingeckoUrl;
+            }
+          }}
+        />
+      </span>
+    );
+  }
+
   return (
     <span
-      className={`inline-flex items-center justify-center rounded-full border font-display font-bold select-none shrink-0 ${style.bg} ${style.text} ${className}`}
+      className={`inline-flex items-center justify-center rounded-full border border-neutral-200 dark:border-neutral-700 bg-neutral-100 dark:bg-neutral-800 text-neutral-800 dark:text-neutral-200 font-display font-bold select-none shrink-0 ${className}`}
       style={{
         width: size,
         height: size,

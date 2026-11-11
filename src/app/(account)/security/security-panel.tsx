@@ -2,9 +2,17 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState, type ChangeEvent } from "react";
 import { FlowLogo } from "../../../components/flow-logo.tsx";
-import { ThemeToggle } from "../../../components/theme-toggle.tsx";
+import {
+  SidebarSignOutButton,
+  ThemeToggle,
+} from "../../../components/theme-toggle.tsx";
+import {
+  UserAvatar,
+  setUserAvatar,
+  resetUserAvatar,
+} from "../../../components/user-avatar.tsx";
 import {
   describe,
   Feedback,
@@ -20,6 +28,132 @@ const actions = {
   "unlink-google": { label: "Disconnect Google", path: "google/unlink" },
   "revoke-all": { label: "Sign out all sessions", path: "sessions/revoke-all" },
 } as const;
+
+function WorkspaceDisplayNameCard({
+  account,
+}: {
+  account: { id: string; name: string };
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [name, setName] = useState(account.name);
+  const [savedName, setSavedName] = useState(account.name);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const router = useRouter();
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      await send(`/api/accounts/${account.id}`, { name: name.trim() }, "PATCH");
+      setSavedName(name.trim());
+      setIsEditing(false); // Automatically collapses once saved!
+      setMessage("Workspace display name saved.");
+      router.refresh();
+    } catch (err) {
+      setMessage(describe(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-[16px] border border-neutral-200/90 dark:border-neutral-800 bg-neutral-50/70 dark:bg-neutral-800/40 p-4 space-y-3">
+      {!isEditing ? (
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
+              Workspace display name
+            </span>
+            <p className="font-display text-sm sm:text-base font-bold text-neutral-950 dark:text-white truncate mt-0.5">
+              {savedName}
+            </p>
+            <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+              Shown on payment links and checkout receipts.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setName(savedName);
+              setIsEditing(true);
+            }}
+            title="Edit workspace display name"
+            aria-label="Edit workspace display name"
+            className="flex items-center gap-1.5 rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-3 py-1.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:border-neutral-400 dark:hover:border-neutral-500 shadow-2xs transition-colors shrink-0"
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+            </svg>
+            <span>Edit</span>
+          </button>
+        </div>
+      ) : (
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="flex items-center justify-between">
+            <label
+              htmlFor="ws-name-input"
+              className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200"
+            >
+              Workspace display name
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                setName(savedName);
+                setIsEditing(false);
+              }}
+              className="text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+            >
+              Cancel
+            </button>
+          </div>
+          <input
+            id="ws-name-input"
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            maxLength={80}
+            required
+            placeholder="Workspace name"
+            className="flow-input w-full px-3.5 py-2 text-sm"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="submit"
+              disabled={busy || !name.trim()}
+              className="flow-btn-primary px-4 py-1.5 text-xs font-semibold disabled:opacity-50"
+            >
+              {busy ? "Saving..." : "Save name"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setName(savedName);
+                setIsEditing(false);
+              }}
+              className="rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#141414] px-3 py-1.5 text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+      {message && <Feedback text={message} />}
+    </div>
+  );
+}
 
 export function SecurityPanel({
   email,
@@ -51,7 +185,27 @@ export function SecurityPanel({
   const [message, setMessage] = useState("");
   const [revoking, setRevoking] = useState(false);
   const [workspaceDropdownOpen, setWorkspaceDropdownOpen] = useState(true);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [avatarNotice, setAvatarNotice] = useState("");
   const router = useRouter();
+
+  function handleAvatarChange(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      setAvatarNotice("Photo must be smaller than 5MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        setUserAvatar(reader.result);
+        setAvatarNotice("Profile photo updated globally.");
+        setTimeout(() => setAvatarNotice(""), 3500);
+      }
+    };
+    reader.readAsDataURL(file);
+  }
 
   const personalAccount = accounts.find(
     (a) => a.kind.toLowerCase() === "personal",
@@ -92,7 +246,7 @@ export function SecurityPanel({
          ===================================================================== */}
       <aside
         aria-label="Settings workspace navigation"
-        className="hidden lg:flex lg:w-[250px] lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 lg:min-h-screen lg:sticky lg:top-0"
+        className="hidden lg:flex lg:fixed lg:inset-y-0 lg:left-0 lg:w-[250px] lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 lg:z-30 lg:overflow-y-auto border-r border-neutral-900"
       >
         <div>
           <div className="px-2 pt-1 pb-7">
@@ -184,9 +338,7 @@ export function SecurityPanel({
 
           <div className="flex items-center justify-between border-t border-white/10 pt-4">
             <div className="flex items-center gap-2.5 min-w-0">
-              <img
-                src="/assets/amara-avatar.png"
-                alt="Profile"
+              <UserAvatar
                 className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0"
               />
               <div className="min-w-0">
@@ -196,7 +348,11 @@ export function SecurityPanel({
                 <p className="truncate text-[11px] text-neutral-400">{email}</p>
               </div>
             </div>
-            <span className="text-neutral-400 text-sm px-1">•••</span>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <ThemeToggle variant="sidebar" />
+              <span className="text-neutral-400 text-sm px-1">•••</span>
+              <SidebarSignOutButton />
+            </div>
           </div>
         </div>
       </aside>
@@ -204,7 +360,7 @@ export function SecurityPanel({
       {/* =====================================================================
           MAIN SETTINGS WORKSPACE (Matches 08_26_23 PM-10.png)
          ===================================================================== */}
-      <div className="flex-1 min-w-0 pb-20 relative overflow-hidden">
+      <div className="flex-1 min-w-0 pb-20 relative overflow-hidden lg:pl-[250px]">
         {/* Top-Right Red Wave Accent */}
         <div
           aria-hidden="true"
@@ -254,10 +410,9 @@ export function SecurityPanel({
                   onClick={() => setWorkspaceDropdownOpen((prev) => !prev)}
                   className="inline-flex items-center gap-2.5 rounded-full border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-4 py-2 text-xs font-semibold text-neutral-900 dark:text-white shadow-sm"
                 >
-                  <img
-                    src="/assets/amara-avatar.png"
+                  <UserAvatar
+                    className="h-5 w-5 rounded-full object-cover shrink-0"
                     alt=""
-                    className="h-5 w-5 rounded-full object-cover"
                   />
                   <span>{primaryAccount?.name ?? "Personal account"}</span>
                   <span className="text-neutral-400 text-[10px]">▾</span>
@@ -395,17 +550,43 @@ export function SecurityPanel({
                         Profile Settings
                       </h2>
                       <p className="text-xs text-neutral-500">
-                        Update your personal details and public handle.
+                        Update your personal details, profile picture, and workspace name.
                       </p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3 pt-1">
-                    <img
-                      src="/assets/amara-avatar.png"
-                      alt="Avatar"
-                      className="h-12 w-12 rounded-full object-cover border border-neutral-200"
-                    />
+                  <div className="flex items-center gap-4 pt-1">
+                    <div className="relative group shrink-0">
+                      <UserAvatar
+                        className="h-14 w-14 rounded-full object-cover border-2 border-neutral-200 dark:border-neutral-700 shadow-xs"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        title="Upload new profile picture"
+                        aria-label="Upload new profile picture"
+                        className="absolute inset-0 flex items-center justify-center rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <svg
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                        >
+                          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+                          <circle cx="12" cy="13" r="4" />
+                        </svg>
+                      </button>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/*"
+                        onChange={handleAvatarChange}
+                        className="hidden"
+                      />
+                    </div>
                     <div className="min-w-0">
                       <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                         {displayName}
@@ -413,10 +594,44 @@ export function SecurityPanel({
                       <p className="truncate text-xs text-neutral-500">
                         {email}
                       </p>
+                      <div className="flex items-center gap-2 mt-1.5">
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="text-[11px] font-semibold text-[#FF1A1A] hover:underline"
+                        >
+                          Change photo
+                        </button>
+                        <span className="text-neutral-300 dark:text-neutral-700">·</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            resetUserAvatar();
+                            setAvatarNotice("Profile photo reset to default.");
+                            setTimeout(() => setAvatarNotice(""), 3000);
+                          }}
+                          className="text-[11px] font-semibold text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
+                        >
+                          Reset
+                        </button>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="space-y-2.5 pt-2 text-xs">
+                  {avatarNotice && (
+                    <p className="text-xs font-semibold text-[#0F9F80] bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 rounded-xl px-3 py-1.5">
+                      {avatarNotice}
+                    </p>
+                  )}
+
+                  {/* Collapsible Workspace Display Name Section */}
+                  {primaryAccount && (
+                    <div className="pt-2">
+                      <WorkspaceDisplayNameCard account={primaryAccount} />
+                    </div>
+                  )}
+
+                  <div className="space-y-2.5 pt-1 text-xs">
                     <div className="flex items-center justify-between rounded-[12px] bg-neutral-50 dark:bg-neutral-800/60 px-3.5 py-2.5">
                       <span className="text-neutral-500">Handle</span>
                       <span className="font-mono font-semibold text-neutral-900 dark:text-white">

@@ -1,8 +1,15 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FlowLogo } from "../../../../components/flow-logo.tsx";
+import { QrCode } from "../../../../components/qr-code.tsx";
+import {
+  SidebarSignOutButton,
+  ThemeToggle,
+} from "../../../../components/theme-toggle.tsx";
+import { UserAvatar } from "../../../../components/user-avatar.tsx";
 import {
   AssetAvatar,
   ChainBadge,
@@ -30,10 +37,14 @@ import type {
   SerializedWalletBalanceRecord,
 } from "../../../../server/portfolio.ts";
 import { describe, Feedback, send } from "../../../controls.tsx";
-import { AccountNameForm } from "../forms.tsx";
 
 export type WorkspaceTab =
-  "dashboard" | "assets" | "send" | "receive" | "activity";
+  | "dashboard"
+  | "assets"
+  | "send"
+  | "receive"
+  | "request"
+  | "activity";
 
 export const MAINNET_SUPPORTED_DEPLOYMENTS: readonly [
   CatalogTokenDeployment,
@@ -123,7 +134,12 @@ export function PortfolioView({
   const [sendAmount, setSendAmount] = useState<string>("");
   const [recipientAddress, setRecipientAddress] = useState<string>("");
 
-  // Receive / Create Payment Link state
+  // Dedicated Receive state (Direct wallet-to-wallet transfers)
+  const [receiveNetworkKey, setReceiveNetworkKey] =
+    useState<string>("ethereum-mainnet");
+  const [receiveAssetSymbol, setReceiveAssetSymbol] = useState<string>("USDC");
+
+  // Request Payment state (Shareable payment links & invoices with 1Click settlement)
   const [receiveDeploymentId, setReceiveDeploymentId] = useState<string>(
     "ethereum-mainnet:USDC",
   );
@@ -458,6 +474,86 @@ export function PortfolioView({
     wallet?.addresses.find((a) => a.network.includes("near"))?.address ??
     "Not provisioned";
 
+  const activeReceiveAddress = useMemo(() => {
+    if (
+      receiveNetworkKey === "ethereum-mainnet" ||
+      receiveNetworkKey === "base-mainnet"
+    ) {
+      return evmAddr;
+    }
+    if (receiveNetworkKey === "solana-mainnet") {
+      return solAddr;
+    }
+    if (receiveNetworkKey === "near-mainnet") {
+      return nearAddr;
+    }
+    return evmAddr;
+  }, [receiveNetworkKey, evmAddr, solAddr, nearAddr]);
+
+  const activeReceiveDeployment = useMemo(() => {
+    return (
+      MAINNET_SUPPORTED_DEPLOYMENTS.find(
+        (d) =>
+          d.networkKey === receiveNetworkKey &&
+          d.symbol.toUpperCase() === receiveAssetSymbol.toUpperCase(),
+      ) ??
+      MAINNET_SUPPORTED_DEPLOYMENTS.find(
+        (d) => d.networkKey === receiveNetworkKey,
+      ) ??
+      MAINNET_SUPPORTED_DEPLOYMENTS[0]
+    );
+  }, [receiveNetworkKey, receiveAssetSymbol]);
+
+  const handleSelectReceiveAsset = useCallback(
+    (symbol: string) => {
+      if (!isAssetSupportedOnNetwork(symbol, receiveNetworkKey)) {
+        return;
+      }
+      setReceiveAssetSymbol(symbol);
+    },
+    [receiveNetworkKey],
+  );
+
+  const handleSelectReceiveNetwork = useCallback(
+    (netKey: string) => {
+      setReceiveNetworkKey(netKey);
+      if (!isAssetSupportedOnNetwork(receiveAssetSymbol, netKey)) {
+        if (netKey.includes("sol")) {
+          setReceiveAssetSymbol("SOL");
+        } else if (netKey.includes("near")) {
+          setReceiveAssetSymbol("NEAR");
+        } else if (netKey.includes("base")) {
+          setReceiveAssetSymbol("USDC");
+        } else if (netKey.includes("eth")) {
+          setReceiveAssetSymbol("ETH");
+        } else {
+          const match = MAINNET_SUPPORTED_DEPLOYMENTS.find(
+            (d) => d.networkKey === netKey,
+          );
+          if (match) {
+            setReceiveAssetSymbol(match.symbol);
+          }
+        }
+      }
+    },
+    [receiveAssetSymbol],
+  );
+
+  const handleShareAddress = useCallback(
+    async (title: string, text: string) => {
+      if (typeof navigator !== "undefined" && navigator.share) {
+        try {
+          await navigator.share({ title, text });
+          return;
+        } catch {
+          // Fallback to clipboard
+        }
+      }
+      copyAddress("share-address", text);
+    },
+    [copyAddress],
+  );
+
   const stableBalanceTotal = useMemo(() => {
     return balances
       .filter((b) =>
@@ -594,13 +690,13 @@ export function PortfolioView({
     "Create a payment request to generate a shareable link";
 
   return (
-    <div className="min-h-screen bg-[#FAF8F5] text-neutral-950 flex flex-col lg:flex-row">
+    <div className="min-h-screen bg-[#FAF8F5] dark:bg-[#0B0B0B] text-neutral-950 dark:text-white flex flex-col lg:flex-row">
       {/* =====================================================================
           LEFT DARK SIDEBAR (Desktop — Matches 08_26_13 PM-5.png)
          ===================================================================== */}
       <aside
         aria-label="Account workspace navigation"
-        className="hidden lg:flex lg:w-[250px] lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 lg:min-h-screen lg:sticky lg:top-0"
+        className="hidden lg:flex lg:fixed lg:inset-y-0 lg:left-0 lg:w-[250px] lg:z-30 lg:overflow-y-auto lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 border-r border-neutral-900"
       >
         <div>
           {/* Brand Logo */}
@@ -684,8 +780,12 @@ export function PortfolioView({
 
             <button
               type="button"
-              onClick={() => setActiveTab("receive")}
-              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+              onClick={() => setActiveTab("request")}
+              className={`flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium transition-all ${
+                activeTab === "request"
+                  ? "bg-gradient-to-r from-[#450A0A] via-[#7F1D1D] to-[#991B1B] text-white border border-[#EF4444]/40 shadow-sm"
+                  : "text-neutral-400 hover:bg-white/5 hover:text-white"
+              }`}
             >
               <svg
                 width="16"
@@ -833,11 +933,7 @@ export function PortfolioView({
 
           <div className="flex items-center justify-between border-t border-white/10 pt-4">
             <div className="flex items-center gap-2.5 min-w-0">
-              <img
-                src="/assets/amara-avatar.png"
-                alt={currentAccount.name}
-                className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0"
-              />
+              <UserAvatar size={36} />
               <div className="min-w-0">
                 <p className="truncate text-xs font-semibold text-white">
                   {currentAccount.name}
@@ -849,6 +945,7 @@ export function PortfolioView({
               </div>
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
+              <ThemeToggle variant="sidebar" />
               <Link
                 prefetch={false}
                 href="/security"
@@ -858,34 +955,7 @@ export function PortfolioView({
               >
                 •••
               </Link>
-              <button
-                type="button"
-                onClick={async () => {
-                  try {
-                    await fetch("/api/auth/sign-out", { method: "POST" });
-                  } finally {
-                    window.location.replace("/");
-                  }
-                }}
-                title="Sign out"
-                aria-label="Sign out"
-                className="text-neutral-400 hover:text-rose-400 p-1 transition-colors"
-              >
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                  <polyline points="16 17 21 12 16 7" />
-                  <line x1="21" y1="12" x2="9" y2="12" />
-                </svg>
-              </button>
+              <SidebarSignOutButton />
             </div>
           </div>
         </div>
@@ -894,7 +964,7 @@ export function PortfolioView({
       {/* =====================================================================
           MAIN WORKSPACE AREA
          ===================================================================== */}
-      <div className="flex-1 min-w-0 pb-36 lg:pb-16 relative overflow-hidden">
+      <div className="flex-1 min-w-0 pb-36 lg:pb-16 relative overflow-hidden lg:pl-[250px]">
         {/* Top-Right Decorative Red Wave (Shown on Assets / Activity / Settings) */}
         {(activeTab === "assets" || activeTab === "activity") && (
           <div
@@ -927,7 +997,7 @@ export function PortfolioView({
                 </Link>
               </div>
               <div className="hidden sm:flex items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3 py-1 text-[11px] font-medium text-neutral-700 shadow-2xs">
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#141414] px-3 py-1 text-[11px] font-medium text-neutral-700 dark:text-neutral-300 shadow-2xs">
                   <span
                     className={`h-2 w-2 rounded-full ${
                       effectiveWalletStatus === "active"
@@ -950,7 +1020,7 @@ export function PortfolioView({
                   </button>
                 )}
                 {portfolio.lastSyncedAt && (
-                  <span className="text-[11px] text-neutral-500">
+                  <span className="text-[11px] text-neutral-500 dark:text-neutral-400">
                     Synced {formatTimestamp(portfolio.lastSyncedAt)}
                   </span>
                 )}
@@ -963,7 +1033,7 @@ export function PortfolioView({
                 <button
                   type="button"
                   onClick={() => setWorkspaceDropdownOpen((prev) => !prev)}
-                  className="inline-flex items-center gap-2.5 rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-neutral-900 shadow-2xs hover:border-neutral-300"
+                  className="inline-flex items-center gap-2.5 rounded-full border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#141414] px-3.5 py-1.5 text-xs font-semibold text-neutral-900 dark:text-white shadow-2xs hover:border-neutral-300 dark:hover:border-neutral-700"
                 >
                   <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-neutral-950 text-[10px] font-bold text-white">
                     {currentAccount.name.slice(0, 1).toUpperCase()}
@@ -971,14 +1041,14 @@ export function PortfolioView({
                   <span className="max-w-[130px] truncate">
                     {currentAccount.name}
                   </span>
-                  <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-medium text-neutral-600 uppercase">
+                  <span className="rounded bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 text-[10px] font-medium text-neutral-600 dark:text-neutral-300 uppercase">
                     {isBusiness ? "Business account" : "Personal account"}
                   </span>
                   <span className="text-neutral-400 text-[10px]">▾</span>
                 </button>
 
                 {workspaceDropdownOpen && (
-                  <div className="absolute right-0 mt-2 w-72 rounded-[20px] border border-neutral-200 bg-white p-3 shadow-xl z-50">
+                  <div className="absolute right-0 mt-2 w-72 rounded-[20px] border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#141414] p-3 shadow-xl z-50">
                     <p className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-neutral-400">
                       Switch Workspace
                     </p>
@@ -991,13 +1061,13 @@ export function PortfolioView({
                           onClick={() => setWorkspaceDropdownOpen(false)}
                           className={`flex items-center justify-between rounded-[12px] px-3 py-2 text-xs transition-colors ${
                             acc.id === accountId
-                              ? "bg-neutral-100 font-semibold text-neutral-950"
-                              : "text-neutral-700 hover:bg-neutral-50"
+                              ? "bg-neutral-100 dark:bg-neutral-800 font-semibold text-neutral-950 dark:text-white"
+                              : "text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800/60"
                           }`}
                         >
                           <div>
                             <p className="font-semibold">{acc.name}</p>
-                            <p className="text-[10px] text-neutral-500">
+                            <p className="text-[10px] text-neutral-500 dark:text-neutral-400">
                               Personal · {acc.role.toLowerCase()}
                             </p>
                           </div>
@@ -1014,13 +1084,13 @@ export function PortfolioView({
                           onClick={() => setWorkspaceDropdownOpen(false)}
                           className={`flex items-center justify-between rounded-[12px] px-3 py-2 text-xs transition-colors ${
                             acc.id === accountId
-                              ? "bg-neutral-100 font-semibold text-neutral-950"
-                              : "text-neutral-700 hover:bg-neutral-50"
+                              ? "bg-neutral-100 dark:bg-neutral-800 font-semibold text-neutral-950 dark:text-white"
+                              : "text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800/60"
                           }`}
                         >
                           <div>
                             <p className="font-semibold">{acc.name}</p>
-                            <p className="text-[10px] text-neutral-500">
+                            <p className="text-[10px] text-neutral-500 dark:text-neutral-400">
                               Business · {acc.role.toLowerCase()}
                             </p>
                           </div>
@@ -1030,11 +1100,11 @@ export function PortfolioView({
                         </Link>
                       ))}
                     </div>
-                    <div className="mt-2 border-t border-neutral-100 pt-2">
+                    <div className="mt-2 border-t border-neutral-100 dark:border-neutral-800 pt-2">
                       <Link
                         prefetch={false}
                         href="/accounts"
-                        className="flex w-full items-center justify-between rounded-[10px] px-3 py-2 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                        className="flex w-full items-center justify-between rounded-[10px] px-3 py-2 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800/60"
                       >
                         <span>+ Create or manage workspaces</span>
                         <span>→</span>
@@ -1048,7 +1118,7 @@ export function PortfolioView({
                 type="button"
                 onClick={handleRefresh}
                 disabled={refreshing || cooldown > 0}
-                className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-neutral-800 shadow-2xs hover:bg-neutral-50 disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#141414] px-3.5 py-1.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 shadow-2xs hover:bg-neutral-50 dark:hover:bg-neutral-800/60 disabled:opacity-50"
               >
                 <IconRefresh
                   size={13}
@@ -1067,25 +1137,21 @@ export function PortfolioView({
                 <Link
                   prefetch={false}
                   href={`/accounts/${currentAccount.id}/team`}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-neutral-950 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-neutral-800"
+                  className="inline-flex items-center gap-1.5 rounded-full bg-neutral-950 dark:bg-white px-3.5 py-1.5 text-xs font-semibold text-white dark:text-neutral-950 hover:bg-neutral-800 dark:hover:bg-neutral-200"
                 >
                   Manage team
                 </Link>
               )}
 
               <Link prefetch={false} href="/security" className="shrink-0">
-                <img
-                  src="/assets/amara-avatar.png"
-                  alt="Profile"
-                  className="h-9 w-9 rounded-full object-cover border border-neutral-200"
-                />
+                <UserAvatar size={36} />
               </Link>
             </div>
           </div>
 
           {/* Mobile Status Badge (For Playwright & Mobile Visibility) */}
           <div className="sm:hidden mb-4 flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3 py-1 text-[11px] font-medium text-neutral-700">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#141414] px-3 py-1 text-[11px] font-medium text-neutral-700 dark:text-neutral-300">
               <span
                 className={`h-2 w-2 rounded-full ${
                   effectiveWalletStatus === "active"
@@ -1126,13 +1192,13 @@ export function PortfolioView({
                   <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
                     {isBusiness ? "BUSINESS WORKSPACE" : "YOUR FLOW"}
                   </p>
-                  <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950 leading-[1.08]">
+                  <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950 dark:text-white leading-[1.08]">
                     Welcome back.
                   </h1>
-                  <p className="mt-1.5 text-sm text-neutral-600">
+                  <p className="mt-1.5 text-sm text-neutral-600 dark:text-neutral-400">
                     Move money, get paid, and manage your assets — all in one
                     place.{" "}
-                    <span className="font-semibold text-neutral-900">
+                    <span className="font-semibold text-neutral-900 dark:text-neutral-200">
                       ({currentAccount.name} ·{" "}
                       {currentAccount.role.toLowerCase()})
                     </span>
@@ -1143,46 +1209,46 @@ export function PortfolioView({
               {/* Business Metrics Strip (Shown when workspace is a Business Account — Matches Storyboard #19) */}
               {isBusiness && (
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-                  <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs">
-                    <p className="text-[11px] font-medium text-neutral-500">
+                  <div className="rounded-[20px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-4 shadow-2xs">
+                    <p className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400">
                       Total received
                     </p>
-                    <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
+                    <p className="mt-1 font-display text-2xl font-bold text-neutral-950 dark:text-white">
                       {settledTotalUsd}
                     </p>
                     <p className="mt-1 text-[11px] font-semibold text-emerald-600">
                       {settledRequests.length} settled requests
                     </p>
                   </div>
-                  <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs">
-                    <p className="text-[11px] font-medium text-neutral-500">
+                  <div className="rounded-[20px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-4 shadow-2xs">
+                    <p className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400">
                       On-chain transfers
                     </p>
-                    <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
+                    <p className="mt-1 font-display text-2xl font-bold text-neutral-950 dark:text-white">
                       {activities.length}
                     </p>
-                    <p className="mt-1 text-[11px] text-neutral-500">
+                    <p className="mt-1 text-[11px] text-neutral-500 dark:text-neutral-400">
                       Across Base, Solana &amp; NEAR
                     </p>
                   </div>
-                  <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs">
-                    <p className="text-[11px] font-medium text-neutral-500">
+                  <div className="rounded-[20px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-4 shadow-2xs">
+                    <p className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400">
                       Payment links
                     </p>
-                    <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
+                    <p className="mt-1 font-display text-2xl font-bold text-neutral-950 dark:text-white">
                       {paymentRequests.length}
                     </p>
-                    <p className="mt-1 text-[11px] text-neutral-500">
+                    <p className="mt-1 text-[11px] text-neutral-500 dark:text-neutral-400">
                       {settledRequests.length} settled · {openRequests.length}{" "}
                       open
                     </p>
                   </div>
-                  <div className="rounded-[20px] border border-neutral-200/80 bg-white p-4 shadow-2xs flex flex-col justify-between">
+                  <div className="rounded-[20px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-4 shadow-2xs flex flex-col justify-between">
                     <div>
-                      <p className="text-[11px] font-medium text-neutral-500">
+                      <p className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400">
                         Workspace role
                       </p>
-                      <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
+                      <p className="mt-1 font-display text-2xl font-bold text-neutral-950 dark:text-white">
                         {currentAccount.role}
                       </p>
                     </div>
@@ -1252,7 +1318,7 @@ export function PortfolioView({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setActiveTab("receive")}
+                      onClick={() => setActiveTab("request")}
                       className="flex items-center justify-center gap-1.5 rounded-full border border-white/15 bg-white/10 py-2.5 text-xs font-semibold text-white"
                     >
                       <span>🔗</span> Request
@@ -1317,7 +1383,7 @@ export function PortfolioView({
                   <button
                     type="button"
                     onClick={() => setActiveTab("send")}
-                    className="group rounded-[24px] border border-neutral-200/80 bg-white p-5 text-left shadow-2xs hover:border-neutral-300 transition-all flex flex-col justify-between"
+                    className="group rounded-[24px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 text-left shadow-2xs hover:border-neutral-300 dark:hover:border-neutral-700 transition-all flex flex-col justify-between"
                   >
                     <div className="flex items-center justify-between">
                       <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-[#FF1A1A] text-white font-bold text-lg shadow-xs">
@@ -1328,10 +1394,10 @@ export function PortfolioView({
                       </span>
                     </div>
                     <div className="mt-6">
-                      <p className="font-display text-base font-bold text-neutral-950">
+                      <p className="font-display text-base font-bold text-neutral-950 dark:text-white">
                         Send
                       </p>
-                      <p className="mt-1 text-xs text-neutral-500 leading-relaxed">
+                      <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
                         Pay anyone across supported networks.
                       </p>
                     </div>
@@ -1340,10 +1406,10 @@ export function PortfolioView({
                   <button
                     type="button"
                     onClick={() => setActiveTab("receive")}
-                    className="group rounded-[24px] border border-neutral-200/80 bg-white p-5 text-left shadow-2xs hover:border-neutral-300 transition-all flex flex-col justify-between"
+                    className="group rounded-[24px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 text-left shadow-2xs hover:border-neutral-300 dark:hover:border-neutral-700 transition-all flex flex-col justify-between"
                   >
                     <div className="flex items-center justify-between">
-                      <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-neutral-950 text-white font-bold text-lg">
+                      <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-neutral-950 dark:bg-neutral-800 text-white font-bold text-lg">
                         ↙
                       </span>
                       <span className="text-neutral-400 group-hover:translate-x-0.5 transition-transform">
@@ -1351,10 +1417,10 @@ export function PortfolioView({
                       </span>
                     </div>
                     <div className="mt-6">
-                      <p className="font-display text-base font-bold text-neutral-950">
+                      <p className="font-display text-base font-bold text-neutral-950 dark:text-white">
                         Receive
                       </p>
-                      <p className="mt-1 text-xs text-neutral-500 leading-relaxed">
+                      <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
                         Share your address or QR code.
                       </p>
                     </div>
@@ -1362,11 +1428,11 @@ export function PortfolioView({
 
                   <button
                     type="button"
-                    onClick={() => setActiveTab("receive")}
-                    className="group rounded-[24px] border border-neutral-200/80 bg-white p-5 text-left shadow-2xs hover:border-neutral-300 transition-all flex flex-col justify-between"
+                    onClick={() => setActiveTab("request")}
+                    className="group rounded-[24px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 text-left shadow-2xs hover:border-neutral-300 dark:hover:border-neutral-700 transition-all flex flex-col justify-between"
                   >
                     <div className="flex items-center justify-between">
-                      <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-neutral-950 text-white font-bold text-base">
+                      <span className="inline-flex h-11 w-11 items-center justify-center rounded-[14px] bg-neutral-950 dark:bg-neutral-800 text-white font-bold text-base">
                         🔗
                       </span>
                       <span className="text-neutral-400 group-hover:translate-x-0.5 transition-transform">
@@ -1374,10 +1440,10 @@ export function PortfolioView({
                       </span>
                     </div>
                     <div className="mt-6">
-                      <p className="font-display text-base font-bold text-neutral-950">
+                      <p className="font-display text-base font-bold text-neutral-950 dark:text-white">
                         Request
                       </p>
-                      <p className="mt-1 text-xs text-neutral-500 leading-relaxed">
+                      <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400 leading-relaxed">
                         Create a payment link in seconds.
                       </p>
                     </div>
@@ -1389,12 +1455,12 @@ export function PortfolioView({
               <div>
                 <div className="flex items-center justify-between mb-3.5">
                   <div className="flex items-baseline gap-3">
-                    <h2 className="font-serif text-2xl text-neutral-950">
+                    <h2 className="font-serif text-2xl text-neutral-950 dark:text-white">
                       Your assets
                     </h2>
-                    <span className="text-xs font-medium text-neutral-500">
+                    <span className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
                       Observed USDC{" "}
-                      <strong className="text-neutral-900">
+                      <strong className="text-neutral-900 dark:text-neutral-200">
                         {totalStableFormatted}
                       </strong>
                     </span>
@@ -1402,7 +1468,7 @@ export function PortfolioView({
                   <button
                     type="button"
                     onClick={() => setActiveTab("assets")}
-                    className="text-xs font-semibold text-neutral-700 hover:text-neutral-950"
+                    className="text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white"
                   >
                     Manage wallets →
                   </button>
@@ -1410,16 +1476,16 @@ export function PortfolioView({
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                   {/* Ethereum Card */}
-                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
+                  <div className="rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <ChainBadge chainKey="ethereum-mainnet" size={28} />
                         <div>
                           <div className="flex items-center gap-1.5">
-                            <span className="font-display text-sm font-bold text-neutral-950">
+                            <span className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                               Ethereum
                             </span>
-                            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600">
+                            <span className="rounded bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600 dark:text-neutral-300">
                               USDC
                             </span>
                           </div>
@@ -1432,7 +1498,7 @@ export function PortfolioView({
                         type="button"
                         disabled={!wallet}
                         onClick={() => copyAddress("dash-eth", ethAddr)}
-                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-40"
+                        className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white disabled:opacity-40"
                       >
                         {copiedKey === "dash-eth" ? "Copied" : "Copy"}
                       </button>
@@ -1440,11 +1506,11 @@ export function PortfolioView({
 
                     <div className="mt-4 flex items-end justify-between">
                       <div>
-                        <p className="font-display text-2xl font-bold text-neutral-950">
+                        <p className="font-display text-2xl font-bold text-neutral-950 dark:text-white">
                           {ethUsdcBalance} USDC
                         </p>
                         <div className="mt-1 flex items-center gap-2 text-[11px]">
-                          <span className="text-neutral-500">
+                          <span className="text-neutral-500 dark:text-neutral-400">
                             {wallet ? "Read-only RPC" : "Pending setup"}
                           </span>
                           <span className="font-semibold text-indigo-600">
@@ -1469,16 +1535,16 @@ export function PortfolioView({
                   </div>
 
                   {/* Base Card */}
-                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
+                  <div className="rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <ChainBadge chainKey="base-mainnet" size={28} />
                         <div>
                           <div className="flex items-center gap-1.5">
-                            <span className="font-display text-sm font-bold text-neutral-950">
+                            <span className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                               Base
                             </span>
-                            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600">
+                            <span className="rounded bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600 dark:text-neutral-300">
                               USDC
                             </span>
                           </div>
@@ -1491,7 +1557,7 @@ export function PortfolioView({
                         type="button"
                         disabled={!wallet}
                         onClick={() => copyAddress("dash-base", baseAddr)}
-                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-40"
+                        className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white disabled:opacity-40"
                       >
                         {copiedKey === "dash-base" ? "Copied" : "Copy"}
                       </button>
@@ -1499,11 +1565,11 @@ export function PortfolioView({
 
                     <div className="mt-4 flex items-end justify-between">
                       <div>
-                        <p className="font-display text-2xl font-bold text-neutral-950">
+                        <p className="font-display text-2xl font-bold text-neutral-950 dark:text-white">
                           {baseUsdcBalance} USDC
                         </p>
                         <div className="mt-1 flex items-center gap-2 text-[11px]">
-                          <span className="text-neutral-500">
+                          <span className="text-neutral-500 dark:text-neutral-400">
                             {wallet ? "Read-only RPC" : "Pending setup"}
                           </span>
                           <span className="font-semibold text-emerald-600">
@@ -1528,16 +1594,16 @@ export function PortfolioView({
                   </div>
 
                   {/* Solana Card */}
-                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
+                  <div className="rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <ChainBadge chainKey="solana-mainnet" size={28} />
                         <div>
                           <div className="flex items-center gap-1.5">
-                            <span className="font-display text-sm font-bold text-neutral-950">
+                            <span className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                               Solana
                             </span>
-                            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600">
+                            <span className="rounded bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600 dark:text-neutral-300">
                               SOL
                             </span>
                           </div>
@@ -1550,7 +1616,7 @@ export function PortfolioView({
                         type="button"
                         disabled={!wallet}
                         onClick={() => copyAddress("dash-sol", solAddr)}
-                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-40"
+                        className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white disabled:opacity-40"
                       >
                         {copiedKey === "dash-sol" ? "Copied" : "Copy"}
                       </button>
@@ -1558,11 +1624,11 @@ export function PortfolioView({
 
                     <div className="mt-4 flex items-end justify-between">
                       <div>
-                        <p className="font-display text-2xl font-bold text-neutral-950">
+                        <p className="font-display text-2xl font-bold text-neutral-950 dark:text-white">
                           {solNativeBalance} SOL
                         </p>
                         <div className="mt-1 flex items-center gap-2 text-[11px]">
-                          <span className="text-neutral-500">
+                          <span className="text-neutral-500 dark:text-neutral-400">
                             {wallet ? "Read-only RPC" : "Pending setup"}
                           </span>
                           <span className="font-semibold text-emerald-600">
@@ -1587,16 +1653,16 @@ export function PortfolioView({
                   </div>
 
                   {/* NEAR Card */}
-                  <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
+                  <div className="rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <ChainBadge chainKey="near-mainnet" size={28} />
                         <div>
                           <div className="flex items-center gap-1.5">
-                            <span className="font-display text-sm font-bold text-neutral-950">
+                            <span className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                               NEAR
                             </span>
-                            <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600">
+                            <span className="rounded bg-neutral-100 dark:bg-neutral-800 px-1.5 py-0.5 text-[10px] font-semibold text-neutral-600 dark:text-neutral-300">
                               NEAR
                             </span>
                           </div>
@@ -1609,7 +1675,7 @@ export function PortfolioView({
                         type="button"
                         disabled={!wallet}
                         onClick={() => copyAddress("dash-near", nearAddr)}
-                        className="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 disabled:opacity-40"
+                        className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-white disabled:opacity-40"
                       >
                         {copiedKey === "dash-near" ? "Copied" : "Copy"}
                       </button>
@@ -1617,11 +1683,11 @@ export function PortfolioView({
 
                     <div className="mt-4 flex items-end justify-between">
                       <div>
-                        <p className="font-display text-2xl font-bold text-neutral-950">
+                        <p className="font-display text-2xl font-bold text-neutral-950 dark:text-white">
                           {nearNativeBalance} NEAR
                         </p>
                         <div className="mt-1 flex items-center gap-2 text-[11px]">
-                          <span className="text-neutral-500">
+                          <span className="text-neutral-500 dark:text-neutral-400">
                             {wallet ? "Read-only RPC" : "Pending setup"}
                           </span>
                           <span className="font-semibold text-emerald-600">
@@ -1650,32 +1716,32 @@ export function PortfolioView({
               {/* Bottom Row: Left "Recent activity" + Right "GET PAID EASILY" QR Standee Card */}
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
                 {/* Recent Activity Card */}
-                <div className="lg:col-span-7 rounded-[24px] border border-neutral-200/80 bg-white p-6 shadow-2xs">
+                <div className="lg:col-span-7 rounded-[24px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 shadow-2xs">
                   <div className="flex items-center justify-between mb-4">
-                    <h2 className="font-serif text-xl text-neutral-950">
+                    <h2 className="font-serif text-xl text-neutral-950 dark:text-white">
                       Recent activity
                     </h2>
                     <button
                       type="button"
                       onClick={() => setActiveTab("activity")}
-                      className="text-xs font-semibold text-neutral-600 hover:text-neutral-950"
+                      className="text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white"
                     >
                       View all →
                     </button>
                   </div>
 
                   {activities.length === 0 && paymentRequests.length === 0 ? (
-                    <div className="rounded-[18px] border border-dashed border-neutral-200 bg-neutral-50/70 p-6 text-center">
-                      <p className="text-sm font-semibold text-neutral-800">
+                    <div className="rounded-[18px] border border-dashed border-neutral-200 dark:border-neutral-800 bg-neutral-50/70 dark:bg-[#1a1a1a] p-6 text-center">
+                      <p className="text-sm font-semibold text-neutral-800 dark:text-neutral-200">
                         No transactions or payment requests recorded yet.
                       </p>
-                      <p className="mt-1 text-xs text-neutral-500">
+                      <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
                         Create a payment link or sync on-chain activity to see
                         verified transfers here.
                       </p>
                     </div>
                   ) : (
-                    <div className="divide-y divide-neutral-100">
+                    <div className="divide-y divide-neutral-100 dark:divide-neutral-800">
                       {activities.slice(0, 3).map((act) => (
                         <div
                           key={act.id}
@@ -1685,19 +1751,19 @@ export function PortfolioView({
                             <span
                               className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
                                 act.direction === "INCOMING"
-                                  ? "bg-emerald-50 text-emerald-600"
-                                  : "bg-red-50 text-[#FF1A1A]"
+                                  ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 dark:text-emerald-400"
+                                  : "bg-red-50 dark:bg-red-950/40 text-[#FF1A1A]"
                               }`}
                             >
                               {act.direction === "INCOMING" ? "↙" : "↗"}
                             </span>
                             <div className="min-w-0">
-                              <p className="truncate text-sm font-semibold text-neutral-950">
+                              <p className="truncate text-sm font-semibold text-neutral-950 dark:text-white">
                                 {act.direction === "INCOMING"
                                   ? "Inbound Transfer"
                                   : "Outbound Transfer"}
                               </p>
-                              <p className="text-xs text-neutral-500">
+                              <p className="text-xs text-neutral-500 dark:text-neutral-400">
                                 {act.assetSymbol} · {act.network} ·{" "}
                                 {act.finality}
                               </p>
@@ -1707,14 +1773,14 @@ export function PortfolioView({
                             <p
                               className={`font-display text-sm font-bold ${
                                 act.direction === "INCOMING"
-                                  ? "text-emerald-600"
-                                  : "text-neutral-950"
+                                  ? "text-emerald-600 dark:text-emerald-400"
+                                  : "text-neutral-950 dark:text-white"
                               }`}
                             >
                               {act.direction === "INCOMING" ? "+" : "-"}
                               {act.displayAmount} {act.assetSymbol}
                             </p>
-                            <p className="text-[11px] font-mono text-neutral-400">
+                            <p className="text-[11px] font-mono text-neutral-400 dark:text-neutral-500">
                               {truncateMiddle(act.txHash, 6, 4)}
                             </p>
                           </div>
@@ -1726,21 +1792,21 @@ export function PortfolioView({
                           className="flex items-center justify-between py-3.5 first:pt-1 last:pb-1"
                         >
                           <div className="flex items-center gap-3 min-w-0">
-                            <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-xs font-bold text-neutral-800">
+                            <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-neutral-100 dark:bg-neutral-800 text-xs font-bold text-neutral-800 dark:text-neutral-200">
                               🔗
                             </span>
                             <div className="min-w-0">
-                              <p className="truncate text-sm font-semibold text-neutral-950">
+                              <p className="truncate text-sm font-semibold text-neutral-950 dark:text-white">
                                 {req.title}
                               </p>
-                              <p className="text-xs text-neutral-500">
+                              <p className="text-xs text-neutral-500 dark:text-neutral-400">
                                 {req.destinationAssetSymbol} ·{" "}
                                 {req.destinationNetwork} · {req.status}
                               </p>
                             </div>
                           </div>
                           <div className="text-right shrink-0 pl-3">
-                            <p className="font-display text-sm font-bold text-neutral-950">
+                            <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                               {req.amountMode === "FIXED"
                                 ? `${req.displayAmount} ${req.destinationAssetSymbol}`
                                 : "Open amount"}
@@ -1760,24 +1826,24 @@ export function PortfolioView({
                 </div>
 
                 {/* Right Card: "GET PAID EASILY / Turn any payment into a simple link or QR." */}
-                <div className="lg:col-span-5 rounded-[24px] border border-neutral-200/80 bg-white p-6 shadow-2xs flex flex-col justify-between">
+                <div className="lg:col-span-5 rounded-[24px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 shadow-2xs flex flex-col justify-between">
                   <div className="grid grid-cols-1 sm:grid-cols-12 gap-4 items-center my-auto">
                     <div className="sm:col-span-7 space-y-2.5">
                       <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
                         GET PAID EASILY
                       </span>
-                      <h3 className="font-serif text-2xl leading-snug text-neutral-950">
+                      <h3 className="font-serif text-2xl leading-snug text-neutral-950 dark:text-white">
                         Turn any payment into a simple link or QR.
                       </h3>
-                      <p className="text-xs text-neutral-600 leading-relaxed">
+                      <p className="text-xs text-neutral-600 dark:text-neutral-400 leading-relaxed">
                         Choose what you want to receive and share a single link
                         — no network headaches for the person paying you.
                       </p>
                       <div className="pt-2">
                         <button
                           type="button"
-                          onClick={() => setActiveTab("receive")}
-                          className="inline-flex items-center gap-2 rounded-full bg-neutral-950 px-5 py-2.5 text-xs font-semibold text-white hover:bg-neutral-800"
+                          onClick={() => setActiveTab("request")}
+                          className="inline-flex items-center gap-2 rounded-full bg-neutral-950 dark:bg-white px-5 py-2.5 text-xs font-semibold text-white dark:text-neutral-950 hover:bg-neutral-800 dark:hover:bg-neutral-200"
                         >
                           Create payment link <span>→</span>
                         </button>
@@ -1790,29 +1856,6 @@ export function PortfolioView({
                         className="h-40 w-auto rounded-[16px] object-cover shadow-md"
                       />
                     </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Workspace Rename Section (Preserves functional workspace rename) */}
-              <div className="rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs">
-                <div className="flex flex-wrap items-center justify-between gap-4">
-                  <div>
-                    <h3 className="font-display text-sm font-bold text-neutral-950">
-                      Workspace display name
-                    </h3>
-                    <p className="text-xs text-neutral-500">
-                      Update the name shown on your payment links and checkout
-                      receipts.
-                    </p>
-                  </div>
-                  <div className="w-full sm:w-auto min-w-[280px]">
-                    <AccountNameForm
-                      account={{
-                        id: currentAccount.id,
-                        name: currentAccount.name,
-                      }}
-                    />
                   </div>
                 </div>
               </div>
@@ -1830,20 +1873,20 @@ export function PortfolioView({
                   <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
                     WALLETS &amp; ASSETS
                   </p>
-                  <h1 className="mt-1 font-serif text-3xl sm:text-[40px] font-normal tracking-[-0.02em] text-neutral-950">
+                  <h1 className="mt-1 font-serif text-3xl sm:text-[40px] font-normal tracking-[-0.02em] text-neutral-950 dark:text-white">
                     Wallets &amp; Supported Assets
                   </h1>
-                  <p className="mt-1 text-sm text-neutral-600">
+                  <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
                     Manage your connected wallets and view supported tokens
                     across networks.
                   </p>
                 </div>
 
-                <div className="inline-flex rounded-full border border-neutral-200 bg-white p-1 shadow-2xs">
-                  <span className="rounded-full bg-neutral-950 px-4 py-1.5 text-xs font-semibold text-white">
+                <div className="inline-flex rounded-full border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#141414] p-1 shadow-2xs">
+                  <span className="rounded-full bg-neutral-950 dark:bg-white px-4 py-1.5 text-xs font-semibold text-white dark:text-neutral-950">
                     Wallets
                   </span>
-                  <span className="px-4 py-1.5 text-xs font-semibold text-neutral-600">
+                  <span className="px-4 py-1.5 text-xs font-semibold text-neutral-600 dark:text-neutral-400">
                     Supported Assets
                   </span>
                 </div>
@@ -1852,39 +1895,39 @@ export function PortfolioView({
               {/* 4 Ecosystem Wallet Cards (Ethereum, Base, Solana, NEAR) */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 {/* Ethereum Wallet */}
-                <div className="rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
+                <div className="rounded-[22px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <ChainBadge chainKey="ethereum-mainnet" size={28} />
                         <div>
-                          <p className="font-display text-sm font-bold text-neutral-950">
+                          <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                             Ethereum Mainnet
                           </p>
-                          <p className="text-[11px] text-neutral-500">
+                          <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
                             Ethereum L1
                           </p>
                         </div>
                       </div>
-                      <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700">
+                      <span className="rounded-md bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700 dark:text-neutral-300">
                         EVM
                       </span>
                     </div>
 
-                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
+                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950 dark:text-white">
                       {ethUsdcBalance} USDC
                     </p>
-                    <p className="mt-1 font-mono text-xs text-neutral-500">
+                    <p className="mt-1 font-mono text-xs text-neutral-500 dark:text-neutral-400">
                       {truncateMiddle(ethAddr, 8, 6)}
                     </p>
                   </div>
 
-                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
+                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 dark:border-neutral-800 pt-3">
                     <button
                       type="button"
                       disabled={!wallet}
                       onClick={() => copyAddress("wallet-eth", ethAddr)}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950 disabled:opacity-40"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white disabled:opacity-40"
                     >
                       {copiedKey === "wallet-eth" ? (
                         <>
@@ -1907,39 +1950,39 @@ export function PortfolioView({
                 </div>
 
                 {/* Base Wallet */}
-                <div className="rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
+                <div className="rounded-[22px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <ChainBadge chainKey="base-mainnet" size={28} />
                         <div>
-                          <p className="font-display text-sm font-bold text-neutral-950">
+                          <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                             Base Mainnet
                           </p>
-                          <p className="text-[11px] text-neutral-500">
+                          <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
                             Base L2
                           </p>
                         </div>
                       </div>
-                      <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700">
+                      <span className="rounded-md bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700 dark:text-neutral-300">
                         EVM
                       </span>
                     </div>
 
-                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
+                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950 dark:text-white">
                       {baseUsdcBalance} USDC
                     </p>
-                    <p className="mt-1 font-mono text-xs text-neutral-500">
+                    <p className="mt-1 font-mono text-xs text-neutral-500 dark:text-neutral-400">
                       {truncateMiddle(baseAddr, 8, 6)}
                     </p>
                   </div>
 
-                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
+                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 dark:border-neutral-800 pt-3">
                     <button
                       type="button"
                       disabled={!wallet}
                       onClick={() => copyAddress("wallet-base", baseAddr)}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950 disabled:opacity-40"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white disabled:opacity-40"
                     >
                       {copiedKey === "wallet-base" ? (
                         <>
@@ -1962,39 +2005,39 @@ export function PortfolioView({
                 </div>
 
                 {/* Solana Wallet */}
-                <div className="rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
+                <div className="rounded-[22px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <ChainBadge chainKey="solana-mainnet" size={28} />
                         <div>
-                          <p className="font-display text-sm font-bold text-neutral-950">
+                          <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                             Solana
                           </p>
-                          <p className="text-[11px] text-neutral-500">
+                          <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
                             {ECOSYSTEM_METADATA[1]?.label ?? "Solana"}
                           </p>
                         </div>
                       </div>
-                      <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700">
+                      <span className="rounded-md bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700 dark:text-neutral-300">
                         SOL
                       </span>
                     </div>
 
-                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
+                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950 dark:text-white">
                       {solNativeBalance} SOL
                     </p>
-                    <p className="mt-1 font-mono text-xs text-neutral-500">
+                    <p className="mt-1 font-mono text-xs text-neutral-500 dark:text-neutral-400">
                       {truncateMiddle(solAddr, 8, 6)}
                     </p>
                   </div>
 
-                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
+                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 dark:border-neutral-800 pt-3">
                     <button
                       type="button"
                       disabled={!wallet}
                       onClick={() => copyAddress("wallet-sol", solAddr)}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950 disabled:opacity-40"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white disabled:opacity-40"
                     >
                       {copiedKey === "wallet-sol" ? (
                         <>
@@ -2017,39 +2060,39 @@ export function PortfolioView({
                 </div>
 
                 {/* NEAR Wallet */}
-                <div className="rounded-[22px] border border-neutral-200/90 bg-white p-5 shadow-2xs flex flex-col justify-between">
+                <div className="rounded-[22px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2.5">
                         <ChainBadge chainKey="near-mainnet" size={28} />
                         <div>
-                          <p className="font-display text-sm font-bold text-neutral-950">
+                          <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                             NEAR
                           </p>
-                          <p className="text-[11px] text-neutral-500">
+                          <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
                             {ECOSYSTEM_METADATA[2]?.label ?? "NEAR Protocol"}
                           </p>
                         </div>
                       </div>
-                      <span className="rounded-md bg-neutral-100 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700">
+                      <span className="rounded-md bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 text-[10px] font-bold uppercase text-neutral-700 dark:text-neutral-300">
                         NEAR
                       </span>
                     </div>
 
-                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950">
+                    <p className="mt-4 font-display text-2xl font-bold text-neutral-950 dark:text-white">
                       {nearNativeBalance} NEAR
                     </p>
-                    <p className="mt-1 font-mono text-xs text-neutral-500">
+                    <p className="mt-1 font-mono text-xs text-neutral-500 dark:text-neutral-400">
                       {truncateMiddle(nearAddr, 8, 6)}
                     </p>
                   </div>
 
-                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 pt-3">
+                  <div className="mt-4 flex items-center justify-between border-t border-neutral-100 dark:border-neutral-800 pt-3">
                     <button
                       type="button"
                       disabled={!wallet}
                       onClick={() => copyAddress("wallet-near", nearAddr)}
-                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 hover:text-neutral-950 disabled:opacity-40"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white disabled:opacity-40"
                     >
                       {copiedKey === "wallet-near" ? (
                         <>
@@ -2073,15 +2116,15 @@ export function PortfolioView({
               </div>
 
               {/* Filter Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-neutral-200/80 bg-white p-3 shadow-2xs">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-3 shadow-2xs">
                 <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
                     onClick={() => setEcosystemFilter("all")}
                     className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
                       ecosystemFilter === "all"
-                        ? "bg-neutral-950 text-white"
-                        : "text-neutral-600 hover:bg-neutral-100"
+                        ? "bg-neutral-950 dark:bg-white text-white dark:text-neutral-950"
+                        : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
                     }`}
                   >
                     All Networks
@@ -2091,8 +2134,8 @@ export function PortfolioView({
                     onClick={() => setEcosystemFilter("evm")}
                     className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
                       ecosystemFilter === "evm"
-                        ? "bg-neutral-950 text-white"
-                        : "text-neutral-600 hover:bg-neutral-100"
+                        ? "bg-neutral-950 dark:bg-white text-white dark:text-neutral-950"
+                        : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
                     }`}
                   >
                     Ethereum &amp; EVM
@@ -2102,8 +2145,8 @@ export function PortfolioView({
                     onClick={() => setEcosystemFilter("solana")}
                     className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
                       ecosystemFilter === "solana"
-                        ? "bg-neutral-950 text-white"
-                        : "text-neutral-600 hover:bg-neutral-100"
+                        ? "bg-neutral-950 dark:bg-white text-white dark:text-neutral-950"
+                        : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
                     }`}
                   >
                     Solana
@@ -2113,8 +2156,8 @@ export function PortfolioView({
                     onClick={() => setEcosystemFilter("near")}
                     className={`rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
                       ecosystemFilter === "near"
-                        ? "bg-neutral-950 text-white"
-                        : "text-neutral-600 hover:bg-neutral-100"
+                        ? "bg-neutral-950 dark:bg-white text-white dark:text-neutral-950"
+                        : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-100 dark:hover:bg-neutral-800"
                     }`}
                   >
                     NEAR
@@ -2131,18 +2174,18 @@ export function PortfolioView({
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search assets, symbols, or contracts..."
-                    className="w-full rounded-full border border-neutral-200 bg-neutral-50 pl-9 pr-4 py-1.5 text-xs text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-900 focus:bg-white focus:outline-none"
+                    className="w-full rounded-full border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-[#1f1f1f] pl-9 pr-4 py-1.5 text-xs text-neutral-900 dark:text-white placeholder:text-neutral-400 dark:placeholder:text-neutral-500 focus:border-neutral-900 dark:focus:border-neutral-400 focus:bg-white dark:focus:bg-[#141414] focus:outline-none"
                   />
                 </div>
               </div>
 
               {/* Supported Assets Table + Selected Token Metadata Drawer */}
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-                <div className="lg:col-span-8 overflow-hidden rounded-[22px] border border-neutral-200/80 bg-white shadow-2xs">
+                <div className="lg:col-span-8 overflow-hidden rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] shadow-2xs">
                   <div className="overflow-x-auto">
                     <table className="w-full text-left border-collapse">
                       <thead>
-                        <tr className="border-b border-neutral-100 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                        <tr className="border-b border-neutral-100 dark:border-neutral-800 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
                           <th className="py-3.5 pl-5 pr-3">Asset</th>
                           <th className="py-3.5 px-3">Network</th>
                           <th className="py-3.5 px-3">Wallet</th>
@@ -2152,7 +2195,7 @@ export function PortfolioView({
                           </th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-neutral-100 text-xs">
+                      <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800 text-xs">
                         {filteredCatalogRows.map(
                           ({ catalog, observedBalance }) => {
                             const isSelected =
@@ -2172,8 +2215,8 @@ export function PortfolioView({
                                 onClick={() => setSelectedAssetId(catalog.id)}
                                 className={`cursor-pointer transition-colors ${
                                   isSelected
-                                    ? "bg-red-50/50"
-                                    : "hover:bg-neutral-50/80"
+                                    ? "bg-red-50/50 dark:bg-red-950/20"
+                                    : "hover:bg-neutral-50/80 dark:hover:bg-[#1a1a1a]"
                                 }`}
                               >
                                 <td className="py-3.5 pl-5 pr-3">
@@ -2183,17 +2226,17 @@ export function PortfolioView({
                                       size={28}
                                     />
                                     <div>
-                                      <p className="font-display font-bold text-neutral-950">
+                                      <p className="font-display font-bold text-neutral-950 dark:text-white">
                                         {catalog.name}
                                       </p>
-                                      <p className="text-[11px] text-neutral-500">
+                                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
                                         {catalog.symbol}
                                       </p>
                                     </div>
                                   </div>
                                 </td>
                                 <td className="py-3.5 px-3">
-                                  <span className="inline-flex items-center gap-1.5 rounded-full bg-neutral-100 px-2.5 py-1 text-[11px] font-medium text-neutral-800">
+                                  <span className="inline-flex items-center gap-1.5 rounded-full bg-neutral-100 dark:bg-neutral-800 px-2.5 py-1 text-[11px] font-medium text-neutral-800 dark:text-neutral-200">
                                     <ChainBadge
                                       chainKey={catalog.networkKey}
                                       size={14}
@@ -2201,10 +2244,10 @@ export function PortfolioView({
                                     {catalog.networkName}
                                   </span>
                                 </td>
-                                <td className="py-3.5 px-3 font-mono text-[11px] text-neutral-500">
+                                <td className="py-3.5 px-3 font-mono text-[11px] text-neutral-500 dark:text-neutral-400">
                                   {walletShort}
                                 </td>
-                                <td className="py-3.5 px-3 text-right font-mono font-semibold text-neutral-950">
+                                <td className="py-3.5 px-3 text-right font-mono font-semibold text-neutral-950 dark:text-white">
                                   {displayAmount} {catalog.symbol}
                                 </td>
                                 <td className="py-3.5 pl-3 pr-5 text-right">
@@ -2215,7 +2258,7 @@ export function PortfolioView({
                                       setReceiveDeploymentId(catalog.id);
                                       setActiveTab("receive");
                                     }}
-                                    className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-[11px] font-semibold text-neutral-800 hover:border-neutral-900"
+                                    className="rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-3 py-1 text-[11px] font-semibold text-neutral-800 dark:text-neutral-200 hover:border-neutral-900 dark:hover:border-neutral-500"
                                   >
                                     Receive
                                   </button>
@@ -2230,7 +2273,7 @@ export function PortfolioView({
                 </div>
 
                 {/* Selected Token Verification Details */}
-                <div className="lg:col-span-4 rounded-[22px] border border-neutral-200/80 bg-white p-5 shadow-2xs space-y-4">
+                <div className="lg:col-span-4 rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-5 shadow-2xs space-y-4">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2.5">
                       <AssetAvatar
@@ -2238,40 +2281,40 @@ export function PortfolioView({
                         size={34}
                       />
                       <div>
-                        <h3 className="font-display text-base font-bold text-neutral-950">
+                        <h3 className="font-display text-base font-bold text-neutral-950 dark:text-white">
                           {selectedCatalogItem.name}
                         </h3>
-                        <p className="text-xs text-neutral-500">
+                        <p className="text-xs text-neutral-500 dark:text-neutral-400">
                           {selectedCatalogItem.symbol} ·{" "}
                           {selectedCatalogItem.networkName}
                         </p>
                       </div>
                     </div>
-                    <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold uppercase text-emerald-700">
+                    <span className="rounded-full bg-emerald-50 dark:bg-emerald-950/40 px-2.5 py-0.5 text-[10px] font-bold uppercase text-emerald-700 dark:text-emerald-400">
                       Verified
                     </span>
                   </div>
 
-                  <div className="space-y-2.5 rounded-[16px] bg-neutral-50 p-3.5 text-xs">
+                  <div className="space-y-2.5 rounded-[16px] bg-neutral-50 dark:bg-[#1a1a1a] p-3.5 text-xs">
                     <div className="flex justify-between">
-                      <span className="text-neutral-500">Asset Class</span>
-                      <span className="font-semibold text-neutral-900">
+                      <span className="text-neutral-500 dark:text-neutral-400">Asset Class</span>
+                      <span className="font-semibold text-neutral-900 dark:text-white">
                         {selectedCatalogItem.kind === "NATIVE"
                           ? "Native Gas Asset"
                           : selectedCatalogItem.standard}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-neutral-500">Decimals</span>
-                      <span className="font-mono font-semibold text-neutral-900">
+                      <span className="text-neutral-500 dark:text-neutral-400">Decimals</span>
+                      <span className="font-mono font-semibold text-neutral-900 dark:text-white">
                         {selectedCatalogItem.decimals}
                       </span>
                     </div>
-                    <div className="pt-1 border-t border-neutral-200/70">
-                      <span className="text-neutral-500 block mb-1">
+                    <div className="pt-1 border-t border-neutral-200/70 dark:border-neutral-800">
+                      <span className="text-neutral-500 dark:text-neutral-400 block mb-1">
                         Contract / Mint Identifier
                       </span>
-                      <p className="font-mono text-[11px] break-all text-neutral-900">
+                      <p className="font-mono text-[11px] break-all text-neutral-900 dark:text-white">
                         {selectedCatalogItem.contractIdentifier}
                       </p>
                     </div>
@@ -2284,7 +2327,7 @@ export function PortfolioView({
                         setReceiveDeploymentId(selectedCatalogItem.id);
                         setActiveTab("receive");
                       }}
-                      className="rounded-full bg-neutral-950 py-2.5 text-xs font-semibold text-white hover:bg-neutral-800"
+                      className="rounded-full bg-neutral-950 dark:bg-white py-2.5 text-xs font-semibold text-white dark:text-neutral-950 hover:bg-neutral-800 dark:hover:bg-neutral-200"
                     >
                       Receive {selectedCatalogItem.symbol}
                     </button>
@@ -2294,7 +2337,7 @@ export function PortfolioView({
                         setSourceDeploymentId(selectedCatalogItem.id);
                         setActiveTab("send");
                       }}
-                      className="rounded-full border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-900 hover:bg-neutral-50"
+                      className="rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] py-2.5 text-xs font-semibold text-neutral-900 dark:text-white hover:bg-neutral-50 dark:hover:bg-neutral-800"
                     >
                       Send / Convert
                     </button>
@@ -2305,67 +2348,371 @@ export function PortfolioView({
           )}
 
           {/* ================================================================
-              TAB 3: RECEIVE / CREATE PAYMENT LINK (Matches 08_26_18 PM-7.png & 08_56_28 PM-6.png)
+              TAB 3: RECEIVE (Dedicated Wallet-to-Wallet Incoming Transfers)
              ================================================================ */}
           {activeTab === "receive" && (
             <div className="space-y-8">
+              {/* Header */}
               <div>
-                <h1 className="font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950">
+                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                  RECEIVE
+                </p>
+                <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950 dark:text-white">
                   <span className="relative inline-block">
                     Receive
                     <svg
-                      viewBox="0 0 180 12"
+                      viewBox="0 0 140 12"
                       fill="none"
                       className="absolute -bottom-1 left-0 w-full h-2.5"
                     >
                       <path
-                        d="M3 9 C55 2, 125 2, 177 8"
+                        d="M3 9 C45 2, 95 2, 137 8"
                         stroke="#FF1A1A"
                         strokeWidth="3.5"
                         strokeLinecap="round"
                       />
                     </svg>
-                  </span>{" "}
-                  / Create Payment Link
+                  </span>
                 </h1>
-                <p className="mt-2 text-sm text-neutral-600">
-                  Choose your destination asset and network, set an amount, and
-                  share a link or QR to get paid.
+                <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400">
+                  Receive direct wallet-to-wallet transfers on supported networks.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-7 items-start">
+                {/* Left Column: Network & Asset Selection + Verified Permanent Address */}
+                <div className="lg:col-span-7 rounded-[26px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 sm:p-8 shadow-sm space-y-6">
+                  {/* Step 1: Select Network */}
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-2">
+                      1. Select Network
+                    </label>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                      {[
+                        { key: "ethereum-mainnet", label: "Ethereum", chainId: "Chain 1" },
+                        { key: "base-mainnet", label: "Base", chainId: "Chain 8453" },
+                        { key: "solana-mainnet", label: "Solana", chainId: "Mainnet" },
+                        { key: "near-mainnet", label: "NEAR", chainId: "Mainnet" },
+                      ].map((net) => {
+                        const isSelected = receiveNetworkKey === net.key;
+                        return (
+                          <button
+                            key={net.key}
+                            type="button"
+                            onClick={() => handleSelectReceiveNetwork(net.key)}
+                            className={`flex flex-col items-center justify-center gap-1.5 rounded-[14px] border py-3 px-2 text-xs font-semibold transition-all ${
+                              isSelected
+                                ? "border-[#FF1A1A] bg-red-50/40 dark:bg-red-950/30 text-neutral-950 dark:text-white font-bold ring-1 ring-[#FF1A1A]"
+                                : "border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                            }`}
+                          >
+                            <ChainBadge chainKey={net.key} size={20} />
+                            <span>{net.label}</span>
+                            <span className="text-[10px] font-normal text-neutral-400">
+                              {net.chainId}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Step 2: Select Asset */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200">
+                        2. Select Asset
+                      </label>
+                      <span className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Authoritative Asset Registry
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-5 gap-2">
+                      {["USDC", "USDT", "ETH", "SOL", "NEAR"].map((sym) => {
+                        const isSupported = isAssetSupportedOnNetwork(sym, receiveNetworkKey);
+                        const isSelected = isSupported && receiveAssetSymbol.toUpperCase() === sym;
+                        return (
+                          <button
+                            key={sym}
+                            type="button"
+                            disabled={!isSupported}
+                            aria-disabled={!isSupported}
+                            title={
+                              !isSupported
+                                ? `${sym} is not available on ${activeReceiveDeployment.networkName}`
+                                : undefined
+                            }
+                            onClick={() => {
+                              if (isSupported) {
+                                handleSelectReceiveAsset(sym);
+                              }
+                            }}
+                            className={`flex flex-col items-center justify-center gap-1 rounded-[14px] border py-2.5 px-1.5 text-xs font-semibold transition-all select-none ${
+                              !isSupported
+                                ? "opacity-30 cursor-not-allowed pointer-events-none border-dashed border-neutral-300 dark:border-neutral-800 bg-neutral-100/60 dark:bg-neutral-900/30 text-neutral-400 dark:text-neutral-600 shadow-none"
+                                : isSelected
+                                  ? "border-[#FF1A1A] bg-red-50/40 dark:bg-red-950/30 text-neutral-950 dark:text-white font-bold ring-1 ring-[#FF1A1A]"
+                                  : "border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                            }`}
+                          >
+                            <AssetAvatar
+                              symbol={sym}
+                              size={22}
+                              className={!isSupported ? "grayscale opacity-40" : ""}
+                            />
+                            <span>{sym}</span>
+                            {!isSupported ? (
+                              <span className="text-[9px] text-neutral-400 dark:text-neutral-600 leading-none">
+                                Unavailable
+                              </span>
+                            ) : (
+                              <span className="text-[9px] text-neutral-400 dark:text-neutral-400 leading-none">
+                                Supported
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Display Authenticated Account's Permanent Receiving Address */}
+                  <div className="rounded-[18px] border border-neutral-200 dark:border-neutral-800 bg-neutral-50/80 dark:bg-[#1a1a1a] p-4 sm:p-5 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
+                          PERMANENT RECEIVING ADDRESS
+                        </span>
+                        <h3 className="font-semibold text-sm text-neutral-900 dark:text-white">
+                          {receiveNetworkKey === "ethereum-mainnet"
+                            ? "Ethereum Mainnet Address (Chain ID 1)"
+                            : receiveNetworkKey === "base-mainnet"
+                              ? "Base Mainnet Address (Chain ID 8453 · EVM)"
+                              : receiveNetworkKey === "solana-mainnet"
+                                ? "Solana Mainnet Receiving Address"
+                                : "NEAR Protocol Implicit Account ID"}
+                        </h3>
+                      </div>
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/60 px-2.5 py-0.5 text-[10px] font-bold uppercase text-emerald-700 dark:text-emerald-400">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        Custody Verified
+                      </span>
+                    </div>
+
+                    {/* Address Box */}
+                    <div className="flex items-center justify-between gap-2 rounded-[12px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#141414] p-3">
+                      <span className="truncate font-mono text-xs sm:text-sm font-semibold text-neutral-900 dark:text-neutral-100 select-all">
+                        {activeReceiveAddress}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => copyAddress("receive-addr", activeReceiveAddress)}
+                        className="shrink-0 rounded-full border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 px-3 py-1.5 text-xs font-semibold text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-colors"
+                      >
+                        {copiedKey === "receive-addr" ? "Copied ✓" : "Copy Address"}
+                      </button>
+                    </div>
+
+                    {/* Action Buttons: Copy Address & Share Address */}
+                    <div className="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => copyAddress("receive-addr-btn", activeReceiveAddress)}
+                        className="flex-1 rounded-[12px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] py-2.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors text-center"
+                      >
+                        {copiedKey === "receive-addr-btn" ? "Copied ✓" : "Copy Address"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleShareAddress(
+                            `Receive ${receiveAssetSymbol} on ${activeReceiveDeployment.networkName}`,
+                            activeReceiveAddress,
+                          )
+                        }
+                        className="flex-1 rounded-[12px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] py-2.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors text-center"
+                      >
+                        {copiedKey === "share-address" ? "Shared / Copied ✓" : "Share Address"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Network & Token Warnings (Specific to selected ecosystem and asset) */}
+                  <div className="rounded-[18px] border border-amber-300/80 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/20 p-4 space-y-2 text-xs">
+                    <div className="flex items-center gap-2 text-amber-800 dark:text-amber-400 font-bold">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+                        <line x1="12" y1="9" x2="12" y2="13" />
+                        <line x1="12" y1="17" x2="12.01" y2="17" />
+                      </svg>
+                      <span>Important Network &amp; Asset Warnings</span>
+                    </div>
+
+                    {receiveNetworkKey === "ethereum-mainnet" && (
+                      <div className="space-y-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
+                        <p>
+                          <strong>Ethereum Mainnet (Chain ID 1):</strong> Send only supported assets (ETH, USDC, USDT) via Ethereum Mainnet.
+                        </p>
+                        <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80">
+                          Notice: Ethereum and Base share the same EVM address. Always verify the source network before dispatching to ensure proper routing.
+                        </p>
+                      </div>
+                    )}
+
+                    {receiveNetworkKey === "base-mainnet" && (
+                      <div className="space-y-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
+                        <p>
+                          <strong>Base Mainnet (Chain ID 8453):</strong> Send only supported assets (ETH, USDC) via Base Mainnet.
+                        </p>
+                        <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80">
+                          Notice: Base shares the same EVM 0x address as Ethereum Mainnet. Do not send unsupported tokens or assets from other L2 chains (such as Optimism or Arbitrum).
+                        </p>
+                      </div>
+                    )}
+
+                    {receiveNetworkKey === "solana-mainnet" && (
+                      <div className="space-y-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
+                        <p>
+                          <strong>Solana Mainnet:</strong> Send native SOL or verified SPL tokens (USDC, USDT) to this Base58 address.
+                        </p>
+                        <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80">
+                          {receiveAssetSymbol === "SOL"
+                            ? "Native SOL transfers are credited directly to this address."
+                            : `For SPL token transfers (${receiveAssetSymbol}), sending wallets automatically create or fund the Associated Token Account (ATA) for this address.`}
+                        </p>
+                      </div>
+                    )}
+
+                    {receiveNetworkKey === "near-mainnet" && (
+                      <div className="space-y-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
+                        <p>
+                          <strong>NEAR Mainnet:</strong> Send native NEAR or verified NEP-141 tokens (USDT, USDC) to this 64-character implicit account.
+                        </p>
+                        <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80">
+                          {receiveAssetSymbol === "NEAR"
+                            ? "Native NEAR transfers settle directly to this implicit account."
+                            : `NEP-141 Warning: Receiving ${receiveAssetSymbol} on NEAR requires storage registration on contract ${activeReceiveDeployment.contractIdentifier}. Ensure the sending contract or wallet attaches the storage deposit.`}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Right Column: QR Code Display & Verified Deployment Metadata */}
+                <div className="lg:col-span-5 rounded-[26px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 shadow-sm space-y-5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                        SCAN TO SEND
+                      </span>
+                      <h2 className="font-serif text-xl text-neutral-950 dark:text-white">
+                        Deposit QR Code
+                      </h2>
+                    </div>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-neutral-100 dark:bg-neutral-800 px-2.5 py-1 text-[11px] font-semibold text-neutral-700 dark:text-neutral-300">
+                      {activeReceiveDeployment.networkName}
+                    </span>
+                  </div>
+
+                  {/* QR Box */}
+                  <div className="flex flex-col items-center justify-center rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-neutral-50 dark:bg-[#1a1a1a] p-6 text-center">
+                    <div className="p-3 bg-white rounded-[16px] shadow-sm">
+                      <QrCode value={activeReceiveAddress} size={180} />
+                    </div>
+                    <div className="mt-4 space-y-1">
+                      <p className="text-xs font-semibold text-neutral-900 dark:text-white">
+                        {currentAccount.name} · {activeReceiveDeployment.symbol}
+                      </p>
+                      <p className="font-mono text-[11px] text-neutral-500 dark:text-neutral-400 break-all max-w-[260px]">
+                        {activeReceiveAddress}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Canonical Token Deployment Specs */}
+                  <div className="space-y-2.5 rounded-[16px] bg-neutral-50 dark:bg-[#1a1a1a] p-3.5 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-neutral-500 dark:text-neutral-400">Network</span>
+                      <span className="font-semibold text-neutral-900 dark:text-white">
+                        {activeReceiveDeployment.networkName}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-neutral-500 dark:text-neutral-400">Asset Standard</span>
+                      <span className="font-semibold text-neutral-900 dark:text-white">
+                        {activeReceiveDeployment.kind === "NATIVE"
+                          ? "Native Gas Asset"
+                          : activeReceiveDeployment.standard}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-neutral-500 dark:text-neutral-400">Decimals</span>
+                      <span className="font-mono font-semibold text-neutral-900 dark:text-white">
+                        {activeReceiveDeployment.decimals}
+                      </span>
+                    </div>
+                    <div className="pt-1 border-t border-neutral-200/70 dark:border-neutral-800">
+                      <span className="text-neutral-500 dark:text-neutral-400 block mb-1">
+                        Contract / Identifier
+                      </span>
+                      <p className="font-mono text-[11px] break-all text-neutral-900 dark:text-white">
+                        {activeReceiveDeployment.contractIdentifier}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================
+              TAB 4: REQUEST PAYMENT (Shareable Payment Requests & Invoices with 1Click Settlement)
+             ================================================================ */}
+          {activeTab === "request" && (
+            <div className="space-y-8">
+              {/* Header */}
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                  REQUEST PAYMENT
+                </p>
+                <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950 dark:text-white">
+                  <span className="relative inline-block">
+                    Request Payment
+                    <svg
+                      viewBox="0 0 220 12"
+                      fill="none"
+                      className="absolute -bottom-1 left-0 w-full h-2.5"
+                    >
+                      <path
+                        d="M3 9 C70 2, 155 2, 217 8"
+                        stroke="#FF1A1A"
+                        strokeWidth="3.5"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </span>
+                </h1>
+                <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400">
+                  Create shareable payment links with multi-chain 1Click settlement. Payers can pay with any supported asset.
                 </p>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-7 items-start">
                 {/* Left Column: Form Card */}
-                <div className="lg:col-span-7 rounded-[26px] border border-neutral-200/90 bg-white p-6 sm:p-8 shadow-sm space-y-5">
-                  {/* Mode Toggle */}
-                  <div className="grid grid-cols-2 rounded-full bg-neutral-100 p-1">
-                    <button
-                      type="button"
-                      className="rounded-full py-2 text-xs font-semibold text-neutral-600"
-                    >
-                      ↙ Request Payment
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded-full bg-neutral-950 py-2 text-xs font-semibold text-white shadow-xs"
-                    >
-                      🔗 Create Payment Link
-                    </button>
-                  </div>
-
+                <div className="lg:col-span-7 rounded-[26px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 sm:p-8 shadow-sm space-y-5">
                   {/* Destination Asset & Network Selector */}
                   <div>
                     <label
-                      htmlFor="receive-deployment-select"
-                      className="block text-xs font-semibold text-neutral-800 mb-2"
+                      htmlFor="pr-destination-select"
+                      className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-2"
                     >
-                      Destination asset &amp; network
+                      Destination Asset &amp; Network
                     </label>
                     <select
-                      id="receive-deployment-select"
+                      id="pr-destination-select"
                       value={receiveDeploymentId}
                       onChange={(e) => setReceiveDeploymentId(e.target.value)}
-                      className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 text-sm font-semibold text-neutral-950 focus:border-neutral-950 focus:outline-none"
+                      className="w-full rounded-[14px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-4 py-3 text-sm font-semibold text-neutral-950 dark:text-white focus:border-neutral-950 dark:focus:border-neutral-400 focus:outline-none"
                     >
                       {MAINNET_SUPPORTED_DEPLOYMENTS.map((d) => (
                         <option key={d.id} value={d.id}>
@@ -2374,7 +2721,7 @@ export function PortfolioView({
                       ))}
                     </select>
 
-                    {/* Quick Network Pills */}
+                    {/* Quick Network Selector Pills */}
                     <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                       {[
                         { key: "ethereum-mainnet", label: "Ethereum" },
@@ -2382,10 +2729,6 @@ export function PortfolioView({
                         { key: "solana-mainnet", label: "Solana" },
                         { key: "near-mainnet", label: "NEAR" },
                       ].map((net) => {
-                        const isSupported = isAssetSupportedOnNetwork(
-                          receiveDeployment.symbol,
-                          net.key,
-                        );
                         const isSelected =
                           receiveDeployment.networkKey === net.key;
 
@@ -2419,10 +2762,8 @@ export function PortfolioView({
                             }}
                             className={`flex items-center justify-center gap-2 rounded-[12px] border py-2.5 text-xs font-semibold transition-all ${
                               isSelected
-                                ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 font-bold"
-                                : !isSupported
-                                  ? "border-neutral-200 bg-neutral-50/60 text-neutral-400 hover:bg-neutral-100"
-                                  : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                                ? "border-[#FF1A1A] bg-red-50/40 dark:bg-red-950/30 text-neutral-950 dark:text-white font-bold"
+                                : "border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
                             }`}
                           >
                             <ChainBadge chainKey={net.key} size={16} />
@@ -2432,52 +2773,65 @@ export function PortfolioView({
                       })}
                     </div>
 
-                    {/* Direct Wallet Deposit Address */}
-                    <div className="mt-4 rounded-[16px] border border-neutral-200/90 bg-neutral-50 p-3.5 space-y-2">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="font-semibold text-neutral-800">
-                          Direct {receiveDeployment.networkName} Deposit Address
-                        </span>
-                        <span className="rounded bg-neutral-200/70 px-1.5 py-0.5 text-[10px] font-bold text-neutral-700">
-                          {receiveDeployment.standard} ·{" "}
-                          {receiveDeployment.symbol}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between rounded-[12px] border border-neutral-200 bg-white px-3 py-2">
-                        <span className="truncate font-mono text-xs text-neutral-900 mr-2">
-                          {receiveDeployment.ecosystem === "evm"
-                            ? ethAddr
-                            : receiveDeployment.ecosystem === "solana"
-                              ? solAddr
-                              : nearAddr}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const addr =
-                              receiveDeployment.ecosystem === "evm"
-                                ? ethAddr
-                                : receiveDeployment.ecosystem === "solana"
-                                  ? solAddr
-                                  : nearAddr;
-                            copyAddress("direct-receive", addr);
-                          }}
-                          className="shrink-0 rounded-full border border-neutral-200 bg-neutral-50 px-2.5 py-1 text-xs font-semibold text-neutral-900 hover:bg-neutral-100"
-                        >
-                          {copiedKey === "direct-receive" ? "Copied" : "Copy"}
-                        </button>
-                      </div>
-                      <p className="text-[11px] text-neutral-500">
-                        Send only{" "}
-                        <strong className="font-semibold text-neutral-700">
-                          {receiveDeployment.symbol}
-                        </strong>{" "}
-                        ({receiveDeployment.name}) on{" "}
-                        <strong className="font-semibold text-neutral-700">
-                          {receiveDeployment.networkName}
-                        </strong>{" "}
-                        to this address.
-                      </p>
+                    {/* Quick Asset Selector Pills */}
+                    <div className="mt-2.5 grid grid-cols-5 gap-2">
+                      {["USDC", "USDT", "ETH", "SOL", "NEAR"].map((sym) => {
+                        const isSupported = isAssetSupportedOnNetwork(
+                          sym,
+                          receiveDeployment.networkKey,
+                        );
+                        const isSelected =
+                          isSupported &&
+                          receiveDeployment.symbol.toUpperCase() === sym;
+                        return (
+                          <button
+                            key={sym}
+                            type="button"
+                            disabled={!isSupported}
+                            aria-disabled={!isSupported}
+                            title={
+                              !isSupported
+                                ? `${sym} is not available on ${receiveDeployment.networkName}`
+                                : undefined
+                            }
+                            onClick={() => {
+                              if (isSupported) {
+                                const match = MAINNET_SUPPORTED_DEPLOYMENTS.find(
+                                  (d) =>
+                                    d.networkKey === receiveDeployment.networkKey &&
+                                    d.symbol.toUpperCase() === sym,
+                                );
+                                if (match) {
+                                  setReceiveDeploymentId(match.id);
+                                }
+                              }
+                            }}
+                            className={`flex flex-col items-center justify-center gap-1 rounded-[12px] border py-2 px-1 text-xs font-semibold transition-all select-none ${
+                              !isSupported
+                                ? "opacity-30 cursor-not-allowed pointer-events-none border-dashed border-neutral-300 dark:border-neutral-800 bg-neutral-100/60 dark:bg-neutral-900/30 text-neutral-400 dark:text-neutral-600 shadow-none"
+                                : isSelected
+                                  ? "border-[#FF1A1A] bg-red-50/40 dark:bg-red-950/30 text-neutral-950 dark:text-white font-bold ring-1 ring-[#FF1A1A]"
+                                  : "border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                            }`}
+                          >
+                            <AssetAvatar
+                              symbol={sym}
+                              size={20}
+                              className={!isSupported ? "grayscale opacity-40" : ""}
+                            />
+                            <span>{sym}</span>
+                            {!isSupported ? (
+                              <span className="text-[9px] text-neutral-400 dark:text-neutral-600 leading-none">
+                                Unavailable
+                              </span>
+                            ) : (
+                              <span className="text-[9px] text-neutral-400 dark:text-neutral-400 leading-none">
+                                Supported
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -2486,7 +2840,7 @@ export function PortfolioView({
                     <div className="flex items-center justify-between mb-2">
                       <label
                         htmlFor="pr-amount-input"
-                        className="text-xs font-semibold text-neutral-800"
+                        className="text-xs font-semibold text-neutral-800 dark:text-neutral-200"
                       >
                         Amount
                       </label>
@@ -2496,8 +2850,8 @@ export function PortfolioView({
                           onClick={() => setPrAmountMode("FIXED")}
                           className={`rounded px-2 py-0.5 font-semibold ${
                             prAmountMode === "FIXED"
-                              ? "bg-neutral-900 text-white"
-                              : "text-neutral-500"
+                              ? "bg-neutral-900 dark:bg-white text-white dark:text-neutral-900"
+                              : "text-neutral-500 dark:text-neutral-400"
                           }`}
                         >
                           Fixed
@@ -2507,8 +2861,8 @@ export function PortfolioView({
                           onClick={() => setPrAmountMode("OPTIONAL")}
                           className={`rounded px-2 py-0.5 font-semibold ${
                             prAmountMode === "OPTIONAL"
-                              ? "bg-neutral-900 text-white"
-                              : "text-neutral-500"
+                              ? "bg-neutral-900 dark:bg-white text-white dark:text-neutral-900"
+                              : "text-neutral-500 dark:text-neutral-400"
                           }`}
                         >
                           Open amount
@@ -2518,7 +2872,7 @@ export function PortfolioView({
 
                     {prAmountMode === "FIXED" ? (
                       <div className="relative flex items-center">
-                        <span className="pointer-events-none absolute left-4 text-base font-semibold text-neutral-400">
+                        <span className="pointer-events-none absolute left-4 text-base font-semibold text-neutral-400 dark:text-neutral-500">
                           $
                         </span>
                         <input
@@ -2527,14 +2881,14 @@ export function PortfolioView({
                           value={prAmount}
                           onChange={(e) => setPrAmount(e.target.value)}
                           placeholder="249.00"
-                          className="w-full rounded-[14px] border border-neutral-200 bg-white pl-8 pr-20 py-3 font-display text-lg font-bold text-neutral-950 focus:border-neutral-950 focus:outline-none"
+                          className="w-full rounded-[14px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] pl-8 pr-20 py-3 font-display text-lg font-bold text-neutral-950 dark:text-white focus:border-neutral-950 dark:focus:border-neutral-400 focus:outline-none"
                         />
-                        <span className="pointer-events-none absolute right-4 rounded-md bg-neutral-100 px-2.5 py-1 text-xs font-bold text-neutral-700">
+                        <span className="pointer-events-none absolute right-4 rounded-md bg-neutral-100 dark:bg-neutral-800 px-2.5 py-1 text-xs font-bold text-neutral-700 dark:text-neutral-300">
                           {receiveDeployment.symbol}
                         </span>
                       </div>
                     ) : (
-                      <p className="rounded-[14px] border border-neutral-200 bg-neutral-50 px-4 py-3 text-xs text-neutral-600">
+                      <p className="rounded-[14px] border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-[#1a1a1a] px-4 py-3 text-xs text-neutral-600 dark:text-neutral-400">
                         Payer will enter their desired amount at checkout.
                       </p>
                     )}
@@ -2545,11 +2899,11 @@ export function PortfolioView({
                     <div className="flex items-center justify-between mb-2">
                       <label
                         htmlFor="pr-title-input"
-                        className="text-xs font-semibold text-neutral-800"
+                        className="text-xs font-semibold text-neutral-800 dark:text-neutral-200"
                       >
                         Note / Title
                       </label>
-                      <span className="text-[11px] text-neutral-400">
+                      <span className="text-[11px] text-neutral-400 dark:text-neutral-500">
                         {prTitle.length} / 140
                       </span>
                     </div>
@@ -2562,7 +2916,7 @@ export function PortfolioView({
                         setPrDescription(e.target.value);
                       }}
                       placeholder="e.g. Project design deposit, Invoice #1042"
-                      className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-900 focus:border-neutral-950 focus:outline-none"
+                      className="w-full rounded-[14px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-4 py-3 text-sm text-neutral-900 dark:text-white focus:border-neutral-950 dark:focus:border-neutral-400 focus:outline-none"
                     />
                   </div>
 
@@ -2581,24 +2935,24 @@ export function PortfolioView({
                   </button>
                 </div>
 
-                {/* Right Column: LIVE PREVIEW Card (Matches 08_26_18 PM-7.png) */}
-                <div className="lg:col-span-5 rounded-[26px] border border-neutral-200/90 bg-white p-6 shadow-sm space-y-5">
+                {/* Right Column: LIVE PREVIEW Card */}
+                <div className="lg:col-span-5 rounded-[26px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 shadow-sm space-y-5">
                   <div className="flex items-center justify-between">
                     <div>
                       <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
                         LIVE PREVIEW
                       </span>
-                      <h2 className="font-serif text-xl text-neutral-950">
+                      <h2 className="font-serif text-xl text-neutral-950 dark:text-white">
                         Your payment link
                       </h2>
                     </div>
                     {wallet?.status === "ACTIVE" ? (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 dark:bg-emerald-950/40 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
                         <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                         Active
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 text-[11px] font-semibold text-amber-800 dark:text-amber-400">
                         <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
                         Wallet Setup Pending
                       </span>
@@ -2614,7 +2968,7 @@ export function PortfolioView({
                     <div className="relative z-10 flex items-center justify-between">
                       <FlowLogo size={20} variant="inverse" />
                       <span className="rounded-full border border-white/15 bg-white/10 px-2.5 py-0.5 text-[10px] font-medium text-neutral-200">
-                        Payment Request
+                        1Click Payment Link
                       </span>
                     </div>
 
@@ -2664,8 +3018,8 @@ export function PortfolioView({
                   </div>
 
                   {/* Share URL Box */}
-                  <div className="flex items-center justify-between rounded-[14px] border border-neutral-200 bg-neutral-50 px-3.5 py-2.5">
-                    <span className="truncate font-mono text-xs text-neutral-700 mr-2">
+                  <div className="flex items-center justify-between rounded-[14px] border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-[#1a1a1a] px-3.5 py-2.5">
+                    <span className="truncate font-mono text-xs text-neutral-700 dark:text-neutral-300 mr-2">
                       {wallet?.status === "ACTIVE"
                         ? latestShareUrl
                         : "Payment link unavailable (wallet setup pending)"}
@@ -2674,7 +3028,7 @@ export function PortfolioView({
                       type="button"
                       disabled={wallet?.status !== "ACTIVE"}
                       onClick={() => copyAddress("share-url", latestShareUrl)}
-                      className="shrink-0 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-semibold text-neutral-900 hover:bg-neutral-100 disabled:opacity-40"
+                      className="shrink-0 rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-3 py-1 text-xs font-semibold text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-40"
                     >
                       {copiedKey === "share-url" ? "Copied" : "Copy"}
                     </button>
@@ -2686,7 +3040,7 @@ export function PortfolioView({
                       type="button"
                       disabled={wallet?.status !== "ACTIVE"}
                       onClick={() => copyAddress("share-btn", latestShareUrl)}
-                      className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50 disabled:opacity-40"
+                      className="rounded-[12px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] py-2.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800 disabled:opacity-40"
                     >
                       Copy Link
                     </button>
@@ -2694,7 +3048,7 @@ export function PortfolioView({
                       type="button"
                       disabled={wallet?.status !== "ACTIVE"}
                       onClick={() => copyAddress("qr-btn", latestShareUrl)}
-                      className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50 disabled:opacity-40"
+                      className="rounded-[12px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] py-2.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800 disabled:opacity-40"
                     >
                       Show QR
                     </button>
@@ -2702,7 +3056,7 @@ export function PortfolioView({
                       <Link
                         prefetch={false}
                         href={`/pay/${paymentRequests[0].publicId}`}
-                        className="flex items-center justify-center rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                        className="flex items-center justify-center rounded-[12px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] py-2.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800"
                       >
                         Open Link
                       </Link>
@@ -2710,7 +3064,7 @@ export function PortfolioView({
                       <button
                         type="button"
                         disabled
-                        className="rounded-[12px] border border-neutral-200 bg-white py-2.5 text-xs font-semibold text-neutral-400 disabled:opacity-40"
+                        className="rounded-[12px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] py-2.5 text-xs font-semibold text-neutral-400 dark:text-neutral-600 disabled:opacity-40"
                       >
                         Open Link
                       </button>
@@ -2721,11 +3075,11 @@ export function PortfolioView({
 
               {/* Created Payment Links Table */}
               {paymentRequests.length > 0 && (
-                <div className="rounded-[24px] border border-neutral-200/90 bg-white p-6 shadow-2xs space-y-4">
-                  <h2 className="font-serif text-2xl text-neutral-950">
+                <div className="rounded-[24px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 shadow-2xs space-y-4">
+                  <h2 className="font-serif text-2xl text-neutral-950 dark:text-white">
                     Your payment links
                   </h2>
-                  <div className="divide-y divide-neutral-100">
+                  <div className="divide-y divide-neutral-100 dark:divide-neutral-800">
                     {paymentRequests.map((req) => (
                       <div
                         key={req.id}
@@ -2733,27 +3087,27 @@ export function PortfolioView({
                       >
                         <div>
                           <div className="flex items-center gap-2">
-                            <p className="font-display text-sm font-bold text-neutral-950">
+                            <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
                               {req.title}
                             </p>
                             <span
                               className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
                                 req.status === "ACTIVE"
-                                  ? "bg-emerald-50 text-emerald-700"
-                                  : "bg-neutral-100 text-neutral-600"
+                                  ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400"
+                                  : "bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
                               }`}
                             >
                               {req.status}
                             </span>
                           </div>
-                          <p className="mt-1 text-xs text-neutral-500">
+                          <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
                             Destination: {req.destinationAssetSymbol} on{" "}
                             {req.destinationNetwork} ·{" "}
                             {req.amountMode === "FIXED"
                               ? `${req.displayAmount} ${req.destinationAssetSymbol}`
                               : "Open amount"}
                           </p>
-                          <p className="mt-0.5 font-mono text-[11px] text-neutral-400">
+                          <p className="mt-0.5 font-mono text-[11px] text-neutral-400 dark:text-neutral-500">
                             {req.shareUrl}
                           </p>
                         </div>
@@ -2762,7 +3116,7 @@ export function PortfolioView({
                           <Link
                             prefetch={false}
                             href={`/pay/${req.publicId}`}
-                            className="rounded-full bg-neutral-950 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-neutral-800"
+                            className="rounded-full bg-neutral-950 dark:bg-white px-3.5 py-1.5 text-xs font-semibold text-white dark:text-neutral-950 hover:bg-neutral-800 dark:hover:bg-neutral-200"
                           >
                             Open Checkout
                           </Link>
@@ -2771,7 +3125,7 @@ export function PortfolioView({
                             onClick={() =>
                               copyAddress(`req-${req.id}`, req.shareUrl)
                             }
-                            className="rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
+                            className="rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-3.5 py-1.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800"
                           >
                             {copiedKey === `req-${req.id}`
                               ? "Copied"
@@ -2783,7 +3137,7 @@ export function PortfolioView({
                               onClick={() =>
                                 handleDisablePaymentRequest(req.id)
                               }
-                              className="rounded-full border border-red-200 bg-red-50 px-3.5 py-1.5 text-xs font-semibold text-[#FF1A1A] hover:bg-red-100"
+                              className="rounded-full border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/30 px-3.5 py-1.5 text-xs font-semibold text-[#FF1A1A] hover:bg-red-100 dark:hover:bg-red-900/50"
                             >
                               Disable
                             </button>
@@ -2804,7 +3158,7 @@ export function PortfolioView({
             <div className="space-y-6">
               <div className="flex flex-wrap items-end justify-between gap-4">
                 <div>
-                  <h1 className="font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950">
+                  <h1 className="font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950 dark:text-white">
                     <span className="relative inline-block">
                       Activity
                       <svg
@@ -2821,7 +3175,7 @@ export function PortfolioView({
                       </svg>
                     </span>
                   </h1>
-                  <p className="mt-2 text-sm text-neutral-600">
+                  <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400">
                     Track every payment, transfer, invoice, and settlement
                     across your wallets.
                   </p>
@@ -2832,7 +3186,7 @@ export function PortfolioView({
                     type="button"
                     onClick={handleSyncActivities}
                     disabled={activityLoading}
-                    className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 bg-white px-4 py-2 text-xs font-semibold text-neutral-800 shadow-2xs hover:bg-neutral-50 disabled:opacity-50"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-[#141414] px-4 py-2 text-xs font-semibold text-neutral-800 dark:text-neutral-200 shadow-2xs hover:bg-neutral-50 dark:hover:bg-neutral-800 disabled:opacity-50"
                   >
                     <IconRefresh
                       size={13}
@@ -2842,8 +3196,8 @@ export function PortfolioView({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setActiveTab("receive")}
-                    className="inline-flex items-center gap-1.5 rounded-full bg-neutral-950 px-4 py-2 text-xs font-semibold text-white hover:bg-neutral-800"
+                    onClick={() => setActiveTab("request")}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-neutral-950 dark:bg-white px-4 py-2 text-xs font-semibold text-white dark:text-neutral-950 hover:bg-neutral-800 dark:hover:bg-neutral-200"
                   >
                     Create payment link →
                   </button>
@@ -2865,8 +3219,8 @@ export function PortfolioView({
                     onClick={() => setActivityCategory(pill.key)}
                     className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all ${
                       activityCategory === pill.key
-                        ? "bg-neutral-950 text-white shadow-2xs"
-                        : "border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                        ? "bg-neutral-950 dark:bg-white text-white dark:text-neutral-950 shadow-2xs"
+                        : "border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#141414] text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
                     }`}
                   >
                     {pill.label}
@@ -2875,7 +3229,7 @@ export function PortfolioView({
               </div>
 
               {/* Search + Network Filter Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-neutral-200/80 bg-white p-3 shadow-2xs">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-3 shadow-2xs">
                 <div className="relative flex-1 min-w-[220px]">
                   <IconSearch
                     size={15}
@@ -2886,25 +3240,25 @@ export function PortfolioView({
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search by name, wallet, link, or transaction hash..."
-                    className="w-full rounded-full border border-neutral-200 bg-neutral-50 pl-9 pr-4 py-1.5 text-xs text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-900 focus:bg-white focus:outline-none"
+                    className="w-full rounded-full border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-[#1f1f1f] pl-9 pr-4 py-1.5 text-xs text-neutral-900 dark:text-white placeholder:text-neutral-400 dark:placeholder:text-neutral-500 focus:border-neutral-900 dark:focus:border-neutral-400 focus:bg-white dark:focus:bg-[#141414] focus:outline-none"
                   />
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-medium text-neutral-700">
+                  <span className="rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-3.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300">
                     Last 30 days ▾
                   </span>
-                  <span className="rounded-full border border-neutral-200 bg-white px-3.5 py-1.5 text-xs font-medium text-neutral-700">
+                  <span className="rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-3.5 py-1.5 text-xs font-medium text-neutral-700 dark:text-neutral-300">
                     All networks ({activityTotal + paymentRequests.length})
                   </span>
                 </div>
               </div>
 
               {/* Activity Table */}
-              <div className="overflow-hidden rounded-[24px] border border-neutral-200/90 bg-white shadow-2xs">
+              <div className="overflow-hidden rounded-[24px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] shadow-2xs">
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
-                      <tr className="border-b border-neutral-100 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
+                      <tr className="border-b border-neutral-100 dark:border-neutral-800 text-[11px] font-semibold uppercase tracking-wider text-neutral-400">
                         <th className="py-3.5 pl-6 pr-3">Date &amp; Time</th>
                         <th className="py-3.5 px-3">Transaction</th>
                         <th className="py-3.5 px-3">Type</th>
@@ -2913,7 +3267,7 @@ export function PortfolioView({
                         <th className="py-3.5 pl-3 pr-6 text-right">Status</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-neutral-100 text-xs">
+                    <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800 text-xs">
                       {/* Real On-Chain Activities */}
                       {activities
                         .filter((act) => {
@@ -2951,18 +3305,18 @@ export function PortfolioView({
                           return (
                             <tr
                               key={act.id}
-                              className="hover:bg-neutral-50/80 transition-colors"
+                              className="hover:bg-neutral-50/80 dark:hover:bg-[#1a1a1a] transition-colors"
                             >
-                              <td className="py-4 pl-6 pr-3 text-neutral-500 whitespace-nowrap">
+                              <td className="py-4 pl-6 pr-3 text-neutral-500 dark:text-neutral-400 whitespace-nowrap">
                                 {formatTimestamp(act.blockTimestamp)}
                               </td>
                               <td className="py-4 px-3">
-                                <p className="font-display font-bold text-neutral-950">
+                                <p className="font-display font-bold text-neutral-950 dark:text-white">
                                   {act.direction === "INCOMING"
                                     ? "Inbound Transfer"
                                     : "Outbound Transfer"}
                                 </p>
-                                <p className="font-mono text-[11px] text-neutral-400">
+                                <p className="font-mono text-[11px] text-neutral-400 dark:text-neutral-500">
                                   {truncateMiddle(act.txHash, 8, 6)}
                                   {explorer && (
                                     <a
@@ -2980,8 +3334,8 @@ export function PortfolioView({
                                 <span
                                   className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
                                     act.direction === "INCOMING"
-                                      ? "bg-emerald-50 text-emerald-700"
-                                      : "bg-red-50 text-[#FF1A1A]"
+                                      ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400"
+                                      : "bg-red-50 dark:bg-red-950/40 text-[#FF1A1A]"
                                   }`}
                                 >
                                   {act.direction === "INCOMING"
@@ -2990,7 +3344,7 @@ export function PortfolioView({
                                 </span>
                               </td>
                               <td className="py-4 px-3">
-                                <span className="inline-flex items-center gap-1.5 font-medium text-neutral-800">
+                                <span className="inline-flex items-center gap-1.5 font-medium text-neutral-800 dark:text-neutral-200">
                                   <ChainBadge
                                     chainKey={act.network}
                                     size={16}
@@ -2998,11 +3352,11 @@ export function PortfolioView({
                                   {act.network}
                                 </span>
                               </td>
-                              <td className="py-4 px-3 text-right font-display font-bold text-neutral-950">
+                              <td className="py-4 px-3 text-right font-display font-bold text-neutral-950 dark:text-white">
                                 {act.displayAmount} {act.assetSymbol}
                               </td>
                               <td className="py-4 pl-3 pr-6 text-right">
-                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
+                                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 dark:bg-emerald-950/40 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
                                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                                   {act.finality}
                                 </span>
@@ -3033,32 +3387,32 @@ export function PortfolioView({
                         .map((req) => (
                           <tr
                             key={req.id}
-                            className="hover:bg-neutral-50/80 transition-colors"
+                            className="hover:bg-neutral-50/80 dark:hover:bg-[#1a1a1a] transition-colors"
                           >
-                            <td className="py-4 pl-6 pr-3 text-neutral-500 whitespace-nowrap">
+                            <td className="py-4 pl-6 pr-3 text-neutral-500 dark:text-neutral-400 whitespace-nowrap">
                               {formatTimestamp(req.createdAt)}
                             </td>
                             <td className="py-4 px-3">
-                              <p className="font-display font-bold text-neutral-950">
+                              <p className="font-display font-bold text-neutral-950 dark:text-white">
                                 {req.title}
                               </p>
-                              <p className="text-[11px] text-neutral-500">
+                              <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
                                 <Link
                                   prefetch={false}
                                   href={`/pay/${req.publicId}`}
-                                  className="font-mono text-neutral-500 hover:text-[#FF1A1A] hover:underline"
+                                  className="font-mono text-neutral-500 dark:text-neutral-400 hover:text-[#FF1A1A] hover:underline"
                                 >
                                   /pay/{req.publicId}
                                 </Link>
                               </p>
                             </td>
                             <td className="py-4 px-3">
-                              <span className="inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2.5 py-0.5 text-[11px] font-semibold text-neutral-800">
+                              <span className="inline-flex items-center gap-1 rounded-full bg-neutral-100 dark:bg-neutral-800 px-2.5 py-0.5 text-[11px] font-semibold text-neutral-800 dark:text-neutral-200">
                                 🔗 Link
                               </span>
                             </td>
                             <td className="py-4 px-3">
-                              <span className="inline-flex items-center gap-1.5 font-medium text-neutral-800">
+                              <span className="inline-flex items-center gap-1.5 font-medium text-neutral-800 dark:text-neutral-200">
                                 <ChainBadge
                                   chainKey={req.destinationNetwork}
                                   size={16}
@@ -3067,7 +3421,7 @@ export function PortfolioView({
                               </span>
                             </td>
                             <td className="py-4 px-3 text-right">
-                              <p className="font-display font-bold text-neutral-950">
+                              <p className="font-display font-bold text-neutral-950 dark:text-white">
                                 {req.amountMode === "FIXED"
                                   ? `${req.displayAmount} ${req.destinationAssetSymbol}`
                                   : "Open amount"}
@@ -3077,10 +3431,10 @@ export function PortfolioView({
                               <span
                                 className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
                                   req.status === "COMPLETED"
-                                    ? "bg-emerald-50 text-emerald-700"
+                                    ? "bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400"
                                     : req.status === "ACTIVE"
-                                      ? "bg-amber-50 text-amber-700"
-                                      : "bg-neutral-100 text-neutral-600"
+                                      ? "bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400"
+                                      : "bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-400"
                                 }`}
                               >
                                 <span
@@ -3103,7 +3457,7 @@ export function PortfolioView({
                           <tr>
                             <td
                               colSpan={6}
-                              className="py-10 text-center text-xs text-neutral-500"
+                              className="py-10 text-center text-xs text-neutral-500 dark:text-neutral-400"
                             >
                               No on-chain transactions or payment requests
                               recorded yet.
@@ -3115,13 +3469,13 @@ export function PortfolioView({
                 </div>
 
                 {/* Pagination Bar */}
-                <div className="flex items-center justify-between border-t border-neutral-100 px-6 py-3.5 text-xs text-neutral-500">
+                <div className="flex items-center justify-between border-t border-neutral-100 dark:border-neutral-800 px-6 py-3.5 text-xs text-neutral-500 dark:text-neutral-400">
                   <span>
                     Showing {activities.length + paymentRequests.length} of{" "}
                     {activityTotal + paymentRequests.length} records
                   </span>
                   <div className="flex items-center gap-1">
-                    <span className="rounded-lg bg-neutral-950 px-2.5 py-1 font-semibold text-white">
+                    <span className="rounded-lg bg-neutral-950 dark:bg-white px-2.5 py-1 font-semibold text-white dark:text-neutral-950">
                       1
                     </span>
                   </div>
@@ -3139,25 +3493,25 @@ export function PortfolioView({
                 <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
                   MOVE FUNDS
                 </p>
-                <h1 className="mt-1 font-serif text-3xl sm:text-[40px] font-normal tracking-[-0.02em] text-neutral-950">
+                <h1 className="mt-1 font-serif text-3xl sm:text-[40px] font-normal tracking-[-0.02em] text-neutral-950 dark:text-white">
                   Send &amp; Convert
                 </h1>
-                <p className="mt-1 text-sm text-neutral-600">
+                <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
                   Send assets across Ethereum, Base, Solana, and NEAR with
                   automatic route discovery.
                 </p>
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-                <div className="lg:col-span-7 rounded-[26px] border border-neutral-200/90 bg-white p-6 sm:p-8 shadow-sm space-y-5">
-                  <div className="grid grid-cols-2 rounded-full bg-neutral-100 p-1">
+                <div className="lg:col-span-7 rounded-[26px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 sm:p-8 shadow-sm space-y-5">
+                  <div className="grid grid-cols-2 rounded-full bg-neutral-100 dark:bg-neutral-800 p-1">
                     <button
                       type="button"
                       onClick={() => setSendMode("send")}
                       className={`rounded-full py-2 text-xs font-semibold transition-all ${
                         sendMode === "send"
-                          ? "bg-neutral-950 text-white shadow-xs"
-                          : "text-neutral-600"
+                          ? "bg-neutral-950 dark:bg-white text-white dark:text-neutral-950 shadow-xs"
+                          : "text-neutral-600 dark:text-neutral-400"
                       }`}
                     >
                       ↗ Send to Recipient
@@ -3167,8 +3521,8 @@ export function PortfolioView({
                       onClick={() => setSendMode("convert")}
                       className={`rounded-full py-2 text-xs font-semibold transition-all ${
                         sendMode === "convert"
-                          ? "bg-neutral-950 text-white shadow-xs"
-                          : "text-neutral-600"
+                          ? "bg-neutral-950 dark:bg-white text-white dark:text-neutral-950 shadow-xs"
+                          : "text-neutral-600 dark:text-neutral-400"
                       }`}
                     >
                       ⇄ Convert Between Wallets
@@ -3179,7 +3533,7 @@ export function PortfolioView({
                     <div>
                       <label
                         htmlFor="send-source-select"
-                        className="block text-xs font-semibold text-neutral-800 mb-1.5"
+                        className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-1.5"
                       >
                         From asset
                       </label>
@@ -3187,7 +3541,7 @@ export function PortfolioView({
                         id="send-source-select"
                         value={sourceDeploymentId}
                         onChange={(e) => setSourceDeploymentId(e.target.value)}
-                        className="w-full rounded-[14px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-neutral-950"
+                        className="w-full rounded-[14px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-3.5 py-2.5 text-xs font-semibold text-neutral-950 dark:text-white"
                       >
                         {MAINNET_SUPPORTED_DEPLOYMENTS.map((d) => (
                           <option key={d.id} value={d.id}>
@@ -3195,7 +3549,7 @@ export function PortfolioView({
                           </option>
                         ))}
                       </select>
-                      <p className="mt-1 text-[11px] text-neutral-500">
+                      <p className="mt-1 text-[11px] text-neutral-500 dark:text-neutral-400">
                         Available:{" "}
                         {sourceObservedBalance?.displayBalance ?? "0"}{" "}
                         {sourceDeployment.symbol}
@@ -3205,7 +3559,7 @@ export function PortfolioView({
                     <div>
                       <label
                         htmlFor="send-dest-select"
-                        className="block text-xs font-semibold text-neutral-800 mb-1.5"
+                        className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-1.5"
                       >
                         To destination asset
                       </label>
@@ -3213,7 +3567,7 @@ export function PortfolioView({
                         id="send-dest-select"
                         value={destDeploymentId}
                         onChange={(e) => setDestDeploymentId(e.target.value)}
-                        className="w-full rounded-[14px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs font-semibold text-neutral-950"
+                        className="w-full rounded-[14px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-3.5 py-2.5 text-xs font-semibold text-neutral-950 dark:text-white"
                       >
                         {MAINNET_SUPPORTED_DEPLOYMENTS.map((d) => (
                           <option key={d.id} value={d.id}>
@@ -3227,7 +3581,7 @@ export function PortfolioView({
                   <div>
                     <label
                       htmlFor="send-amount-input"
-                      className="block text-xs font-semibold text-neutral-800 mb-1.5"
+                      className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-1.5"
                     >
                       Amount ({sourceDeployment.symbol})
                     </label>
@@ -3237,7 +3591,7 @@ export function PortfolioView({
                       value={sendAmount}
                       onChange={(e) => setSendAmount(e.target.value)}
                       placeholder="0.00"
-                      className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 font-display text-lg font-bold text-neutral-950"
+                      className="w-full rounded-[14px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-4 py-3 font-display text-lg font-bold text-neutral-950 dark:text-white"
                     />
                   </div>
 
@@ -3245,7 +3599,7 @@ export function PortfolioView({
                     <div>
                       <label
                         htmlFor="recipient-address-input"
-                        className="block text-xs font-semibold text-neutral-800 mb-1.5"
+                        className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-1.5"
                       >
                         Recipient {destDeployment.networkName} address
                       </label>
@@ -3259,13 +3613,13 @@ export function PortfolioView({
                             (m) => m.family === destDeployment.ecosystem,
                           )?.addressPlaceholder ?? "0x..."
                         }
-                        className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 font-mono text-xs text-neutral-950"
+                        className="w-full rounded-[14px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-4 py-3 font-mono text-xs text-neutral-950 dark:text-white"
                       />
                       {recipientAddress.trim().length > 0 && (
                         <p
                           className={`mt-1.5 text-xs font-medium ${
                             addressValidation.valid
-                              ? "text-emerald-600"
+                              ? "text-emerald-600 dark:text-emerald-400"
                               : "text-[#FF1A1A]"
                           }`}
                         >
@@ -3280,26 +3634,26 @@ export function PortfolioView({
                   <button
                     type="button"
                     disabled
-                    className="w-full rounded-full bg-neutral-200 py-3.5 text-xs font-semibold text-neutral-600 cursor-not-allowed"
+                    className="w-full rounded-full bg-neutral-200 dark:bg-neutral-800 py-3.5 text-xs font-semibold text-neutral-600 dark:text-neutral-400 cursor-not-allowed"
                   >
                     Outgoing Execution Disabled (Safety Gate Active)
                   </button>
                 </div>
 
                 {/* Right Column: Invoices Summary Card (Matches Storyboard Screen 12) */}
-                <div className="lg:col-span-5 rounded-[26px] border border-neutral-200/90 bg-white p-6 shadow-sm space-y-4">
+                <div className="lg:col-span-5 rounded-[26px] border border-neutral-200/90 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 shadow-sm space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
                       <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
                         INVOICES &amp; REQUESTS
                       </span>
-                      <h2 className="font-serif text-xl text-neutral-950">
+                      <h2 className="font-serif text-xl text-neutral-950 dark:text-white">
                         Recent Invoices
                       </h2>
                     </div>
                     <button
                       type="button"
-                      onClick={() => setActiveTab("receive")}
+                      onClick={() => setActiveTab("request")}
                       className="rounded-full bg-[#FF1A1A] px-3.5 py-1.5 text-xs font-semibold text-white"
                     >
                       + New Invoice
@@ -3307,27 +3661,27 @@ export function PortfolioView({
                   </div>
 
                   {paymentRequests.length === 0 ? (
-                    <div className="rounded-[16px] border border-dashed border-neutral-200 bg-neutral-50/70 p-5 text-center text-xs text-neutral-500">
+                    <div className="rounded-[16px] border border-dashed border-neutral-200 dark:border-neutral-800 bg-neutral-50/70 dark:bg-[#1a1a1a] p-5 text-center text-xs text-neutral-500 dark:text-neutral-400">
                       No payment requests or invoices created yet.
                     </div>
                   ) : (
-                    <div className="divide-y divide-neutral-100 text-xs">
+                    <div className="divide-y divide-neutral-100 dark:divide-neutral-800 text-xs">
                       {paymentRequests.slice(0, 4).map((req) => (
                         <div
                           key={req.id}
                           className="py-3 flex items-center justify-between"
                         >
                           <div>
-                            <p className="font-bold text-neutral-950">
+                            <p className="font-bold text-neutral-950 dark:text-white">
                               {req.title}
                             </p>
-                            <p className="text-neutral-500">
+                            <p className="text-neutral-500 dark:text-neutral-400">
                               {req.destinationAssetSymbol} ·{" "}
                               {req.destinationNetwork}
                             </p>
                           </div>
                           <div className="text-right">
-                            <p className="font-display font-bold text-neutral-950">
+                            <p className="font-display font-bold text-neutral-950 dark:text-white">
                               {req.amountMode === "FIXED"
                                 ? `${req.displayAmount} ${req.destinationAssetSymbol}`
                                 : "Open"}
@@ -3335,10 +3689,10 @@ export function PortfolioView({
                             <span
                               className={`text-[10px] font-semibold ${
                                 req.status === "COMPLETED"
-                                  ? "text-emerald-600"
+                                  ? "text-emerald-600 dark:text-emerald-400"
                                   : req.status === "ACTIVE"
-                                    ? "text-amber-600"
-                                    : "text-neutral-500"
+                                    ? "text-amber-600 dark:text-amber-400"
+                                    : "text-neutral-500 dark:text-neutral-400"
                               }`}
                             >
                               {req.status}
@@ -3363,7 +3717,7 @@ export function PortfolioView({
         aria-label="Mobile bottom navigation"
         className="lg:hidden fixed bottom-4 inset-x-4 z-40 rounded-[28px] bg-[#0B0B0B] px-2.5 py-2 text-white shadow-2xl border border-white/10"
       >
-        <div className="grid grid-cols-5 gap-1 items-center">
+        <div className="grid grid-cols-6 gap-1 items-center">
           <button
             type="button"
             onClick={() => setActiveTab("dashboard")}
@@ -3401,6 +3755,19 @@ export function PortfolioView({
           >
             <span>↙</span>
             <span className="mt-0.5">Receive</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("request")}
+            className={`flex flex-col items-center justify-center rounded-[20px] py-2 text-[10px] font-semibold transition-all ${
+              activeTab === "request"
+                ? "bg-[#FF1A1A] text-white shadow-sm"
+                : "text-neutral-400"
+            }`}
+          >
+            <span>🔗</span>
+            <span className="mt-0.5">Request</span>
           </button>
 
           <button

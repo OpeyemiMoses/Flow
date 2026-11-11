@@ -1,3 +1,4 @@
+/* eslint-disable @next/next/no-img-element */
 "use client";
 
 import { useState, useRef, type FormEvent } from "react";
@@ -67,7 +68,7 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
 
   if (codeSent) {
     return (
-      <div className="relative min-h-screen w-full overflow-hidden bg-white text-[#0B0B0B] lg:grid lg:grid-cols-12">
+      <div className="relative h-screen max-h-screen w-full overflow-hidden bg-white text-[#0B0B0B] lg:grid lg:grid-cols-12">
         {/* Mobile Red Diagonal Wave Accent (Matches 08_56_15 PM-1.png) */}
         <div
           aria-hidden="true"
@@ -75,18 +76,18 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
         />
 
         {/* Left Column: Verification Code Form */}
-        <main className="relative z-10 flex min-h-screen flex-col justify-center px-6 py-12 sm:px-14 lg:col-span-6 lg:px-20">
+        <main className="relative z-10 flex h-full flex-col justify-center px-6 py-6 sm:px-12 lg:col-span-6 lg:px-16 overflow-y-auto">
           <div className="mx-auto w-full max-w-[460px]">
             <Link href="/" aria-label="FLOW Home" className="inline-block">
-              <FlowLogo className="h-9 w-auto sm:h-10" />
+              <FlowLogo className="h-8 w-auto sm:h-9" />
             </Link>
 
-            <h1 className="mt-10 font-serif text-[42px] font-normal leading-[1.06] tracking-[-0.025em] text-[#0B0B0B] sm:text-[52px]">
+            <h1 className="mt-6 font-serif text-[34px] sm:text-[44px] font-normal leading-[1.08] tracking-[-0.025em] text-[#0B0B0B]">
               Enter the <br />
               verification code
             </h1>
 
-            <p className="mt-4 max-w-[400px] text-[15px] leading-[1.55] text-[#5A5A5A] sm:text-[16px]">
+            <p className="mt-3 max-w-[400px] text-[14px] leading-[1.5] text-[#5A5A5A] sm:text-[15px]">
               We sent an 8-digit code to your email{" "}
               <span className="font-medium text-[#1F1F1F]">
                 {email || "hello@flow.com"}
@@ -94,7 +95,7 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
               . Enter it below to continue.
             </p>
 
-            <form className="mt-8" onSubmit={verify}>
+            <form className="mt-6" onSubmit={verify}>
               {/* 8-Digit Boxes with Overlaid Accessible Input */}
               <div
                 className="relative"
@@ -178,14 +179,14 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
               <button
                 type="submit"
                 disabled={busy || code.length !== 8}
-                className="mt-7 flex h-14 w-full items-center justify-center gap-2.5 rounded-full bg-[#0B0B0B] text-[15px] font-semibold text-white transition hover:bg-[#1F1F1F] disabled:opacity-50"
+                className="mt-6 flex h-12 sm:h-13 w-full items-center justify-center gap-2.5 rounded-full bg-[#0B0B0B] text-[15px] font-semibold text-white transition hover:bg-[#1F1F1F] disabled:opacity-50"
               >
                 <span>Verify and continue</span>
                 <span aria-hidden="true">→</span>
               </button>
 
               {message && (
-                <div className="mt-4">
+                <div className="mt-3">
                   <Feedback text={message} />
                 </div>
               )}
@@ -194,11 +195,11 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
         </main>
 
         {/* Right Column: 3D Smartphone on Rock with Red Arc (Matches 08_26_06 PM-1.png) */}
-        <aside className="relative hidden min-h-screen overflow-hidden bg-white lg:col-span-6 lg:flex lg:items-end lg:justify-end">
+        <aside className="relative hidden h-screen max-h-screen overflow-hidden bg-white lg:col-span-6 lg:flex lg:items-center lg:justify-center p-3 xl:p-6">
           <img
             src="/assets/otp-phone-rock.png"
             alt="FLOW mobile dashboard on smartphone"
-            className="h-full w-full object-cover object-right-bottom"
+            className="max-h-full max-w-full object-contain"
           />
         </aside>
       </div>
@@ -206,25 +207,25 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
   }
 
   return (
-    <div className="min-h-screen w-full bg-white text-[#0B0B0B] lg:grid lg:grid-cols-12">
+    <div className="h-screen max-h-screen w-full overflow-hidden bg-white text-[#0B0B0B] lg:grid lg:grid-cols-12">
       {/* Left Column: Access Your Flow Account (Matches Flow Passwordless Authentication Mockup.png) */}
-      <main className="flex min-h-screen flex-col justify-center px-6 py-12 sm:px-14 lg:col-span-6 lg:px-20">
+      <main className="flex h-full flex-col justify-center px-6 py-6 sm:px-12 lg:col-span-6 lg:px-16 overflow-y-auto">
         <div className="mx-auto w-full max-w-[440px]">
           <Link href="/" aria-label="FLOW Home" className="inline-block">
-            <FlowLogo className="h-9 w-auto sm:h-10" />
+            <FlowLogo className="h-8 w-auto sm:h-9" />
           </Link>
 
-          <div className="mt-10 flex items-center gap-2 text-[12px] font-semibold uppercase tracking-[0.16em] text-[#555555]">
+          <div className="mt-6 flex items-center gap-2 text-[11px] sm:text-[12px] font-semibold uppercase tracking-[0.16em] text-[#555555]">
             <span>GET STARTED</span>
             <span className="h-[2px] w-4 bg-[#FF1A1A]" />
           </div>
 
-          <h1 className="mt-3 font-serif text-[42px] font-normal leading-[1.06] tracking-[-0.025em] text-[#0B0B0B] sm:text-[52px]">
+          <h1 className="mt-2 font-serif text-[32px] sm:text-[42px] font-normal leading-[1.08] tracking-[-0.025em] text-[#0B0B0B]">
             Access your <br />
             Flow account
           </h1>
 
-          <p className="mt-4 text-[15px] leading-[1.55] text-[#5A5A5A] sm:text-[16px]">
+          <p className="mt-2 text-[14px] leading-[1.5] text-[#5A5A5A] sm:text-[15px]">
             Continue with Google or enter your email to receive a verification
             code.
           </p>
@@ -232,7 +233,7 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
           {issue === "authentication" && (
             <p
               role="status"
-              className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs font-semibold text-amber-900"
+              className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs font-semibold text-amber-900"
             >
               Google sign-in could not be completed. If you already use email,
               sign in with email and link Google from Security.
@@ -241,7 +242,7 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
           {notice === "linked" && (
             <p
               role="status"
-              className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-semibold text-emerald-900"
+              className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-semibold text-emerald-900"
             >
               Google is linked. Sign in again to continue.
             </p>
@@ -249,7 +250,7 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
           {notice === "updated" && (
             <p
               role="status"
-              className="mt-4 rounded-xl border border-neutral-200 bg-neutral-100 px-4 py-3 text-xs font-semibold text-neutral-900"
+              className="mt-3 rounded-xl border border-neutral-200 bg-neutral-100 px-4 py-2.5 text-xs font-semibold text-neutral-900"
             >
               Your security settings were updated. Sign in again.
             </p>
@@ -260,11 +261,11 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
             type="button"
             onClick={google}
             disabled={busy}
-            className="mt-8 flex h-14 w-full items-center justify-center gap-3 rounded-2xl border border-[#E2E2E2] bg-white px-5 text-[15px] font-semibold text-[#0B0B0B] shadow-2xs transition hover:border-[#0B0B0B] disabled:opacity-50"
+            className="mt-4 flex h-12 sm:h-13 w-full items-center justify-center gap-3 rounded-2xl border border-[#E2E2E2] bg-white px-5 text-[14px] sm:text-[15px] font-semibold text-[#0B0B0B] shadow-2xs transition hover:border-[#0B0B0B] disabled:opacity-50"
           >
             <svg
-              width="20"
-              height="20"
+              width="18"
+              height="18"
               viewBox="0 0 24 24"
               fill="none"
               aria-hidden="true"
@@ -290,9 +291,9 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
           </button>
 
           {/* Divider */}
-          <div className="my-6 flex items-center gap-4">
+          <div className="my-3.5 flex items-center gap-4">
             <div className="h-px flex-1 bg-[#EAEAEA]" />
-            <span className="text-[13px] text-[#777777]">or</span>
+            <span className="text-[12px] text-[#777777]">or</span>
             <div className="h-px flex-1 bg-[#EAEAEA]" />
           </div>
 
@@ -305,18 +306,18 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
           >
             <label
               htmlFor="email-input"
-              className="block text-[14px] font-semibold text-[#0B0B0B]"
+              className="block text-[13px] sm:text-[14px] font-semibold text-[#0B0B0B]"
             >
               Email address
             </label>
-            <div className="relative mt-2">
+            <div className="relative mt-1.5">
               <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-4 text-[#666666]">
                 <svg
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
                   strokeWidth="1.8"
-                  className="h-5 w-5"
+                  className="h-4.5 w-4.5"
                 >
                   <rect x="2" y="4" width="20" height="16" rx="3" />
                   <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
@@ -331,11 +332,11 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
                 required
                 maxLength={254}
                 placeholder="Enter your email address"
-                className="h-14 w-full rounded-2xl border border-[#E2E2E2] bg-white pl-12 pr-4 text-[15px] text-[#0B0B0B] placeholder:text-[#888888] focus:border-[#0B0B0B] focus:outline-none"
+                className="h-12 sm:h-13 w-full rounded-2xl border border-[#E2E2E2] bg-white pl-11 pr-4 text-[14px] sm:text-[15px] text-[#0B0B0B] placeholder:text-[#888888] focus:border-[#0B0B0B] focus:outline-none"
               />
             </div>
 
-            <label className="mt-3 flex cursor-pointer items-center gap-2 text-[12px] text-[#666666]">
+            <label className="mt-2.5 flex cursor-pointer items-center gap-2 text-[11px] sm:text-[12px] text-[#666666]">
               <input
                 type="checkbox"
                 checked={recovery}
@@ -349,7 +350,7 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
             <button
               type="submit"
               disabled={busy || !email.trim()}
-              className="mt-5 flex h-14 w-full items-center justify-center gap-2.5 rounded-full bg-[#0B0B0B] text-[15px] font-semibold text-white transition hover:bg-[#1F1F1F] disabled:opacity-50"
+              className="mt-4 flex h-12 sm:h-13 w-full items-center justify-center gap-2.5 rounded-full bg-[#0B0B0B] text-[14px] sm:text-[15px] font-semibold text-white transition hover:bg-[#1F1F1F] disabled:opacity-50"
             >
               <span>Send verification code</span>
               <span aria-hidden="true">→</span>
@@ -357,12 +358,12 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
           </form>
 
           {message && (
-            <div className="mt-4">
+            <div className="mt-3">
               <Feedback text={message} />
             </div>
           )}
 
-          <p className="mt-8 text-center text-[15px] text-[#5A5A5A]">
+          <p className="mt-4 text-center text-[13px] sm:text-[14px] text-[#5A5A5A]">
             Already have an account?{" "}
             <button
               type="button"
@@ -376,11 +377,11 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
       </main>
 
       {/* Right Column: Full-bleed Dark & Red 3D Phone on Rock (Matches Flow Passwordless Authentication Mockup.png) */}
-      <aside className="relative hidden min-h-screen overflow-hidden bg-[#0B0B0B] lg:col-span-6 lg:block">
+      <aside className="relative hidden h-screen max-h-screen overflow-hidden bg-[#070505] lg:col-span-6 lg:flex lg:items-center lg:justify-center p-3 xl:p-6">
         <img
           src="/assets/auth-wallet-phone.png"
           alt="FLOW Crypto Wallet on Smartphone"
-          className="h-full w-full object-cover object-center"
+          className="max-h-full max-w-full object-contain"
         />
       </aside>
     </div>

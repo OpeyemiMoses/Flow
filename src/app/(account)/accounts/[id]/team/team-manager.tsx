@@ -195,7 +195,7 @@ export function TeamManager({
                       (account.role === "OWNER" &&
                         member.role === "ADMIN")) && (
                       <button
-                        className="flow-btn-secondary px-2.5 py-1 text-xs text-red-700 hover:bg-red-50"
+                        className="flow-btn-secondary px-2.5 py-1 text-xs text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40"
                         type="button"
                         disabled={!!change}
                         onClick={() =>

@@ -14,6 +14,7 @@ const VALID_VIEWS: ReadonlySet<WorkspaceTab> = new Set([
   "assets",
   "send",
   "receive",
+  "request",
   "activity",
 ]);
 
