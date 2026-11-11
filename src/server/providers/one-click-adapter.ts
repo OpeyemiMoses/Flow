@@ -499,8 +499,35 @@ export async function fetchOneClickCommittedQuote(params: {
     // 5. Validate Deadline
     // The rate guarantee window is quoteRequest.deadline (approx 15 minutes).
     // The physical deposit address inactivity time is quote.timeWhenInactive (approx 72 hours).
-    const deadline =
-      data.quoteRequest?.deadline ?? payload.deadline ?? data.quote?.deadline;
+    // Apply conservative deadline: pick the earliest valid deadline among candidate provider fields.
+    const validCandidates = [
+      data.quoteRequest?.deadline,
+      payload.deadline,
+      data.quote?.deadline,
+    ].filter(
+      (d): d is string =>
+        typeof d === "string" && !isNaN(new Date(d).getTime()),
+    );
+
+    let earliestDeadlineStr =
+      validCandidates.length > 0
+        ? validCandidates.reduce((earliest, cur) =>
+            new Date(cur).getTime() < new Date(earliest).getTime()
+              ? cur
+              : earliest,
+          )
+        : (data.quoteRequest?.deadline ??
+          payload.deadline ??
+          data.quote?.deadline);
+
+    // If provider semantics remain ambiguous (e.g. only 72h address inactivity was returned),
+    // cap the safe-to-pay rate guarantee window at 15 minutes from now.
+    const maxSafeRateGuaranteeMs = Date.now() + 30 * 60 * 1000;
+    if (new Date(earliestDeadlineStr).getTime() > maxSafeRateGuaranteeMs) {
+      earliestDeadlineStr = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    }
+
+    const deadline = earliestDeadlineStr;
     const timeWhenInactive =
       data.quote?.timeWhenInactive ?? data.quote?.deadline ?? null;
 
