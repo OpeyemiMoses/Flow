@@ -51,6 +51,7 @@ export interface PaymentDepositInstructions {
   readonly sourceTxHash: string | null;
   readonly destinationTxHash: string | null;
   readonly settledAt: string | null;
+  readonly payerRefundAddress?: string | null;
 }
 
 export type QuoteVerificationTier =
@@ -180,7 +181,13 @@ export function validateProviderAtomicAmount(val: unknown): boolean {
 
 export interface IndicativeQuoteFeeBreakdown {
   readonly refundFeeAtomic?: string | null;
+  readonly refundFeeDisplay?: string | null;
+  readonly refundFeeAssetSymbol?: string | null;
   readonly withdrawFeeAtomic?: string | null;
+  readonly withdrawFeeDisplay?: string | null;
+  readonly withdrawFeeAssetSymbol?: string | null;
+  readonly networkGasEstimateDisplay?: string | null;
+  readonly networkGasAssetSymbol?: string | null;
   readonly appFeeBps?: number | null;
   readonly isEstimate: boolean;
   readonly description: string;

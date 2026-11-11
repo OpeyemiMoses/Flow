@@ -474,6 +474,62 @@ export async function requestPaymentQuote(
     destAtomicAmount,
   );
 
+  // 12. Format Human-Readable Fees (Task 4)
+  let refundFeeDisplay: string | null = null;
+  if (dryResult.fees?.refundFeeAtomic) {
+    try {
+      refundFeeDisplay = formatAtomicToDisplay(
+        dryResult.fees.refundFeeAtomic,
+        sourceDeployment.decimals,
+      );
+    } catch {
+      refundFeeDisplay = null;
+    }
+  }
+
+  let withdrawFeeDisplay: string | null = null;
+  if (dryResult.fees?.withdrawFeeAtomic) {
+    try {
+      withdrawFeeDisplay = formatAtomicToDisplay(
+        dryResult.fees.withdrawFeeAtomic,
+        destDeployment.decimals,
+      );
+    } catch {
+      withdrawFeeDisplay = null;
+    }
+  }
+
+  let networkGasEstimateDisplay = "0.000005";
+  let networkGasAssetSymbol = sourceDeployment.symbol;
+  if (sourceDeployment.networkKey === "solana-mainnet") {
+    networkGasEstimateDisplay = "0.000005";
+    networkGasAssetSymbol = "SOL";
+  } else if (sourceDeployment.networkKey === "ethereum-mainnet") {
+    networkGasEstimateDisplay = "0.0008";
+    networkGasAssetSymbol = "ETH";
+  } else if (sourceDeployment.networkKey.startsWith("base")) {
+    networkGasEstimateDisplay = "0.00002";
+    networkGasAssetSymbol = "ETH";
+  } else if (sourceDeployment.networkKey.startsWith("near")) {
+    networkGasEstimateDisplay = "0.0008";
+    networkGasAssetSymbol = "NEAR";
+  }
+
+  const feeParts: string[] = [];
+  if (refundFeeDisplay) {
+    feeParts.push(`Refund fee: ${refundFeeDisplay} ${sourceDeployment.symbol}`);
+  }
+  if (withdrawFeeDisplay) {
+    feeParts.push(
+      `Withdraw fee: ${withdrawFeeDisplay} ${destDeployment.symbol}`,
+    );
+  }
+  const feeDescription =
+    feeParts.length > 0
+      ? feeParts.join("; ")
+      : (dryResult.fees?.description ??
+        "Solver and cross-chain settlement fees included.");
+
   // 13. Record Attempt in PostgreSQL (Untrusted Observation Tier)
   await recordPaymentAttemptRow(db, {
     paymentRequestPublicId: pr.public_id,
@@ -490,7 +546,12 @@ export async function requestPaymentQuote(
     quotedSourceAtomic: sourceAtomicAmount,
     quotedDestinationAtomic: destAtomicAmount,
     estimatedDurationSeconds: dryResult.timeEstimateSeconds ?? null,
-    providerFees: dryResult.fees ?? {},
+    providerFees: {
+      ...dryResult.fees,
+      refundFeeDisplay,
+      withdrawFeeDisplay,
+      description: feeDescription,
+    },
     providerCorrelationId: dryResult.correlationId ?? null,
     providerSignature: dryResult.signature ?? null,
     quoteExpiresAt: localPreviewExpiresAt,
@@ -518,9 +579,18 @@ export async function requestPaymentQuote(
     destinationDisplayAmount: destDisplayAmount,
     estimatedDurationSeconds: dryResult.timeEstimateSeconds ?? null,
     exchangeRateDescription,
-    fees: dryResult.fees ?? {
-      isEstimate: true,
-      description: "Solver and cross-chain settlement fees included.",
+    fees: {
+      refundFeeAtomic: dryResult.fees?.refundFeeAtomic ?? null,
+      refundFeeDisplay,
+      refundFeeAssetSymbol: refundFeeDisplay ? sourceDeployment.symbol : null,
+      withdrawFeeAtomic: dryResult.fees?.withdrawFeeAtomic ?? null,
+      withdrawFeeDisplay,
+      withdrawFeeAssetSymbol: withdrawFeeDisplay ? destDeployment.symbol : null,
+      networkGasEstimateDisplay,
+      networkGasAssetSymbol,
+      appFeeBps: dryResult.fees?.appFeeBps ?? null,
+      isEstimate: dryResult.fees?.isEstimate ?? false,
+      description: feeDescription,
     },
     quoteCreatedAt: now.toISOString(),
     localPreviewExpiresAt: localPreviewExpiresAt.toISOString(),

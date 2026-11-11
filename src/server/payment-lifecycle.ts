@@ -49,6 +49,9 @@ export async function commitPaymentAttempt(
     throw new ApiFailure(400, "INVALID_JSON");
   }
 
+  let committedPayerRefund: string | null =
+    body.payerRefundAddress?.trim() || null;
+
   const { attemptPublicId } = body;
   if (!attemptPublicId || !isValidPaymentAttemptPublicId(attemptPublicId)) {
     if (isFinancialExecutionDisabled()) {
@@ -233,10 +236,9 @@ export async function commitPaymentAttempt(
     }
 
     const isDirect = attempt.source_network === attempt.destination_network;
-    const payerRefund =
-      body.payerRefundAddress?.trim() ||
-      row.payer_refund_address?.trim() ||
-      null;
+    committedPayerRefund =
+      committedPayerRefund || row.payer_refund_address?.trim() || null;
+    const payerRefund = committedPayerRefund;
 
     if (!isDirect) {
       // Task 1: Strict Refund Ownership for cross-chain payments
@@ -504,6 +506,7 @@ export async function commitPaymentAttempt(
     deadlineIso: deadline.toISOString(),
     memo: depositMemo,
     depositAddress,
+    payerRefundAddress: committedPayerRefund,
   };
 
   // Commit via stored procedure with persistence failure reconciliation protection (Task 3)
@@ -601,6 +604,7 @@ export async function commitPaymentAttempt(
     sourceTxHash: null,
     destinationTxHash: null,
     settledAt: null,
+    payerRefundAddress: committedPayerRefund ?? null,
   };
 
   return reply(200, instructions);
@@ -712,6 +716,11 @@ export async function getPaymentAttemptStatus(
     sourceTxHash: row.source_tx_hash,
     destinationTxHash: row.destination_tx_hash,
     settledAt: row.settled_at ? new Date(row.settled_at).toISOString() : null,
+    payerRefundAddress:
+      row.deposit_instructions && typeof row.deposit_instructions === "object"
+        ? (((row.deposit_instructions as Record<string, unknown>)
+            .payerRefundAddress as string) ?? null)
+        : null,
   };
 
   return reply(200, instructions);

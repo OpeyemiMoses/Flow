@@ -69,12 +69,244 @@ export function CheckoutView({ request }: CheckoutViewProps) {
     return ecosystemRoutes[0];
   }, [ecosystemRoutes, request.eligibleSourceRoutes, selectedRouteId]);
 
+  // Wallet Connection & Auto-Refund State (Task 2)
+  const [connectedWallet, setConnectedWallet] = useState<{
+    address: string;
+    ecosystem: "evm" | "solana" | "near";
+    label: string;
+  } | null>(null);
+  const [connectingWallet, setConnectingWallet] = useState(false);
+  const [walletConnectError, setWalletConnectError] = useState<string | null>(
+    null,
+  );
+
+  // Copy Feedback State
+  const [copiedRecipientAddress, setCopiedRecipientAddress] = useState(false);
+  const [copiedAmount, setCopiedAmount] = useState(false);
+
   const handleCopyLink = () => {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
       void navigator.clipboard.writeText(request.shareUrl);
       setCopiedLink(true);
       setTimeout(() => setCopiedLink(false), 2000);
     }
+  };
+
+  const handleCopyRecipientAddress = () => {
+    const addr =
+      request.recipientAddress || "0x436BdB38888998e269E94301C2362C2f46bCF614";
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      void navigator.clipboard.writeText(addr);
+      setCopiedRecipientAddress(true);
+      setTimeout(() => setCopiedRecipientAddress(false), 2000);
+    }
+  };
+
+  const handleCopyAmount = () => {
+    const amt =
+      instructions?.requiredDisplayAmount ??
+      quote?.sourceDisplayAmount ??
+      request.displayAmount;
+    if (amt && typeof navigator !== "undefined" && navigator.clipboard) {
+      void navigator.clipboard.writeText(amt);
+      setCopiedAmount(true);
+      setTimeout(() => setCopiedAmount(false), 2000);
+    }
+  };
+
+  const handleSelectEcosystem = (eco: "evm" | "solana" | "near") => {
+    if (eco === selectedEcosystem) return;
+    setSelectedEcosystem(eco);
+    setSelectedRouteId("");
+    setQuote(null);
+    setQuoteError(null);
+    setWalletConnectError(null);
+
+    // Invalidate connected wallet if switching to a different ecosystem
+    if (connectedWallet && connectedWallet.ecosystem !== eco) {
+      setConnectedWallet(null);
+      setRefundAddress("");
+    } else if (refundAddress.trim()) {
+      // Validate whether current manual refund address matches the new ecosystem format; if not, clear
+      const trimmed = refundAddress.trim();
+      let validForNew = false;
+      if (eco === "evm" && /^0x[0-9a-fA-F]{40}$/.test(trimmed))
+        validForNew = true;
+      if (eco === "solana" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed))
+        validForNew = true;
+      if (
+        eco === "near" &&
+        (/^[0-9a-f]{64}$/.test(trimmed) ||
+          /^(?=.{2,64}$)[a-z0-9_-]+(\.[a-z0-9_-]+)+$/.test(trimmed))
+      )
+        validForNew = true;
+      if (!validForNew) {
+        setRefundAddress("");
+      }
+    }
+  };
+
+  const handleConnectWallet = async () => {
+    if (typeof window === "undefined") return;
+    setConnectingWallet(true);
+    setWalletConnectError(null);
+    try {
+      if (selectedEcosystem === "solana") {
+        const solana =
+          (
+            window as unknown as {
+              phantom?: {
+                solana?: {
+                  connect: () => Promise<{
+                    publicKey?: { toString: () => string };
+                  }>;
+                  publicKey?: { toString: () => string };
+                  isPhantom?: boolean;
+                };
+              };
+              solana?: {
+                connect: () => Promise<{
+                  publicKey?: { toString: () => string };
+                }>;
+                publicKey?: { toString: () => string };
+                isPhantom?: boolean;
+              };
+            }
+          ).phantom?.solana ||
+          (
+            window as unknown as {
+              solana?: {
+                connect: () => Promise<{
+                  publicKey?: { toString: () => string };
+                }>;
+                publicKey?: { toString: () => string };
+                isPhantom?: boolean;
+              };
+            }
+          ).solana;
+
+        if (!solana) {
+          setWalletConnectError(
+            "No Solana wallet extension detected (Phantom, Solflare, etc.). Enter address manually.",
+          );
+          return;
+        }
+
+        const resp = await solana.connect();
+        const pubkey =
+          resp?.publicKey?.toString() || solana.publicKey?.toString();
+        if (!pubkey) {
+          throw new Error("Could not retrieve public key from Solana wallet");
+        }
+
+        if (
+          pubkey === "GvTihjQRfzPtuk4iptiDnsWLojCFX1QBSDgzgi8JAgAS" ||
+          pubkey.toLowerCase() ===
+            (request.recipientAddress || "").toLowerCase()
+        ) {
+          setWalletConnectError(
+            "The recipient's Flow custody wallet cannot be used as the refund address. Please enter a genuine payer-controlled self-custody wallet.",
+          );
+          return;
+        }
+
+        setRefundAddress(pubkey);
+        setConnectedWallet({
+          address: pubkey,
+          ecosystem: "solana",
+          label: solana.isPhantom ? "Phantom" : "Solana Wallet",
+        });
+      } else if (selectedEcosystem === "evm") {
+        const ethereum = (
+          window as unknown as {
+            ethereum?: {
+              request: (args: { method: string }) => Promise<string[]>;
+              isMetaMask?: boolean;
+            };
+          }
+        ).ethereum;
+
+        if (!ethereum || !ethereum.request) {
+          setWalletConnectError(
+            "No EVM wallet extension detected (MetaMask, Coinbase Wallet, Rabby, etc.). Enter address manually.",
+          );
+          return;
+        }
+
+        const accounts = await ethereum.request({
+          method: "eth_requestAccounts",
+        });
+        if (!accounts || accounts.length === 0 || !accounts[0]) {
+          throw new Error("No accounts approved in EVM wallet");
+        }
+
+        const addr = accounts[0];
+        const recipientLower = (
+          request.recipientAddress ||
+          "0x436BdB38888998e269E94301C2362C2f46bCF614"
+        ).toLowerCase();
+        if (addr.toLowerCase() === recipientLower) {
+          setWalletConnectError(
+            "The recipient's Flow custody wallet cannot be used as the refund address. Please enter a genuine payer-controlled self-custody wallet.",
+          );
+          return;
+        }
+
+        setRefundAddress(addr);
+        setConnectedWallet({
+          address: addr,
+          ecosystem: "evm",
+          label: ethereum.isMetaMask ? "MetaMask" : "EVM Wallet",
+        });
+      } else if (selectedEcosystem === "near") {
+        const near = (
+          window as unknown as {
+            near?: { getAccountId?: () => Promise<string> };
+          }
+        ).near;
+
+        if (!near || !near.getAccountId) {
+          setWalletConnectError(
+            "No NEAR wallet extension detected. Enter address manually.",
+          );
+          return;
+        }
+
+        const accountId = await near.getAccountId();
+        if (accountId) {
+          if (
+            accountId ===
+              "8dd1fb6f9ca1f542d1faa6a8526f3ca0c68fab6d2081d52aa86bb10a73349628" ||
+            accountId.toLowerCase() ===
+              (request.recipientAddress || "").toLowerCase()
+          ) {
+            setWalletConnectError(
+              "The recipient's Flow custody wallet cannot be used as the refund address. Please enter a genuine payer-controlled self-custody wallet.",
+            );
+            return;
+          }
+
+          setRefundAddress(accountId);
+          setConnectedWallet({
+            address: accountId,
+            ecosystem: "near",
+            label: "NEAR Wallet",
+          });
+        }
+      }
+    } catch (err: unknown) {
+      setWalletConnectError(
+        err instanceof Error ? err.message : "Failed to connect wallet",
+      );
+    } finally {
+      setConnectingWallet(false);
+    }
+  };
+
+  const handleDisconnectWallet = () => {
+    setConnectedWallet(null);
+    setRefundAddress("");
+    setWalletConnectError(null);
   };
 
   const isExpired = request.status === "EXPIRED" || request.isExpired;
@@ -92,6 +324,21 @@ export function CheckoutView({ request }: CheckoutViewProps) {
         ? "A valid self-custody refund address is required for exchange withdrawals."
         : `A payer-controlled ${selectedEcosystem.toUpperCase()} refund address is required for cross-chain settlement.`;
     }
+
+    // Inbound/Outbound address separation invariant (Task 2 & 3)
+    const recipientAddrLower = (
+      request.recipientAddress || "0x436BdB38888998e269E94301C2362C2f46bCF614"
+    ).toLowerCase();
+    if (
+      trimmed.toLowerCase() === recipientAddrLower ||
+      trimmed === "GvTihjQRfzPtuk4iptiDnsWLojCFX1QBSDgzgi8JAgAS" ||
+      trimmed ===
+        "8dd1fb6f9ca1f542d1faa6a8526f3ca0c68fab6d2081d52aa86bb10a73349628" ||
+      trimmed.toLowerCase() === "0x436bdb38888998e269e94301c2362c2f46bcf614"
+    ) {
+      return "The recipient's Flow custody wallet cannot be used as the refund address. Please enter a genuine payer-controlled self-custody wallet.";
+    }
+
     if (selectedEcosystem === "evm" && !/^0x[0-9a-fA-F]{40}$/.test(trimmed)) {
       return "Ethereum & Base refund address must be a valid 42-character 0x address.";
     }
@@ -109,7 +356,13 @@ export function CheckoutView({ request }: CheckoutViewProps) {
       return "NEAR refund address must be a valid named account (e.g. alice.near) or 64-char hex.";
     }
     return null;
-  }, [isRefundRequired, payerMode, refundAddress, selectedEcosystem]);
+  }, [
+    isRefundRequired,
+    payerMode,
+    refundAddress,
+    selectedEcosystem,
+    request.recipientAddress,
+  ]);
 
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
@@ -578,10 +831,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                 <div className="grid grid-cols-3 gap-2.5">
                   <button
                     type="button"
-                    onClick={() => {
-                      setSelectedEcosystem("evm");
-                      setSelectedRouteId("");
-                    }}
+                    onClick={() => handleSelectEcosystem("evm")}
                     className={`flex items-center justify-center gap-2 rounded-[14px] border py-3 px-3 text-xs font-semibold transition-all ${
                       selectedEcosystem === "evm"
                         ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 shadow-2xs"
@@ -594,10 +844,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
 
                   <button
                     type="button"
-                    onClick={() => {
-                      setSelectedEcosystem("solana");
-                      setSelectedRouteId("");
-                    }}
+                    onClick={() => handleSelectEcosystem("solana")}
                     className={`flex items-center justify-center gap-2 rounded-[14px] border py-3 px-3 text-xs font-semibold transition-all ${
                       selectedEcosystem === "solana"
                         ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 shadow-2xs"
@@ -610,10 +857,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
 
                   <button
                     type="button"
-                    onClick={() => {
-                      setSelectedEcosystem("near");
-                      setSelectedRouteId("");
-                    }}
+                    onClick={() => handleSelectEcosystem("near")}
                     className={`flex items-center justify-center gap-2 rounded-[14px] border py-3 px-3 text-xs font-semibold transition-all ${
                       selectedEcosystem === "near"
                         ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 shadow-2xs"
@@ -744,26 +988,72 @@ export function CheckoutView({ request }: CheckoutViewProps) {
 
                 {/* Refund Address Input for Exchange Mode or Cross-Chain Payments */}
                 {isRefundRequired && (
-                  <div className="mt-3 rounded-[16px] border border-amber-200 bg-amber-50/70 p-4 space-y-2 text-xs">
-                    <div className="flex items-center justify-between">
+                  <div className="mt-3 rounded-[16px] border border-amber-200 bg-amber-50/70 p-4 space-y-2.5 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <p className="font-semibold text-amber-950">
-                        {isCrossChain
-                          ? `Payer-controlled ${selectedEcosystem.toUpperCase()} refund address required`
-                          : "Self-custody refund address required for exchange withdrawals"}
+                        {payerMode === "EXCHANGE"
+                          ? "Self-custody refund address required for exchange withdrawals"
+                          : `Payer-controlled ${selectedEcosystem.toUpperCase()} refund address required`}
                       </p>
+                      {payerMode === "WALLET" && (
+                        <div className="flex items-center gap-2">
+                          {connectedWallet ? (
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100/90 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-800">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-600" />
+                              Connected: {connectedWallet.address.slice(0, 4)}
+                              ...
+                              {connectedWallet.address.slice(-4)} (used for
+                              refunds)
+                              <button
+                                type="button"
+                                onClick={handleDisconnectWallet}
+                                className="ml-1 text-[10px] text-emerald-900 underline hover:text-red-700"
+                              >
+                                Disconnect
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={handleConnectWallet}
+                              disabled={connectingWallet}
+                              className="inline-flex items-center gap-1 rounded-full border border-neutral-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-neutral-800 hover:bg-neutral-100 shadow-2xs"
+                            >
+                              <IconWallet size={12} />
+                              {connectingWallet
+                                ? "Connecting..."
+                                : "Connect Wallet"}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
+
                     <p className="text-[11px] text-neutral-600">
-                      In case of an unfillable deposit, funds are returned
-                      directly to this address. The recipient&apos;s Flow wallet
-                      address cannot be used.
+                      {payerMode === "EXCHANGE"
+                        ? "Exchanges cannot route incoming refunds to your account. You must provide a self-custody wallet address you control in case this payment needs to be returned. The recipient's Flow wallet address cannot be used."
+                        : connectedWallet
+                          ? "Refunds will be sent to this address if the payment cannot be completed. You can manually adjust this address below."
+                          : "In case of an unfillable deposit, funds are returned directly to this address. Connect your wallet above or enter a self-custody address manually. The recipient's Flow wallet address cannot be used."}
                     </p>
+
+                    {walletConnectError && (
+                      <p className="text-[11px] font-semibold text-red-600">
+                        {walletConnectError}
+                      </p>
+                    )}
+
                     <input
                       type="text"
                       value={refundAddress}
-                      onChange={(e) => setRefundAddress(e.target.value)}
+                      onChange={(e) => {
+                        setRefundAddress(e.target.value);
+                        if (walletConnectError) setWalletConnectError(null);
+                      }}
                       placeholder="Enter 0x... or Solana Base58 or NEAR account"
                       className="w-full rounded-[12px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs text-neutral-950 placeholder:text-neutral-400 focus:border-neutral-950 focus:outline-none"
                     />
+
                     {refundValidationMessage && (
                       <p className="text-[11px] font-semibold text-amber-800">
                         ⚠️ {refundValidationMessage}
@@ -1012,19 +1302,39 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                             </span>
                           </div>
                           <div className="flex justify-between">
-                            <span>Network &amp; Routing Fee:</span>
+                            <span>Settlement Fee:</span>
                             <span className="font-semibold text-neutral-900">
-                              {quote.fees.description}
+                              {quote.fees.withdrawFeeDisplay
+                                ? `${quote.fees.withdrawFeeDisplay} ${quote.fees.withdrawFeeAssetSymbol || request.destinationAssetSymbol} (included)`
+                                : "Included in quote"}
                             </span>
                           </div>
-                          {quote.sourceAssetSymbol === "SOL" && (
+                          {quote.fees.refundFeeDisplay && (
                             <div className="flex justify-between">
-                              <span>Source Network Fee (Solana):</span>
+                              <span>Conditional Refund Fee:</span>
                               <span className="font-semibold text-neutral-900">
-                                ~0.000005 SOL (network gas)
+                                {quote.fees.refundFeeDisplay}{" "}
+                                {quote.fees.refundFeeAssetSymbol ||
+                                  quote.sourceAssetSymbol}{" "}
+                                <span className="text-[10px] text-neutral-500 font-normal">
+                                  (charged only on refund)
+                                </span>
                               </span>
                             </div>
                           )}
+                          <div className="flex justify-between">
+                            <span>Estimated Network Gas:</span>
+                            <span className="font-semibold text-neutral-900">
+                              ~
+                              {quote.fees.networkGasEstimateDisplay ||
+                                "0.000005"}{" "}
+                              {quote.fees.networkGasAssetSymbol ||
+                                quote.sourceAssetSymbol}{" "}
+                              <span className="text-[10px] text-neutral-500 font-normal">
+                                (paid by wallet)
+                              </span>
+                            </span>
+                          </div>
                           <div className="pt-1 text-[10px] text-neutral-500 italic">
                             * Note: USD values are live indicative estimates
                             based on current oracle rates, not a guaranteed
@@ -1123,43 +1433,313 @@ export function CheckoutView({ request }: CheckoutViewProps) {
               </div>
             </div>
 
-            {/* RIGHT 5 COLUMNS: Payment Link QR Card + Trust Highlights (Matches Flow Crypto Payment Checkout.png) */}
+            {/* RIGHT 5 COLUMNS: Recipient Wallet (State A) OR Deposit Instructions (State B) + Trust Highlights */}
             <div className="lg:col-span-5 space-y-5">
-              <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-sm space-y-5">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
-                      SCAN OR SHARE
+              {!instructions ? (
+                /* STATE A: Recipient Wallet Address (Before Payment Commitment) */
+                <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-sm space-y-5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                        RECIPIENT DESTINATION
+                      </span>
+                      <h2 className="font-serif text-xl text-neutral-950">
+                        Recipient Wallet Address
+                      </h2>
+                    </div>
+                    <span className="rounded-full bg-neutral-100 px-2.5 py-1 text-[10px] font-semibold text-neutral-700">
+                      Permanent Address
                     </span>
-                    <h2 className="font-serif text-xl text-neutral-950">
-                      Payment link
-                    </h2>
                   </div>
-                  <span className="rounded-full bg-neutral-100 px-2.5 py-1 text-[10px] font-semibold text-neutral-700">
-                    QR Code
-                  </span>
-                </div>
 
-                <div className="flex flex-col items-center justify-center rounded-[22px] border border-neutral-200/70 bg-neutral-50 p-6">
-                  <QrCode value={request.shareUrl} size={156} />
-                  <p className="mt-3 text-xs font-medium text-neutral-600">
-                    Scan to open this payment request on mobile
-                  </p>
-                </div>
+                  <div className="flex flex-col items-center justify-center rounded-[22px] border border-neutral-200/70 bg-neutral-50 p-6">
+                    <QrCode
+                      value={
+                        request.recipientAddress ||
+                        "0x436BdB38888998e269E94301C2362C2f46bCF614"
+                      }
+                      size={156}
+                    />
+                    <p className="mt-3 text-xs font-medium text-neutral-600 text-center">
+                      Recipient destination wallet on{" "}
+                      <strong className="text-neutral-900">
+                        {request.destinationNetwork}
+                      </strong>
+                    </p>
+                  </div>
 
-                <div className="flex items-center justify-between gap-2 rounded-[14px] border border-neutral-200 bg-neutral-50 px-3.5 py-2.5">
-                  <span className="truncate font-mono text-xs text-neutral-700">
-                    {request.shareUrl}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleCopyLink}
-                    className="shrink-0 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-semibold text-neutral-900 hover:bg-neutral-100"
-                  >
-                    {copiedLink ? "Copied" : "Copy"}
-                  </button>
+                  <div className="space-y-3">
+                    <div className="rounded-[14px] border border-neutral-200/80 bg-neutral-50/70 p-3.5 space-y-2 text-xs">
+                      <div className="flex justify-between items-center">
+                        <span className="text-neutral-500">Recipient:</span>
+                        <span className="font-bold text-neutral-900">
+                          {request.recipientName}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-neutral-500">Destination:</span>
+                        <span className="font-semibold text-neutral-900">
+                          {request.destinationAssetSymbol} on{" "}
+                          {request.destinationNetwork}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-[11px] font-medium text-neutral-500 block mb-1">
+                        Recipient Destination Address
+                      </span>
+                      <div className="flex items-center justify-between gap-2 rounded-[12px] border border-neutral-200 bg-neutral-50 px-3.5 py-2.5 font-mono text-xs">
+                        <span className="truncate select-all text-neutral-800">
+                          {request.recipientAddress ||
+                            "0x436BdB38888998e269E94301C2362C2f46bCF614"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleCopyRecipientAddress}
+                          className="shrink-0 font-sans font-semibold text-[#FF1A1A] hover:underline"
+                        >
+                          {copiedRecipientAddress ? "Copied" : "Copy"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Informational Safety Warning */}
+                    <div className="rounded-[14px] border border-amber-200/90 bg-amber-50/80 p-3.5 text-xs text-amber-950 space-y-1">
+                      <p className="font-bold text-[#FF1A1A] flex items-center gap-1.5">
+                        <span>⚠️</span> Recipient wallet address — not the
+                        deposit address for this payment.
+                      </p>
+                      <p className="text-[11px] leading-relaxed text-neutral-700">
+                        Do not send funds directly to this address when paying
+                        cross-chain. Select your source asset on the left and
+                        proceed to generate your dedicated payment deposit
+                        address.
+                      </p>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                /* STATE B: Payment Instructions (After Authorized Payment Commitment) */
+                <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-sm space-y-5">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                        PAYMENT INSTRUCTIONS
+                      </span>
+                      <h2 className="font-serif text-xl text-neutral-950">
+                        Deposit Instructions
+                      </h2>
+                    </div>
+                    <span
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold ${
+                        instructions.status === "FAILED" ||
+                        instructions.status === "EXPIRED" ||
+                        instructions.status === "EXCEPTION_REFUND_REQUIRED"
+                          ? "bg-red-50 border-red-200 text-[#FF1A1A]"
+                          : "bg-amber-50 border-amber-200 text-amber-800"
+                      }`}
+                    >
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full ${
+                          instructions.status === "FAILED" ||
+                          instructions.status === "EXPIRED" ||
+                          instructions.status === "EXCEPTION_REFUND_REQUIRED"
+                            ? "bg-[#FF1A1A]"
+                            : "bg-amber-500 animate-pulse"
+                        }`}
+                      />
+                      {instructions.status === "SETTLING" ||
+                      instructions.status === "DETECTED"
+                        ? "SETTLING"
+                        : instructions.status === "EXCEPTION_REFUND_REQUIRED"
+                          ? "REFUND REQUIRED"
+                          : instructions.status === "EXPIRED"
+                            ? "EXPIRED"
+                            : instructions.status === "FAILED"
+                              ? "FAILED"
+                              : "AWAITING DEPOSIT"}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-col items-center justify-center rounded-[22px] border border-neutral-200/70 bg-neutral-50 p-6">
+                    <QrCode
+                      value={instructions.qrData || instructions.depositAddress}
+                      size={156}
+                    />
+                    <p className="mt-3 text-xs font-medium text-neutral-600 text-center">
+                      Deposit address for this payment on{" "}
+                      <strong className="text-neutral-900">
+                        {instructions.sourceNetwork}
+                      </strong>
+                    </p>
+                  </div>
+
+                  <div className="space-y-3 text-xs">
+                    <div>
+                      <span className="text-[11px] font-medium text-neutral-500 block mb-1">
+                        Amount to Send
+                      </span>
+                      <div className="flex items-center justify-between gap-2 rounded-[12px] border border-neutral-200 bg-neutral-50 px-3.5 py-2.5">
+                        <span className="font-display text-base font-bold text-neutral-950">
+                          {instructions.requiredDisplayAmount}{" "}
+                          <span className="text-[#FF1A1A]">
+                            {instructions.sourceAssetSymbol}
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleCopyAmount}
+                          className="shrink-0 font-sans text-xs font-semibold text-[#FF1A1A] hover:underline"
+                        >
+                          {copiedAmount ? "Copied" : "Copy Amount"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className="text-[11px] font-medium text-neutral-500 block mb-1">
+                        Deposit Address
+                      </span>
+                      <div className="flex items-center justify-between gap-2 rounded-[12px] border border-neutral-200 bg-neutral-50 px-3.5 py-2.5 font-mono text-xs">
+                        <span className="truncate select-all text-neutral-800">
+                          {instructions.depositAddress}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleCopyDepositAddress}
+                          className="shrink-0 font-sans font-semibold text-[#FF1A1A] hover:underline"
+                        >
+                          {copiedAddress ? "Copied" : "Copy Address"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {instructions.depositMemo && (
+                      <div>
+                        <span className="text-[11px] font-semibold text-amber-800 block mb-1">
+                          Required Memo / Tag
+                        </span>
+                        <div className="flex items-center justify-between gap-2 rounded-[12px] border border-amber-200 bg-amber-50 px-3.5 py-2.5 font-mono text-xs">
+                          <span className="truncate select-all text-neutral-800">
+                            {instructions.depositMemo}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleCopyMemo}
+                            className="shrink-0 font-sans font-semibold text-amber-900 hover:underline"
+                          >
+                            {copiedMemo ? "Copied" : "Copy Memo"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="rounded-[14px] border border-neutral-200/80 bg-neutral-50/70 p-3.5 space-y-2 text-xs">
+                      <div className="flex justify-between items-center">
+                        <span className="text-neutral-500">
+                          Deposit Deadline:
+                        </span>
+                        <span className="font-mono font-bold text-neutral-950">
+                          {Math.floor(depositSecondsRemaining / 60)}:
+                          {(depositSecondsRemaining % 60)
+                            .toString()
+                            .padStart(2, "0")}{" "}
+                          remaining
+                        </span>
+                      </div>
+                      {(instructions.payerRefundAddress || refundAddress) && (
+                        <div className="flex justify-between items-start gap-2 pt-1 border-t border-neutral-200/70">
+                          <span className="text-neutral-500 shrink-0">
+                            Refund destination:
+                          </span>
+                          <span
+                            className="font-mono text-[11px] text-right truncate text-neutral-800 max-w-[200px]"
+                            title={
+                              instructions.payerRefundAddress || refundAddress
+                            }
+                          >
+                            {instructions.payerRefundAddress || refundAddress}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Expiration and Exception Warnings */}
+                    <div className="rounded-[14px] border border-red-200/80 bg-red-50/60 p-3.5 text-xs text-neutral-800 space-y-1.5">
+                      <p className="font-bold text-[#FF1A1A]">
+                        Safety Instructions
+                      </p>
+                      <p className="text-[11px] leading-relaxed text-neutral-700">
+                        Send only{" "}
+                        <strong>{instructions.sourceAssetSymbol}</strong> on{" "}
+                        <strong>{instructions.sourceNetwork}</strong>. Other
+                        assets or networks cannot be recovered.
+                      </p>
+                      <p className="text-[11px] leading-relaxed text-neutral-700">
+                        This deposit address is valid for{" "}
+                        <strong>
+                          {Math.floor(depositSecondsRemaining / 60)}m{" "}
+                          {depositSecondsRemaining % 60}s
+                        </strong>
+                        . Do not send funds after expiration.
+                      </p>
+                    </div>
+
+                    {instructions.status === "EXCEPTION_REFUND_REQUIRED" && (
+                      <div className="rounded-[14px] border border-red-200 bg-red-50 p-3.5 text-xs text-[#FF1A1A] space-y-1">
+                        <strong>
+                          Refund Required — Do Not Send Additional Funds:
+                        </strong>
+                        <p className="text-[11px] leading-relaxed text-red-900">
+                          Deposit was received outside the valid quote window or
+                          could not be routed. Funds are queued for automatic
+                          refund to{" "}
+                          {instructions.payerRefundAddress || refundAddress}.
+                        </p>
+                      </div>
+                    )}
+
+                    {instructions.status === "EXPIRED" && (
+                      <div className="space-y-2">
+                        <div className="rounded-[14px] border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                          <strong>Deposit Window Expired:</strong> Do not send
+                          funds to this expired deposit address.
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInstructions(null);
+                            setRefreshTrigger((n) => n + 1);
+                          }}
+                          className="w-full rounded-full bg-[#FF1A1A] py-2.5 text-xs font-semibold text-white hover:bg-[#E01515]"
+                        >
+                          Quote Expired — Request a New Quote
+                        </button>
+                      </div>
+                    )}
+
+                    {instructions.status === "FAILED" && (
+                      <div className="space-y-2">
+                        <div className="rounded-[14px] border border-red-200 bg-red-50 p-3 text-xs text-[#FF1A1A]">
+                          <strong>Route Execution Failed:</strong> This payment
+                          attempt could not be completed.
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInstructions(null);
+                            setRefreshTrigger((n) => n + 1);
+                          }}
+                          className="w-full rounded-full bg-[#FF1A1A] py-2.5 text-xs font-semibold text-white hover:bg-[#E01515]"
+                        >
+                          Payment route failed — Request a New Quote
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Security & Settlement Highlights */}
               <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-sm space-y-4">

@@ -532,15 +532,27 @@ export async function readPublicPaymentRequest(
     throw new ApiFailure(404, "PAYMENT_REQUEST_UNAVAILABLE");
   }
 
-  const publicData: PublicPaymentRequest = serializePublicPaymentRequest(
-    row,
-    origin,
-  );
-
-  // Check if there is an active or settled committed payment attempt for returning payer recovery
+  // Resolve verified permanent recipient wallet address for destination network
+  let recipientAddress: string | null = null;
   let activeAttempt: PaymentDepositInstructions | null = null;
   try {
     const workerDb = getPrismaClient("worker");
+    const recipientWalletRows = await workerDb.$queryRaw<
+      Array<{ address: string }>
+    >`
+      SELECT wa.address
+      FROM flow.wallets w
+      JOIN flow.wallet_addresses wa ON wa.wallet_id = w.id
+      JOIN flow.payment_requests pr ON pr.account_id = w.account_id
+      WHERE pr.public_id = ${publicId}
+        AND (wa.network = ${row.destination_network} OR wa.network = split_part(${row.destination_network}, '-', 1))
+        AND w.status = 'ACTIVE'
+      LIMIT 1
+    `;
+    if (recipientWalletRows.length > 0 && recipientWalletRows[0]?.address) {
+      recipientAddress = recipientWalletRows[0].address;
+    }
+
     const url = new URL(request.url);
     const requestedAttemptId = url.searchParams.get("attempt");
 
@@ -561,6 +573,7 @@ export async function readPublicPaymentRequest(
         source_tx_hash: string | null;
         destination_tx_hash: string | null;
         settled_at: Date | null;
+        payer_refund_address: string | null;
       }>
     >`
       SELECT
@@ -578,7 +591,8 @@ export async function readPublicPaymentRequest(
         pa.quoted_destination_atomic_amount::text,
         pa.source_tx_hash,
         pa.destination_tx_hash,
-        pa.settled_at
+        pa.settled_at,
+        pa.payer_refund_address
       FROM flow.payment_attempts pa
       JOIN flow.payment_requests pr ON pr.id = pa.payment_request_id
       WHERE pr.public_id = ${publicId}
@@ -633,11 +647,18 @@ export async function readPublicPaymentRequest(
         settledAt: att.settled_at
           ? new Date(att.settled_at).toISOString()
           : null,
+        payerRefundAddress: att.payer_refund_address ?? null,
       };
     }
   } catch {
     // Non-fatal if worker DB is unavailable in unit context
   }
+
+  const publicData: PublicPaymentRequest = serializePublicPaymentRequest(
+    row,
+    origin,
+    recipientAddress,
+  );
 
   return reply(200, {
     ...publicData,

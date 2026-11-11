@@ -195,11 +195,12 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
         </main>
 
         {/* Right Column: 3D Smartphone on Rock with Red Arc (Matches 08_26_06 PM-1.png) */}
-        <aside className="relative hidden h-screen max-h-screen overflow-hidden bg-white lg:col-span-6 lg:flex lg:items-center lg:justify-center p-3 xl:p-6">
+        <aside className="relative hidden h-screen max-h-screen overflow-hidden bg-white lg:col-span-6 lg:flex lg:items-center lg:justify-center p-4 xl:p-8">
           <img
             src="/assets/otp-phone-rock.png"
             alt="FLOW mobile dashboard on smartphone"
-            className="max-h-full max-w-full object-contain"
+            className="max-h-full max-w-full w-auto h-auto object-contain"
+            style={{ maxHeight: "calc(100vh - 2rem)" }}
           />
         </aside>
       </div>
@@ -377,11 +378,12 @@ export function SignIn({ issue, notice }: { issue?: string; notice?: string }) {
       </main>
 
       {/* Right Column: Full-bleed Dark & Red 3D Phone on Rock (Matches Flow Passwordless Authentication Mockup.png) */}
-      <aside className="relative hidden h-screen max-h-screen overflow-hidden bg-[#070505] lg:col-span-6 lg:flex lg:items-center lg:justify-center p-3 xl:p-6">
+      <aside className="relative hidden h-screen max-h-screen overflow-hidden bg-[#070505] lg:col-span-6 lg:flex lg:items-center lg:justify-center p-4 xl:p-8">
         <img
           src="/assets/auth-wallet-phone.png"
           alt="FLOW Crypto Wallet on Smartphone"
-          className="max-h-full max-w-full object-contain"
+          className="max-h-full max-w-full w-auto h-auto object-contain"
+          style={{ maxHeight: "calc(100vh - 2rem)" }}
         />
       </aside>
     </div>

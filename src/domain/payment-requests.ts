@@ -86,6 +86,7 @@ export interface PublicPaymentRequest {
   readonly payerMemoRequired: boolean;
   readonly isExpired: boolean;
   readonly eligibleSourceRoutes: readonly EligibleSourceRoute[];
+  readonly recipientAddress?: string | null;
   readonly activeAttempt?: PaymentDepositInstructions | null;
 }
 
@@ -155,6 +156,7 @@ export interface PublicPaymentRequestDbRow {
 export function serializePublicPaymentRequest(
   row: PublicPaymentRequestDbRow,
   origin: string,
+  recipientAddress?: string | null,
 ): PublicPaymentRequest {
   const expiresAtDate = row.expires_at ? new Date(row.expires_at) : null;
   const isExpired = expiresAtDate !== null && expiresAtDate <= new Date();
@@ -192,6 +194,7 @@ export function serializePublicPaymentRequest(
     payerMemoRequired: row.payer_memo_required,
     isExpired,
     eligibleSourceRoutes,
+    recipientAddress: recipientAddress ?? null,
   };
 }
 
