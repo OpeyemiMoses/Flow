@@ -294,6 +294,7 @@ export async function fetchOneClickDryQuote(params: {
 
 export interface OneClickCommittedQuoteResult {
   readonly ok: boolean;
+  readonly isTimeout?: boolean;
   readonly depositAddress?: string;
   readonly depositMemo?: string | null;
   readonly depositDeadline?: string;
@@ -526,6 +527,7 @@ export async function fetchOneClickCommittedQuote(params: {
       (err.name === "AbortError" || err.message.includes("abort"));
     return {
       ok: false,
+      isTimeout,
       errorMessage: isTimeout
         ? "Provider committed quote request timed out."
         : "Failed to connect to route provider for committed quote.",
@@ -534,14 +536,15 @@ export async function fetchOneClickCommittedQuote(params: {
 }
 
 export type OneClickExecutionStage =
+  | "PENDING_DEPOSIT"
   | "SOURCE_DEPOSIT_OBSERVED"
   | "SOURCE_FINALIZED"
   | "ROUTING_IN_PROGRESS"
+  | "INCOMPLETE_DEPOSIT"
   | "DESTINATION_TRANSFER_OBSERVED"
   | "DESTINATION_FINALIZED"
   | "FAILED"
-  | "REFUNDED"
-  | "PENDING_DEPOSIT";
+  | "REFUNDED";
 
 export interface OneClickExecutionStatusResult {
   readonly ok: boolean;
@@ -601,10 +604,12 @@ export async function fetchOneClickExecutionStatus(params: {
     const rawStatus = String(data.status || "").toUpperCase();
 
     let stage: OneClickExecutionStage = "PENDING_DEPOSIT";
-    if (
+    if (rawStatus === "PENDING_DEPOSIT" || rawStatus === "PENDING") {
+      stage = "PENDING_DEPOSIT";
+    } else if (
+      rawStatus === "KNOWN_DEPOSIT_TX" ||
       rawStatus === "DEPOSIT_DETECTED" ||
-      rawStatus === "DETECTED" ||
-      rawStatus === "PENDING"
+      rawStatus === "DETECTED"
     ) {
       stage = "SOURCE_DEPOSIT_OBSERVED";
     } else if (
@@ -618,6 +623,11 @@ export async function fetchOneClickExecutionStatus(params: {
       rawStatus === "ROUTING_IN_PROGRESS"
     ) {
       stage = "ROUTING_IN_PROGRESS";
+    } else if (
+      rawStatus === "INCOMPLETE_DEPOSIT" ||
+      rawStatus === "UNDERPAID"
+    ) {
+      stage = "INCOMPLETE_DEPOSIT";
     } else if (
       rawStatus === "DESTINATION_TRANSFER_OBSERVED" ||
       rawStatus === "SUBMITTED"

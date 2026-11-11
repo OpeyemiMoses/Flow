@@ -36,7 +36,13 @@ export interface MonitoredAttemptRecord {
 
 export interface ProviderExecutionEvidence {
   readonly status:
-    "PENDING" | "DETECTED" | "ROUTING" | "SETTLED" | "FAILED" | "REFUNDED";
+    | "PENDING"
+    | "DETECTED"
+    | "ROUTING"
+    | "INCOMPLETE_DEPOSIT"
+    | "SETTLED"
+    | "FAILED"
+    | "REFUNDED";
   readonly sourceTxHash?: string;
   readonly destinationTxHash?: string;
   readonly failureReason?: string;
@@ -193,6 +199,8 @@ export class PaymentMonitoringWorker {
       WHERE status = 'DEPOSIT_COMMITTED'
         AND deposit_deadline IS NOT NULL
         AND deposit_deadline < CURRENT_TIMESTAMP
+        AND source_tx_hash IS NULL
+        AND exception_status = 'NONE'
         AND NOT EXISTS (
           SELECT 1 FROM flow.payment_verifications pv
           WHERE pv.payment_attempt_id = flow.payment_attempts.id
@@ -294,6 +302,15 @@ export class PaymentMonitoringWorker {
         return {
           status: "REFUNDED",
           failureReason: "1Click issued refund",
+          sourceTxHash: statusRes.sourceTxHash,
+          rawEvidence: statusRes.rawResponse,
+        };
+      }
+
+      if (statusRes.stage === "INCOMPLETE_DEPOSIT") {
+        return {
+          status: "INCOMPLETE_DEPOSIT",
+          failureReason: "1Click reported incomplete/underpaid deposit",
           sourceTxHash: statusRes.sourceTxHash,
           rawEvidence: statusRes.rawResponse,
         };
@@ -486,6 +503,21 @@ export class PaymentMonitoringWorker {
           status = 'EXCEPTION_REFUND_REQUIRED',
           exception_status = 'LATE_DEPOSIT_REFUND_REQUIRED',
           settlement_error = ${evidence.failureReason ?? "Provider issued refund for deposit."},
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ${attempt.id}::uuid
+      `;
+      this.exceptionCount++;
+      return { transitioned: true, newStatus: "EXCEPTION_REFUND_REQUIRED" };
+    }
+
+    if (evidence.status === "INCOMPLETE_DEPOSIT") {
+      await this.workerDb.$executeRaw`
+        UPDATE flow.payment_attempts
+        SET
+          status = 'EXCEPTION_REFUND_REQUIRED',
+          exception_status = 'UNDERPAID_REFUND_REQUIRED',
+          source_tx_hash = COALESCE(${evidence.sourceTxHash ?? null}, source_tx_hash),
+          settlement_error = ${evidence.failureReason ?? "Provider reported INCOMPLETE_DEPOSIT: Payer deposited less than required amount. Safe provider refund required."},
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ${attempt.id}::uuid
       `;

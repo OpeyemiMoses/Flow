@@ -131,6 +131,27 @@ export async function requestPaymentQuote(
     throw new ApiFailure(400, "PAYMENT_REQUEST_EXPIRED");
   }
 
+  // Task 1: Strict Refund Ownership - Payer refund address cannot be any address owned by the recipient
+  if (refundAddress && refundAddress.trim().length > 0) {
+    const trimmedRefund = refundAddress.trim().toLowerCase();
+    const recipientWallets = await db.$queryRaw<Array<{ address: string }>>`
+      SELECT wa.address
+      FROM flow.wallet_addresses wa
+      JOIN flow.wallets w ON w.id = wa.wallet_id
+      JOIN flow.payment_requests pr_req ON pr_req.account_id = w.account_id
+      WHERE pr_req.public_id = ${publicId}
+    `;
+    const isRecipientAddress = recipientWallets.some(
+      (w) => w.address.trim().toLowerCase() === trimmedRefund,
+    );
+    if (isRecipientAddress) {
+      throw new ApiFailure(
+        400,
+        "PAYER_REFUND_ADDRESS_CANNOT_BE_RECIPIENT: The payer refund address cannot be the recipient's wallet address. A distinct payer-controlled refund address is strictly required.",
+      );
+    }
+  }
+
   // 6. Resolve destination token deployment with strict exact catalog match (Requirement 4)
   const destDeployment = CURATED_SUPPORTED_DEPLOYMENTS.find(
     (d) =>

@@ -78,13 +78,19 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   };
 
   const isExpired = request.status === "EXPIRED" || request.isExpired;
+  const isCrossChain = activeRoute
+    ? activeRoute.networkKey !== request.destinationNetwork
+    : false;
+  const isRefundRequired = payerMode === "EXCHANGE" || isCrossChain;
 
-  // Validate refund address in Exchange mode
+  // Validate refund address in Exchange mode or for cross-chain settlements
   const refundValidationMessage = useMemo(() => {
-    if (payerMode !== "EXCHANGE") return null;
+    if (!isRefundRequired) return null;
     const trimmed = refundAddress.trim();
     if (!trimmed) {
-      return "A valid self-custody refund address is required for exchange withdrawals.";
+      return isCrossChain
+        ? `A payer-controlled ${selectedEcosystem.toUpperCase()} refund address is required for cross-chain settlement.`
+        : "A valid self-custody refund address is required for exchange withdrawals.";
     }
     if (selectedEcosystem === "evm" && !/^0x[0-9a-fA-F]{40}$/.test(trimmed)) {
       return "Ethereum & Base refund address must be a valid 42-character 0x address.";
@@ -103,7 +109,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
       return "NEAR refund address must be a valid named account (e.g. alice.near) or 64-char hex.";
     }
     return null;
-  }, [payerMode, refundAddress, selectedEcosystem]);
+  }, [isCrossChain, isRefundRequired, refundAddress, selectedEcosystem]);
 
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
@@ -111,7 +117,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   useEffect(() => {
     if (instructions || !activeRoute || isExpired) return;
 
-    if (payerMode === "EXCHANGE" && refundValidationMessage) {
+    if (isRefundRequired && refundValidationMessage) {
       return;
     }
 
@@ -175,6 +181,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
     customAmount,
     instructions,
     isExpired,
+    isRefundRequired,
     payerMode,
     refundAddress,
     refundValidationMessage,
@@ -253,6 +260,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           attemptPublicId: quote.attemptPublicId,
+          payerRefundAddress: refundAddress.trim() || undefined,
         }),
       });
       const data = await res.json();
@@ -730,18 +738,32 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                   </button>
                 </div>
 
-                {/* Refund Address Input for Exchange Mode */}
-                {payerMode === "EXCHANGE" && (
+                {/* Refund Address Input for Exchange Mode or Cross-Chain Payments */}
+                {isRefundRequired && (
                   <div className="mt-3 rounded-[16px] border border-amber-200 bg-amber-50/70 p-4 space-y-2 text-xs">
-                    <p className="font-semibold text-amber-950">
-                      Self-custody refund address required for exchange
-                      withdrawals
+                    <div className="flex items-center justify-between">
+                      <p className="font-semibold text-amber-950">
+                        {isCrossChain
+                          ? `Payer-controlled ${selectedEcosystem.toUpperCase()} refund address required`
+                          : "Self-custody refund address required for exchange withdrawals"}
+                      </p>
+                    </div>
+                    <p className="text-[11px] text-neutral-600">
+                      In case of an unfillable deposit, funds are returned
+                      directly to this address. The recipient&apos;s Flow wallet
+                      address cannot be used.
                     </p>
                     <input
                       type="text"
                       value={refundAddress}
                       onChange={(e) => setRefundAddress(e.target.value)}
-                      placeholder="Enter 0x... or Solana Base58 or NEAR account"
+                      placeholder={
+                        selectedEcosystem === "solana"
+                          ? "Enter your Solana Base58 address"
+                          : selectedEcosystem === "near"
+                            ? "Enter your NEAR account (e.g. payer.near)"
+                            : "Enter your 0x... address"
+                      }
                       className="w-full rounded-[12px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs text-neutral-950 placeholder:text-neutral-400 focus:border-neutral-950 focus:outline-none"
                     />
                     {refundValidationMessage && (
@@ -997,6 +1019,25 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                               {quote.fees.description}
                             </span>
                           </div>
+                          {quote.sourceAssetSymbol === "SOL" && (
+                            <div className="flex justify-between">
+                              <span>Source Network Fee (Solana):</span>
+                              <span className="font-semibold text-neutral-900">
+                                ~0.000005 SOL (network gas)
+                              </span>
+                            </div>
+                          )}
+                          <div className="pt-1 text-[10px] text-neutral-500 italic">
+                            * Note: USD values are live indicative estimates
+                            based on current oracle rates, not a guaranteed
+                            maximum. Payer authorization is bounded strictly in{" "}
+                            {quote.sourceAssetSymbol} atomic units (
+                            {quote.sourceAtomicAmount}{" "}
+                            {quote.sourceAssetSymbol === "SOL"
+                              ? "lamports"
+                              : "atomic units"}
+                            ).
+                          </div>
                           <div className="flex justify-between items-center pt-1.5 border-t border-neutral-200/70">
                             <span>Quote refreshes in:</span>
                             <div className="flex items-center gap-2">
@@ -1057,12 +1098,14 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                         committing ||
                         !quote ||
                         quote.routeStatus !== "SUPPORTED_AND_QUOTABLE" ||
+                        (isRefundRequired && !!refundValidationMessage) ||
                         (quote.isExecutionDisabled ?? true)
                       }
                       className={`w-full rounded-full py-3.5 px-6 text-xs sm:text-sm font-semibold transition-all ${
                         !committing &&
                         quote &&
                         quote.routeStatus === "SUPPORTED_AND_QUOTABLE" &&
+                        (!isRefundRequired || !refundValidationMessage) &&
                         !quote.isExecutionDisabled
                           ? "bg-[#FF1A1A] hover:bg-[#E01515] text-white cursor-pointer shadow-md"
                           : "bg-neutral-950 text-white/90 opacity-85 cursor-not-allowed"

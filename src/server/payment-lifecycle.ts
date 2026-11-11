@@ -21,6 +21,7 @@ import { ApiFailure, reply } from "./http.ts";
 
 export interface CommitPaymentAttemptInput {
   readonly attemptPublicId: string;
+  readonly payerRefundAddress?: string;
 }
 
 /**
@@ -231,14 +232,103 @@ export async function commitPaymentAttempt(
       }
     }
 
-    // 2. Strict Rehearsal Authorization & Execution Guardrail (Blocker 2 & 3)
-    if (isFinancialExecutionDisabled()) {
-      const quotedAmtStr =
-        attempt.quoted_destination_atomic_amount ??
-        attempt.quoted_source_atomic_amount ??
-        "0";
+    const isDirect = attempt.source_network === attempt.destination_network;
+    const payerRefund =
+      body.payerRefundAddress?.trim() ||
+      row.payer_refund_address?.trim() ||
+      null;
 
-      const authConsumption = await db.$queryRaw<
+    if (!isDirect) {
+      // Task 1: Strict Refund Ownership for cross-chain payments
+      if (
+        !payerRefund ||
+        payerRefund.length === 0 ||
+        isBannedIllustrativeAddress(payerRefund)
+      ) {
+        throw new ApiFailure(
+          400,
+          "PAYER_REFUND_ADDRESS_REQUIRED: A valid payer refund address is strictly required before committing a cross-chain payment. Illustrative and synthetic probe addresses are prohibited.",
+        );
+      }
+
+      // Check against all recipient OutLayer wallet addresses
+      const recipientWallets = await db.$queryRaw<Array<{ address: string }>>`
+        SELECT wa.address
+        FROM flow.wallet_addresses wa
+        JOIN flow.wallets w ON w.id = wa.wallet_id
+        JOIN flow.payment_requests pr ON pr.account_id = w.account_id
+        WHERE pr.public_id = ${publicId}
+      `;
+      const isRecipientAddress = recipientWallets.some(
+        (w) => w.address.trim().toLowerCase() === payerRefund.toLowerCase(),
+      );
+      if (isRecipientAddress) {
+        throw new ApiFailure(
+          400,
+          "PAYER_REFUND_ADDRESS_CANNOT_BE_RECIPIENT: The payer refund address cannot be the recipient's wallet address. A distinct payer-controlled refund address is strictly required.",
+        );
+      }
+
+      // Validate format per source ecosystem
+      if (
+        attempt.source_network.toLowerCase().includes("solana") &&
+        !isValidSolanaAddress(payerRefund)
+      ) {
+        throw new ApiFailure(
+          400,
+          "PAYER_REFUND_ADDRESS_INVALID: Source network is Solana but refund address is not a valid Solana address.",
+        );
+      }
+      if (
+        (attempt.source_network.toLowerCase().includes("base") ||
+          attempt.source_network.toLowerCase().includes("ethereum")) &&
+        !isValidEvmAddress(payerRefund)
+      ) {
+        throw new ApiFailure(
+          400,
+          "PAYER_REFUND_ADDRESS_INVALID: Source network is EVM but refund address is not a valid EVM address.",
+        );
+      }
+      if (
+        attempt.source_network.toLowerCase().includes("near") &&
+        !isValidNearAddress(payerRefund)
+      ) {
+        throw new ApiFailure(
+          400,
+          "PAYER_REFUND_ADDRESS_INVALID: Source network is NEAR but refund address is not a valid NEAR address.",
+        );
+      }
+
+      // Update attempt payer refund address if updated in commit body
+      if (
+        body.payerRefundAddress &&
+        body.payerRefundAddress.trim() !== row.payer_refund_address
+      ) {
+        await db.$executeRaw`
+          UPDATE flow.payment_attempts
+          SET payer_refund_address = ${payerRefund}, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ${attempt.id}::uuid
+        `;
+      }
+    }
+
+    // 2. Strict Rehearsal Authorization & Execution Guardrail (Blocker 2 & 3)
+    let authConsumption: Array<{
+      res_auth_id: string;
+      res_operator_auth_id: string;
+      res_max_atomic_amount: string;
+      res_consumed_at: Date;
+    }> = [];
+
+    if (isFinancialExecutionDisabled()) {
+      // Task 2: For cross-chain payment, bind the maximum authorized amount in source atomic units (lamports for SOL)
+      const quotedAmtStr = !isDirect
+        ? (attempt.quoted_source_atomic_amount ?? "0")
+        : (attempt.quoted_destination_atomic_amount ??
+          attempt.quoted_source_atomic_amount ??
+          "0");
+
+      authConsumption = await db.$queryRaw<
         Array<{
           res_auth_id: string;
           res_operator_auth_id: string;
@@ -255,7 +345,7 @@ export async function commitPaymentAttempt(
           ${attempt.destination_network},
           ${row.destination_asset_id},
           ${quotedAmtStr}::numeric,
-          ${row.payer_refund_address},
+          ${payerRefund},
           ${recipientAddress}
         )
       `.catch((err: unknown) => {
@@ -271,73 +361,77 @@ export async function commitPaymentAttempt(
       }
     }
 
-    const isDirect = attempt.source_network === attempt.destination_network;
     if (isDirect) {
       depositAddress = recipientAddress;
     } else {
-      // Cross-chain 1Click committed quote path (Requirements 1, 2, 3)
-      if (
-        !row.payer_refund_address ||
-        row.payer_refund_address.trim().length === 0 ||
-        isBannedIllustrativeAddress(row.payer_refund_address)
-      ) {
-        throw new ApiFailure(
-          400,
-          "PAYER_REFUND_ADDRESS_REQUIRED: A valid payer refund address is strictly required before committing a cross-chain payment. Illustrative and synthetic probe addresses are prohibited.",
-        );
-      }
-
-      if (
-        attempt.source_network.toLowerCase().includes("solana") &&
-        !isValidSolanaAddress(row.payer_refund_address)
-      ) {
-        throw new ApiFailure(
-          400,
-          "PAYER_REFUND_ADDRESS_INVALID: Source network is Solana but refund address is not a valid Solana address.",
-        );
-      }
-      if (
-        (attempt.source_network.toLowerCase().includes("base") ||
-          attempt.source_network.toLowerCase().includes("ethereum")) &&
-        !isValidEvmAddress(row.payer_refund_address)
-      ) {
-        throw new ApiFailure(
-          400,
-          "PAYER_REFUND_ADDRESS_INVALID: Source network is EVM but refund address is not a valid EVM address.",
-        );
-      }
-      if (
-        attempt.source_network.toLowerCase().includes("near") &&
-        !isValidNearAddress(row.payer_refund_address)
-      ) {
-        throw new ApiFailure(
-          400,
-          "PAYER_REFUND_ADDRESS_INVALID: Source network is NEAR but refund address is not a valid NEAR address.",
-        );
-      }
-
       const sourceOneClickId = resolveOneClickAssetId(attempt.source_asset_id);
       const destOneClickId = resolveOneClickAssetId(row.destination_asset_id);
       if (!sourceOneClickId || !destOneClickId) {
         throw new ApiFailure(400, "UNSUPPORTED_ONE_CLICK_ASSET_PAIR");
       }
 
-      const committedRes = await fetchOneClickCommittedQuote({
-        originAsset: sourceOneClickId,
-        destinationAsset: destOneClickId,
-        swapType: "EXACT_OUTPUT",
-        amountAtomic:
-          attempt.quoted_destination_atomic_amount ??
-          attempt.quoted_source_atomic_amount ??
-          "0",
-        refundTo: row.payer_refund_address,
-        recipient: recipientAddress,
-      });
+      // Task 3: Remote commit timeout & persistence safety
+      let committedRes: Awaited<ReturnType<typeof fetchOneClickCommittedQuote>>;
+      try {
+        committedRes = await fetchOneClickCommittedQuote({
+          originAsset: sourceOneClickId,
+          destinationAsset: destOneClickId,
+          swapType: "EXACT_OUTPUT",
+          amountAtomic:
+            attempt.quoted_destination_atomic_amount ??
+            attempt.quoted_source_atomic_amount ??
+            "0",
+          refundTo: payerRefund!,
+          recipient: recipientAddress,
+        });
+      } catch (dispatchErr: unknown) {
+        await db.$executeRaw`
+          UPDATE flow.payment_attempts
+          SET
+            status = 'RECONCILIATION_REQUIRED',
+            settlement_error = ${`RECONCILIATION_REQUIRED: Provider commitment dispatch failed or timed out: ${dispatchErr instanceof Error ? dispatchErr.message : String(dispatchErr)}. Duplicate commitment blocked.`},
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ${attempt.id}::uuid
+        `;
+        throw new ApiFailure(
+          504,
+          "COMMIT_TIMEOUT_RECONCILIATION_REQUIRED: Provider committed quote request timed out or network error. Payment attempt marked RECONCILIATION_REQUIRED to prevent duplicate commitment.",
+        );
+      }
 
       if (!committedRes.ok || !committedRes.depositAddress) {
+        if (committedRes.isTimeout) {
+          await db.$executeRaw`
+            UPDATE flow.payment_attempts
+            SET
+              status = 'RECONCILIATION_REQUIRED',
+              provider_correlation_id = COALESCE(${committedRes.correlationId ?? null}, provider_correlation_id),
+              settlement_error = 'RECONCILIATION_REQUIRED: Provider committed quote timed out. Duplicate commitment blocked.',
+              updated_at = CURRENT_TIMESTAMP
+            WHERE id = ${attempt.id}::uuid
+          `;
+          throw new ApiFailure(
+            504,
+            "COMMIT_TIMEOUT_RECONCILIATION_REQUIRED: Provider committed quote timed out. Payment attempt marked RECONCILIATION_REQUIRED to prevent duplicate commitment.",
+          );
+        }
         throw new ApiFailure(
           400,
           committedRes.errorMessage ?? "PROVIDER_COMMITTED_QUOTE_FAILED",
+        );
+      }
+
+      // Task 2: Exact payer cost cap enforcement against authorized max bound
+      if (
+        committedRes.amountInAtomic &&
+        authConsumption.length > 0 &&
+        authConsumption[0]!.res_max_atomic_amount &&
+        BigInt(committedRes.amountInAtomic) >
+          BigInt(authConsumption[0]!.res_max_atomic_amount)
+      ) {
+        throw new ApiFailure(
+          403,
+          `COMMITTED_QUOTE_EXCEEDS_AUTHORIZED_MAX_BOUND: Fresh committed source amount ${committedRes.amountInAtomic} exceeds approved limit of ${authConsumption[0]!.res_max_atomic_amount} atomic units.`,
         );
       }
 
@@ -345,6 +439,9 @@ export async function commitPaymentAttempt(
       depositMemo = committedRes.depositMemo ?? null;
       if (committedRes.depositDeadline) {
         deadline = new Date(committedRes.depositDeadline);
+      }
+      if (committedRes.amountInAtomic) {
+        attempt.quoted_source_atomic_amount = committedRes.amountInAtomic;
       }
     }
   }
@@ -367,28 +464,59 @@ export async function commitPaymentAttempt(
     depositAddress,
   };
 
-  // Commit via stored procedure
-  const commitRows = await db.$queryRaw<
-    Array<{
-      id: string;
-      attempt_public_id: string;
-      status: string;
-      deposit_address: string;
-      deposit_memo: string | null;
-      deposit_deadline: Date;
-      deposit_instructions: Record<string, unknown>;
-      updated_at: Date;
-    }>
-  >`
-    SELECT *
-    FROM flow.commit_payment_attempt(
-      ${attemptPublicId},
-      ${depositAddress},
-      ${depositMemo},
-      ${deadline},
-      ${JSON.stringify(depositInstructionsPayload)}::jsonb
-    )
-  `;
+  // Commit via stored procedure with persistence failure reconciliation protection (Task 3)
+  let commitRows: Array<{
+    id: string;
+    attempt_public_id: string;
+    status: string;
+    deposit_address: string;
+    deposit_memo: string | null;
+    deposit_deadline: Date;
+    deposit_instructions: Record<string, unknown>;
+    updated_at: Date;
+  }>;
+
+  try {
+    commitRows = await db.$queryRaw<
+      Array<{
+        id: string;
+        attempt_public_id: string;
+        status: string;
+        deposit_address: string;
+        deposit_memo: string | null;
+        deposit_deadline: Date;
+        deposit_instructions: Record<string, unknown>;
+        updated_at: Date;
+      }>
+    >`
+      SELECT *
+      FROM flow.commit_payment_attempt(
+        ${attemptPublicId},
+        ${depositAddress},
+        ${depositMemo},
+        ${deadline},
+        ${JSON.stringify(depositInstructionsPayload)}::jsonb
+      )
+    `;
+  } catch (dbErr: unknown) {
+    await db.$executeRaw`
+      UPDATE flow.payment_attempts
+      SET
+        status = 'RECONCILIATION_REQUIRED',
+        deposit_address = ${depositAddress},
+        deposit_memo = ${depositMemo},
+        deposit_deadline = ${deadline},
+        deposit_instructions = ${JSON.stringify(depositInstructionsPayload)}::jsonb,
+        settlement_error = ${`RECONCILIATION_REQUIRED: Provider created deposit address but local persistence failed: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}. Duplicate commitment blocked.`},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${attempt.id}::uuid
+    `.catch(() => {});
+
+    throw new ApiFailure(
+      500,
+      "COMMIT_PERSISTENCE_FAILED_RECONCILIATION_REQUIRED: Provider issued deposit address but local persistence failed. Attempt marked RECONCILIATION_REQUIRED to block duplicate commitment.",
+    );
+  }
 
   if (commitRows.length === 0) {
     throw new ApiFailure(500, "COMMIT_FAILED");
