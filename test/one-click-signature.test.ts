@@ -159,6 +159,7 @@ test("one-click-adapter: fetchOneClickCommittedQuote validates cryptographic sig
 
   try {
     // 1. Success case: fully signed, valid schema and matching parameters
+    const deadlineIso = new Date(Date.now() + 1200_000).toISOString();
     const rawQuote = {
       quoteRequest: {
         dry: false,
@@ -172,14 +173,15 @@ test("one-click-adapter: fetchOneClickCommittedQuote validates cryptographic sig
         refundType: "ORIGIN_CHAIN",
         recipient: validRequest.recipient,
         recipientType: "DESTINATION_CHAIN",
-        deadline: new Date(Date.now() + 1200_000).toISOString(),
+        deadline: deadlineIso,
       },
       quote: {
         amountIn: "10050000",
         amountOut: "10000000",
         depositAddress: "0x3333333333333333333333333333333333333333",
         depositMemo: "memo-test-123",
-        deadline: new Date(Date.now() + 1200_000).toISOString(),
+        deadline: deadlineIso,
+        timeWhenInactive: new Date(Date.now() + 72 * 3600_000).toISOString(),
         timeEstimate: 25,
       },
       timestamp: new Date().toISOString(),

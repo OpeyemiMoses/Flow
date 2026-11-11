@@ -500,8 +500,13 @@ export async function fetchOneClickCommittedQuote(params: {
 
     const memo =
       data.depositMemo ?? data.quote?.depositMemo ?? data.quote?.memo ?? null;
+    const maxSafeRateGuaranteeMs = Date.now() + 30 * 60 * 1000;
     const timeWhenInactive =
-      data.quote?.timeWhenInactive ?? data.quote?.deadline ?? null;
+      data.quote?.timeWhenInactive ??
+      (data.quote?.deadline &&
+      new Date(data.quote.deadline).getTime() > maxSafeRateGuaranteeMs
+        ? data.quote.deadline
+        : null);
 
     // 5. Validate Provider-Authenticated Payment Deadline
     // Require a valid, unexpired, provider-authenticated payment deadline with verified semantics.
@@ -558,7 +563,6 @@ export async function fetchOneClickCommittedQuote(params: {
 
     // Verified semantics check:
     // Rate guarantee window must be short-lived (<= 30 minutes from now) and distinct from physical address inactivity lifetime (~72h).
-    const maxSafeRateGuaranteeMs = Date.now() + 30 * 60 * 1000;
     const inactiveMs = timeWhenInactive
       ? new Date(timeWhenInactive).getTime()
       : NaN;
