@@ -1499,17 +1499,26 @@ test("FLOW desktop brand UI: multi-chain routing, curated asset registry, worksp
     );
     await snap(page, "06-send-and-convert.png");
 
-    // 6. Receive & Payment Links view
+    // 6. Receive & Payment Links view (Separated Receive and Request Payment)
     await page
       .getByRole("button", { name: /^Receive$/ })
       .first()
       .click();
-    await page
-      .getByRole("heading", { name: /Receive\s*\/\s*Create Payment Link/i })
-      .waitFor();
-    await snap(page, "07-receive-and-links.png");
+    await page.getByRole("heading", { name: /^Receive$/i }).waitFor();
+    await snap(page, "07-receive.png");
     await page.setViewportSize({ width: 390, height: 844 });
-    await snap(page, "07-receive-and-links-mobile.png");
+    await snap(page, "07-receive-mobile.png");
+    await page.setViewportSize({ width: 1440, height: 900 });
+
+    // Verify dedicated Request Payment view
+    await page
+      .getByRole("button", { name: /^Request$/ })
+      .first()
+      .click();
+    await page.getByRole("heading", { name: /^Request Payment$/i }).waitFor();
+    await snap(page, "07-request-payment.png");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await snap(page, "07-request-payment-mobile.png");
     await page.setViewportSize({ width: 1440, height: 900 });
 
     // 7. Activity & Audit view
