@@ -1688,9 +1688,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
 
                     {instructions.status === "EXCEPTION_REFUND_REQUIRED" && (
                       <div className="rounded-[14px] border border-red-200 bg-red-50 p-3.5 text-xs text-[#FF1A1A] space-y-1">
-                        <strong>
-                          Refund Required — Do Not Send Additional Funds:
-                        </strong>
+                        <strong>Refund Pending:</strong>
                         <p className="text-[11px] leading-relaxed text-red-900">
                           Deposit was received outside the valid quote window or
                           could not be routed. Funds are queued for automatic
