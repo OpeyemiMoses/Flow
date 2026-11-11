@@ -2,6 +2,7 @@ import { FlowError } from "../../foundation/errors.ts";
 import { log } from "../../foundation/logger.ts";
 import { getPrismaClient, type FlowDb } from "../../foundation/prisma.ts";
 import { isValidTransactionHash } from "../../domain/ledger.ts";
+import { CURATED_SUPPORTED_DEPLOYMENTS } from "../../domain/supported-assets-catalog.ts";
 import {
   recordVerificationInDatabase,
   verifyOnChainTransfer,
@@ -220,12 +221,26 @@ export class PaymentMonitoringWorker {
   }
 
   /**
-   * Resolves token contract address from flow.network_assets if fungible token.
+   * Resolves token contract address from curated catalog or flow.network_assets if fungible token.
    */
   private async resolveTokenContract(
     network: string,
     assetId: string,
   ): Promise<string | null> {
+    if (assetId.startsWith("0x")) {
+      return assetId;
+    }
+    const deployment = CURATED_SUPPORTED_DEPLOYMENTS.find(
+      (d) =>
+        d.id === assetId ||
+        (d.networkKey === network &&
+          (d.symbol.toUpperCase() === assetId.toUpperCase() ||
+            d.assetKey.toUpperCase() === assetId.toUpperCase())),
+    );
+    if (deployment?.contractIdentifier) {
+      return deployment.contractIdentifier;
+    }
+
     const normNet =
       network.split("-")[0]?.toLowerCase() ?? network.toLowerCase();
     const symbol = assetId.includes(":") ? assetId.split(":")[1] : assetId;
@@ -237,6 +252,7 @@ export class PaymentMonitoringWorker {
       JOIN flow.assets a ON a.id = na.asset_id
       WHERE (na.network = ${normNet} OR na.network = ${network})
         AND (upper(a.symbol) = upper(${symbol}) OR na.contract_address = ${assetId})
+      ORDER BY na.created_at DESC
       LIMIT 1
     `;
     return rows[0]?.contract_address ?? null;
@@ -256,7 +272,10 @@ export class PaymentMonitoringWorker {
       JOIN flow.payment_requests pr ON pr.account_id = w.account_id
       JOIN flow.payment_attempts pa ON pa.payment_request_id = pr.id
       WHERE pa.id = ${paymentAttemptId}::uuid
-        AND wa.network = ${destinationNetwork}
+        AND (
+          wa.network = ${destinationNetwork}
+          OR wa.network = split_part(${destinationNetwork}, '-', 1)
+        )
       LIMIT 1
     `;
 
@@ -648,9 +667,9 @@ export class PaymentMonitoringWorker {
       }
 
       const existingDest = await this.workerDb.$queryRaw<
-        Array<{ finality: string }>
+        Array<{ id: string; finality: string }>
       >`
-        SELECT finality
+        SELECT id, finality
         FROM flow.payment_verifications
         WHERE payment_attempt_id = ${attempt.id}::uuid
           AND verification_type = 'DESTINATION_SETTLEMENT'
@@ -658,8 +677,11 @@ export class PaymentMonitoringWorker {
         LIMIT 1
       `;
 
-      if (existingDest.length > 0) {
-        destFinalized = existingDest[0]!.finality === "FINALIZED";
+      if (
+        existingDest.length > 0 &&
+        existingDest[0]!.finality === "FINALIZED"
+      ) {
+        destFinalized = true;
       } else {
         const registeredRecipient = await this.getRecipientRegisteredAddress(
           attempt.id,

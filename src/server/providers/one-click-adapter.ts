@@ -722,16 +722,43 @@ export async function fetchOneClickExecutionStatus(params: {
       stage = "FAILED";
     }
 
+    const swapDetails = data.swapDetails as Record<string, unknown> | undefined;
+
     const sourceTx =
       (data.sourceTxHash as string) ||
       (data.depositTxHash as string) ||
       (data.originTxHash as string) ||
+      (Array.isArray(swapDetails?.originChainTxHashes) &&
+      typeof (swapDetails.originChainTxHashes[0] as Record<string, unknown>)
+        ?.hash === "string"
+        ? ((swapDetails.originChainTxHashes[0] as Record<string, unknown>)
+            .hash as string)
+        : undefined) ||
+      (Array.isArray(data.originChainTxHashes) &&
+      typeof (data.originChainTxHashes[0] as Record<string, unknown>)?.hash ===
+        "string"
+        ? ((data.originChainTxHashes[0] as Record<string, unknown>)
+            .hash as string)
+        : undefined) ||
       undefined;
 
     const destTx =
       (data.destinationTxHash as string) ||
       (data.payoutTxHash as string) ||
       (data.targetTxHash as string) ||
+      (Array.isArray(swapDetails?.destinationChainTxHashes) &&
+      typeof (
+        swapDetails.destinationChainTxHashes[0] as Record<string, unknown>
+      )?.hash === "string"
+        ? ((swapDetails.destinationChainTxHashes[0] as Record<string, unknown>)
+            .hash as string)
+        : undefined) ||
+      (Array.isArray(data.destinationChainTxHashes) &&
+      typeof (data.destinationChainTxHashes[0] as Record<string, unknown>)
+        ?.hash === "string"
+        ? ((data.destinationChainTxHashes[0] as Record<string, unknown>)
+            .hash as string)
+        : undefined) ||
       undefined;
 
     const refundTx = (data.refundTxHash as string) || undefined;

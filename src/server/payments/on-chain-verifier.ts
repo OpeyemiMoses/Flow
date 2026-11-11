@@ -169,20 +169,26 @@ export async function verifyEvmTransfer(
   // Check canonical finalized block height if supported
   let isCanonicallyFinalized = false;
   try {
-    const finalizedRes = await callJsonRpc<{ number: string } | null>(
-      params.rpcUrl,
-      "eth_getBlockByNumber",
-      ["finalized", false],
-      options,
-    );
-    if (finalizedRes.response.result?.number) {
-      const finalizedHeight = BigInt(finalizedRes.response.result.number);
-      if (txBlock <= finalizedHeight) {
-        isCanonicallyFinalized = true;
+    const tagsToCheck = params.network.includes("base")
+      ? ["safe", "finalized"]
+      : ["finalized"];
+    for (const tag of tagsToCheck) {
+      const blockRes = await callJsonRpc<{ number: string } | null>(
+        params.rpcUrl,
+        "eth_getBlockByNumber",
+        [tag, false],
+        options,
+      );
+      if (blockRes.response.result?.number) {
+        const finalizedHeight = BigInt(blockRes.response.result.number);
+        if (txBlock <= finalizedHeight) {
+          isCanonicallyFinalized = true;
+          break;
+        }
       }
     }
   } catch {
-    // Ignore unsupported "finalized" block tag on certain L2s/mocks
+    // Ignore unsupported block tags on certain L2s/mocks
   }
 
   const requiredConfs = BigInt(
