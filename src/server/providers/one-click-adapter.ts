@@ -295,6 +295,7 @@ export async function fetchOneClickDryQuote(params: {
 export interface OneClickCommittedQuoteResult {
   readonly ok: boolean;
   readonly isTimeout?: boolean;
+  readonly isAmbiguousDeadline?: boolean;
   readonly depositAddress?: string;
   readonly depositMemo?: string | null;
   readonly depositDeadline?: string;
@@ -306,6 +307,7 @@ export interface OneClickCommittedQuoteResult {
   readonly signature?: string;
   readonly quoteTimestamp?: string | null;
   readonly errorMessage?: string;
+  readonly rawResponse?: unknown;
 }
 
 /**
@@ -496,52 +498,90 @@ export async function fetchOneClickCommittedQuote(params: {
       };
     }
 
-    // 5. Validate Deadline
-    // The rate guarantee window is quoteRequest.deadline (approx 15 minutes).
-    // The physical deposit address inactivity time is quote.timeWhenInactive (approx 72 hours).
-    // Apply conservative deadline: pick the earliest valid deadline among candidate provider fields.
-    const validCandidates = [
-      data.quoteRequest?.deadline,
-      payload.deadline,
-      data.quote?.deadline,
-    ].filter(
-      (d): d is string =>
-        typeof d === "string" && !isNaN(new Date(d).getTime()),
-    );
-
-    let earliestDeadlineStr =
-      validCandidates.length > 0
-        ? validCandidates.reduce((earliest, cur) =>
-            new Date(cur).getTime() < new Date(earliest).getTime()
-              ? cur
-              : earliest,
-          )
-        : (data.quoteRequest?.deadline ??
-          payload.deadline ??
-          data.quote?.deadline);
-
-    // If provider semantics remain ambiguous (e.g. only 72h address inactivity was returned),
-    // cap the safe-to-pay rate guarantee window at 15 minutes from now.
-    const maxSafeRateGuaranteeMs = Date.now() + 30 * 60 * 1000;
-    if (new Date(earliestDeadlineStr).getTime() > maxSafeRateGuaranteeMs) {
-      earliestDeadlineStr = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    }
-
-    const deadline = earliestDeadlineStr;
+    const memo =
+      data.depositMemo ?? data.quote?.depositMemo ?? data.quote?.memo ?? null;
     const timeWhenInactive =
       data.quote?.timeWhenInactive ?? data.quote?.deadline ?? null;
 
-    const deadlineMs = new Date(deadline).getTime();
-    if (isNaN(deadlineMs) || deadlineMs <= Date.now()) {
+    // 5. Validate Provider-Authenticated Payment Deadline
+    // Require a valid, unexpired, provider-authenticated payment deadline with verified semantics.
+    // Do NOT manufacture a 15-minute deadline when provider returns only a 72-hour deposit-address
+    // inactivity timestamp or otherwise ambiguous deadline fields.
+    const quoteRequestDeadline = data.quoteRequest?.deadline;
+
+    if (!quoteRequestDeadline || typeof quoteRequestDeadline !== "string") {
       return {
         ok: false,
+        isAmbiguousDeadline: true,
+        depositAddress: depositAddress.trim(),
+        depositMemo: memo ? memo.trim() : null,
+        timeWhenInactive,
+        correlationId: data.correlationId,
+        signature: data.signature,
+        quoteTimestamp: data.timestamp ?? null,
+        rawResponse: data,
         errorMessage:
-          "Committed quote deadline has already expired or is malformed.",
+          "PROVIDER_DEADLINE_ABSENT: Provider committed quote does not include a verified rate-guarantee deadline in quoteRequest.deadline.",
       };
     }
 
-    const memo =
-      data.depositMemo ?? data.quote?.depositMemo ?? data.quote?.memo ?? null;
+    const deadlineMs = new Date(quoteRequestDeadline).getTime();
+    if (isNaN(deadlineMs)) {
+      return {
+        ok: false,
+        isAmbiguousDeadline: true,
+        depositAddress: depositAddress.trim(),
+        depositMemo: memo ? memo.trim() : null,
+        timeWhenInactive,
+        correlationId: data.correlationId,
+        signature: data.signature,
+        quoteTimestamp: data.timestamp ?? null,
+        rawResponse: data,
+        errorMessage: `PROVIDER_DEADLINE_INVALID: Provider quoteRequest.deadline '${quoteRequestDeadline}' is not a valid ISO timestamp.`,
+      };
+    }
+
+    if (deadlineMs <= Date.now()) {
+      return {
+        ok: false,
+        isAmbiguousDeadline: true,
+        depositAddress: depositAddress.trim(),
+        depositMemo: memo ? memo.trim() : null,
+        timeWhenInactive,
+        correlationId: data.correlationId,
+        signature: data.signature,
+        quoteTimestamp: data.timestamp ?? null,
+        rawResponse: data,
+        errorMessage: `PROVIDER_DEADLINE_EXPIRED: Provider quoteRequest.deadline '${quoteRequestDeadline}' has already passed.`,
+      };
+    }
+
+    // Verified semantics check:
+    // Rate guarantee window must be short-lived (<= 30 minutes from now) and distinct from physical address inactivity lifetime (~72h).
+    const maxSafeRateGuaranteeMs = Date.now() + 30 * 60 * 1000;
+    const inactiveMs = timeWhenInactive
+      ? new Date(timeWhenInactive).getTime()
+      : NaN;
+
+    if (
+      deadlineMs > maxSafeRateGuaranteeMs ||
+      (!isNaN(inactiveMs) && deadlineMs >= inactiveMs)
+    ) {
+      return {
+        ok: false,
+        isAmbiguousDeadline: true,
+        depositAddress: depositAddress.trim(),
+        depositMemo: memo ? memo.trim() : null,
+        timeWhenInactive,
+        correlationId: data.correlationId,
+        signature: data.signature,
+        quoteTimestamp: data.timestamp ?? null,
+        rawResponse: data,
+        errorMessage: `PROVIDER_DEADLINE_AMBIGUOUS: Provider quoteRequest.deadline '${quoteRequestDeadline}' exceeds safe rate-guarantee window or conflates with address inactivity lifetime (${timeWhenInactive}).`,
+      };
+    }
+
+    const deadline = quoteRequestDeadline;
 
     return {
       ok: true,
@@ -555,6 +595,7 @@ export async function fetchOneClickCommittedQuote(params: {
       correlationId: data.correlationId,
       signature: data.signature,
       quoteTimestamp: data.timestamp ?? null,
+      rawResponse: data,
     };
   } catch (err: unknown) {
     const isTimeout =

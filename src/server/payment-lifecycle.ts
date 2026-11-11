@@ -418,6 +418,34 @@ export async function commitPaymentAttempt(
             "COMMIT_TIMEOUT_RECONCILIATION_REQUIRED: Provider committed quote timed out. Payment attempt marked RECONCILIATION_REQUIRED to prevent duplicate commitment.",
           );
         }
+
+        // If the provider returned a deposit address remotely or deadline validation failed,
+        // quarantine the attempt to protect funds and block duplicate commitments:
+        if (committedRes.depositAddress || committedRes.isAmbiguousDeadline) {
+          await db.$executeRaw`
+            UPDATE flow.payment_attempts
+            SET
+              status = 'RECONCILIATION_REQUIRED',
+              deposit_address = NULL,
+              provider_correlation_id = COALESCE(${committedRes.correlationId ?? null}, provider_correlation_id),
+              financial_evidence = ${JSON.stringify({
+                rawResponse: committedRes.rawResponse ?? null,
+                quarantineReason: committedRes.errorMessage,
+                remoteDepositAddressDerived: Boolean(
+                  committedRes.depositAddress,
+                ),
+                timeWhenInactive: committedRes.timeWhenInactive ?? null,
+              })}::jsonb,
+              settlement_error = ${`RECONCILIATION_REQUIRED: Remotely committed quote failed deadline/security validation (${committedRes.errorMessage}). Deposit address suppressed to protect funds.`},
+              updated_at = CURRENT_TIMESTAMP
+            WHERE id = ${attempt.id}::uuid
+          `;
+          throw new ApiFailure(
+            422,
+            `COMMIT_VALIDATION_FAILED_QUARANTINED: ${committedRes.errorMessage}. Attempt quarantined in RECONCILIATION_REQUIRED to prevent duplicate commitment.`,
+          );
+        }
+
         throw new ApiFailure(
           400,
           committedRes.errorMessage ?? "PROVIDER_COMMITTED_QUOTE_FAILED",

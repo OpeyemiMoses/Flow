@@ -208,7 +208,7 @@ describe("one-click-adapter: execution status lifecycle stages", () => {
     }
   });
 
-  it("applies conservative deadline when provider rate guarantee semantics are ambiguous or only address lifetime is returned", async () => {
+  it("fails closed when provider rate guarantee deadline is absent or only address lifetime is returned", async () => {
     const timeWhenInactive = new Date(
       Date.now() + 72 * 60 * 60 * 1000,
     ).toISOString();
@@ -232,7 +232,7 @@ describe("one-click-adapter: execution status lifecycle stages", () => {
               amount: "1000000",
               refundTo: "Ck7JNaqjS9otRa72z8AxmP8YKdheiC42AacJGoP3AJRY",
               recipient: "0x436BdB38888998e269E94301C2362C2f46bCF614",
-              // quoteRequest.deadline is deliberately omitted to simulate ambiguous provider semantics
+              // quoteRequest.deadline is deliberately omitted to simulate absent rate-guarantee deadline
             },
             signature: "sig123",
           }),
@@ -263,26 +263,95 @@ describe("one-click-adapter: execution status lifecycle stages", () => {
         skipSignatureVerification: true,
       });
 
-      assert.equal(res.ok, true);
+      assert.equal(
+        res.ok,
+        false,
+        "Must fail closed without manufacturing a fake deadline!",
+      );
+      assert.equal(res.isAmbiguousDeadline, true);
       assert.equal(
         res.depositAddress,
         "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
-      );
-      assert.ok(
-        res.depositDeadline,
-        "Deposit deadline must be generated conservatively",
-      );
-      const deadlineMs = new Date(res.depositDeadline!).getTime();
-      const nowMs = Date.now();
-      // Must be capped within 16 minutes from now, definitely NOT 72 hours
-      assert.ok(
-        deadlineMs > nowMs && deadlineMs <= nowMs + 16 * 60 * 1000,
-        `Deadline (${res.depositDeadline}) must be conservatively capped within 15 minutes of commitment!`,
+        "Must capture remotely allocated deposit address for quarantine",
       );
       assert.equal(
         res.timeWhenInactive,
         timeWhenInactive,
         "timeWhenInactive remains preserved for physical address lifetime monitoring",
+      );
+      assert.ok(
+        res.errorMessage?.includes("PROVIDER_DEADLINE_ABSENT"),
+        `Error message must indicate deadline was absent: ${res.errorMessage}`,
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  it("fails closed when quoteRequest.deadline conflates with 72h address inactivity lifetime", async () => {
+    const timeWhenInactive = new Date(
+      Date.now() + 72 * 60 * 60 * 1000,
+    ).toISOString();
+
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url!, `http://${req.headers.host}`);
+      if (url.pathname === "/v0/quote") {
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            depositAddress: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+            quote: {
+              amountIn: "11977245",
+              amountOut: "1000000",
+              deadline: timeWhenInactive,
+              timeWhenInactive: timeWhenInactive,
+            },
+            quoteRequest: {
+              originAsset: "solana:sol",
+              destinationAsset: "base:usdc",
+              amount: "1000000",
+              refundTo: "Ck7JNaqjS9otRa72z8AxmP8YKdheiC42AacJGoP3AJRY",
+              recipient: "0x436BdB38888998e269E94301C2362C2f46bCF614",
+              deadline: timeWhenInactive, // Ambiguously set to 72h address lifetime
+            },
+            signature: "sig123",
+          }),
+        );
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    const apiBase = `http://127.0.0.1:${port}`;
+
+    try {
+      const { fetchOneClickCommittedQuote } =
+        await import("../src/server/providers/one-click-adapter.ts");
+      const res = await fetchOneClickCommittedQuote({
+        originAsset: "solana:sol",
+        destinationAsset: "base:usdc",
+        swapType: "EXACT_OUTPUT",
+        amountAtomic: "1000000",
+        refundTo: "Ck7JNaqjS9otRa72z8AxmP8YKdheiC42AacJGoP3AJRY",
+        recipient: "0x436BdB38888998e269E94301C2362C2f46bCF614",
+        apiBase,
+        skipSignatureVerification: true,
+      });
+
+      assert.equal(
+        res.ok,
+        false,
+        "Must fail closed on ambiguous 72-hour deadline!",
+      );
+      assert.equal(res.isAmbiguousDeadline, true);
+      assert.ok(
+        res.errorMessage?.includes("PROVIDER_DEADLINE_AMBIGUOUS"),
+        `Error message must indicate ambiguous deadline: ${res.errorMessage}`,
       );
     } finally {
       server.close();

@@ -232,9 +232,16 @@ globalThis.fetch = async (input, init) => {
         timeEstimate: 30,
         refundFee: "0",
         withdrawFee: "0",
-        deadline: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        deadline: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString(),
+        timeWhenInactive: new Date(
+          Date.now() + 72 * 60 * 60 * 1000,
+        ).toISOString(),
       },
-      quoteRequest: body,
+      quoteRequest: {
+        ...body,
+        deadline:
+          body.deadline || new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      },
       signature: "0x1clickfixturesignature",
       timestamp: new Date().toISOString(),
       correlationId: "fixture-1click-corr-id",
