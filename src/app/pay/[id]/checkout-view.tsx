@@ -88,9 +88,9 @@ export function CheckoutView({ request }: CheckoutViewProps) {
     if (!isRefundRequired) return null;
     const trimmed = refundAddress.trim();
     if (!trimmed) {
-      return isCrossChain
-        ? `A payer-controlled ${selectedEcosystem.toUpperCase()} refund address is required for cross-chain settlement.`
-        : "A valid self-custody refund address is required for exchange withdrawals.";
+      return payerMode === "EXCHANGE"
+        ? "A valid self-custody refund address is required for exchange withdrawals."
+        : `A payer-controlled ${selectedEcosystem.toUpperCase()} refund address is required for cross-chain settlement.`;
     }
     if (selectedEcosystem === "evm" && !/^0x[0-9a-fA-F]{40}$/.test(trimmed)) {
       return "Ethereum & Base refund address must be a valid 42-character 0x address.";
@@ -109,7 +109,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
       return "NEAR refund address must be a valid named account (e.g. alice.near) or 64-char hex.";
     }
     return null;
-  }, [isCrossChain, isRefundRequired, refundAddress, selectedEcosystem]);
+  }, [isRefundRequired, payerMode, refundAddress, selectedEcosystem]);
 
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
@@ -761,13 +761,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                       type="text"
                       value={refundAddress}
                       onChange={(e) => setRefundAddress(e.target.value)}
-                      placeholder={
-                        selectedEcosystem === "solana"
-                          ? "Enter your Solana Base58 address"
-                          : selectedEcosystem === "near"
-                            ? "Enter your NEAR account (e.g. payer.near)"
-                            : "Enter your 0x... address"
-                      }
+                      placeholder="Enter 0x... or Solana Base58 or NEAR account"
                       className="w-full rounded-[12px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs text-neutral-950 placeholder:text-neutral-400 focus:border-neutral-950 focus:outline-none"
                     />
                     {refundValidationMessage && (

@@ -421,8 +421,10 @@ export async function commitPaymentAttempt(
       }
 
       // Task 2: Exact payer cost cap enforcement
-      // 1. SOL atomic units (lamports) cap: bound source lamports to owner approved ceiling (0.015 SOL = 15,000,000 lamports)
-      const MAX_APPROVED_SOL_LAMPORTS = 15_000_000n;
+      // 1. SOL atomic units (lamports) cap: bound source lamports to owner approved ceiling (default 0.1 SOL = 100,000,000 lamports, or FLOW_MAX_SOL_LAMPORTS)
+      const MAX_APPROVED_SOL_LAMPORTS = BigInt(
+        process.env.FLOW_MAX_SOL_LAMPORTS ?? "100000000",
+      );
       if (
         attempt.source_network === "solana-mainnet" &&
         committedRes.amountInAtomic &&
@@ -430,7 +432,7 @@ export async function commitPaymentAttempt(
       ) {
         throw new ApiFailure(
           403,
-          `PAYER_COST_EXCEEDS_APPROVED_LIMIT: Fresh committed source amount ${committedRes.amountInAtomic} lamports exceeds owner approved limit of ${MAX_APPROVED_SOL_LAMPORTS} lamports (~0.015 SOL).`,
+          `PAYER_COST_EXCEEDS_APPROVED_LIMIT: Fresh committed source amount ${committedRes.amountInAtomic} lamports exceeds owner approved limit of ${MAX_APPROVED_SOL_LAMPORTS} lamports.`,
         );
       }
 
