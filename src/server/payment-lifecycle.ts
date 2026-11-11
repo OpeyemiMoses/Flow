@@ -321,12 +321,11 @@ export async function commitPaymentAttempt(
     }> = [];
 
     if (isFinancialExecutionDisabled()) {
-      // Task 2: For cross-chain payment, bind the maximum authorized amount in source atomic units (lamports for SOL)
-      const quotedAmtStr = !isDirect
-        ? (attempt.quoted_source_atomic_amount ?? "0")
-        : (attempt.quoted_destination_atomic_amount ??
-          attempt.quoted_source_atomic_amount ??
-          "0");
+      // Stored authorization bounds destination settlement amount (e.g. 5,000,000 USDC)
+      const quotedAmtStr =
+        attempt.quoted_destination_atomic_amount ??
+        attempt.quoted_source_atomic_amount ??
+        "0";
 
       authConsumption = await db.$queryRaw<
         Array<{
@@ -421,17 +420,34 @@ export async function commitPaymentAttempt(
         );
       }
 
-      // Task 2: Exact payer cost cap enforcement against authorized max bound
+      // Task 2: Exact payer cost cap enforcement
+      // 1. SOL atomic units (lamports) cap: bound source lamports to owner approved ceiling (0.015 SOL = 15,000,000 lamports)
+      const MAX_APPROVED_SOL_LAMPORTS = 15_000_000n;
       if (
+        attempt.source_network === "solana-mainnet" &&
         committedRes.amountInAtomic &&
+        BigInt(committedRes.amountInAtomic) > MAX_APPROVED_SOL_LAMPORTS
+      ) {
+        throw new ApiFailure(
+          403,
+          `PAYER_COST_EXCEEDS_APPROVED_LIMIT: Fresh committed source amount ${committedRes.amountInAtomic} lamports exceeds owner approved limit of ${MAX_APPROVED_SOL_LAMPORTS} lamports (~0.015 SOL).`,
+        );
+      }
+
+      // 2. Bound destination amount against rehearsal authorization max bound (e.g. 5,000,000 USDC)
+      const committedDestAtomic =
+        committedRes.amountOutAtomic ??
+        attempt.quoted_destination_atomic_amount;
+      if (
+        committedDestAtomic &&
         authConsumption.length > 0 &&
         authConsumption[0]!.res_max_atomic_amount &&
-        BigInt(committedRes.amountInAtomic) >
+        BigInt(committedDestAtomic) >
           BigInt(authConsumption[0]!.res_max_atomic_amount)
       ) {
         throw new ApiFailure(
           403,
-          `COMMITTED_QUOTE_EXCEEDS_AUTHORIZED_MAX_BOUND: Fresh committed source amount ${committedRes.amountInAtomic} exceeds approved limit of ${authConsumption[0]!.res_max_atomic_amount} atomic units.`,
+          `COMMITTED_QUOTE_EXCEEDS_AUTHORIZED_MAX_BOUND: Fresh committed destination amount ${committedDestAtomic} exceeds approved limit of ${authConsumption[0]!.res_max_atomic_amount} atomic units.`,
         );
       }
 

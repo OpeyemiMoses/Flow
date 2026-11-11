@@ -117,7 +117,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   useEffect(() => {
     if (instructions || !activeRoute || isExpired) return;
 
-    if (isRefundRequired && refundValidationMessage) {
+    if (payerMode === "EXCHANGE" && refundValidationMessage) {
       return;
     }
 
@@ -252,6 +252,10 @@ export function CheckoutView({ request }: CheckoutViewProps) {
 
   const handleProceedToPayment = async () => {
     if (!quote || quote.routeStatus !== "SUPPORTED_AND_QUOTABLE") return;
+    if (isRefundRequired && refundValidationMessage) {
+      setCommitError(refundValidationMessage);
+      return;
+    }
     setCommitting(true);
     setCommitError(null);
     try {
