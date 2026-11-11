@@ -75,9 +75,7 @@ export default async function AccountsPage() {
 
         <div className="flex items-center justify-between border-t border-white/10 pt-4">
           <div className="flex items-center gap-2.5 min-w-0">
-            <UserAvatar
-              className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0"
-            />
+            <UserAvatar className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0" />
             <div className="min-w-0">
               <p className="truncate text-xs font-semibold text-white">
                 {primaryAccount?.name ?? "Flow Account"}
@@ -132,8 +130,8 @@ export default async function AccountsPage() {
                 Your FLOW accounts
               </h1>
               <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
-                Switch between your personal account and your business workspaces,
-                or create a new business organization.
+                Switch between your personal account and your business
+                workspaces, or create a new business organization.
               </p>
             </div>
           </div>

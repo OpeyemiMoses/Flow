@@ -568,13 +568,7 @@ export function SolIcon({
     >
       <circle cx="16" cy="16" r="16" fill="#000000" />
       <defs>
-        <linearGradient
-          id="sol-icon-grad"
-          x1="0%"
-          y1="0%"
-          x2="100%"
-          y2="100%"
-        >
+        <linearGradient id="sol-icon-grad" x1="0%" y1="0%" x2="100%" y2="100%">
           <stop offset="0%" stopColor="#00FFA3" />
           <stop offset="100%" stopColor="#DC1FFF" />
         </linearGradient>
@@ -754,7 +748,8 @@ export function ChainBadge({
   if (lower.includes("base")) matchKey = "base";
   else if (lower.includes("sol")) matchKey = "solana";
   else if (lower.includes("near")) matchKey = "near";
-  else if (lower.includes("eth") || lower.includes("evm")) matchKey = "ethereum";
+  else if (lower.includes("eth") || lower.includes("evm"))
+    matchKey = "ethereum";
 
   const chain = matchKey ? COINGECKO_CHAIN_IMAGES[matchKey] : undefined;
   if (chain) {

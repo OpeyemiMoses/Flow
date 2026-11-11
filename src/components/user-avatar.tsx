@@ -7,7 +7,9 @@ const DEFAULT_AVATAR_SRC = "/assets/amara-avatar.png";
 export function getUserAvatar(): string {
   if (typeof window === "undefined") return DEFAULT_AVATAR_SRC;
   try {
-    return window.localStorage.getItem("flow-user-avatar") || DEFAULT_AVATAR_SRC;
+    return (
+      window.localStorage.getItem("flow-user-avatar") || DEFAULT_AVATAR_SRC
+    );
   } catch {
     return DEFAULT_AVATAR_SRC;
   }

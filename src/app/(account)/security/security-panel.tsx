@@ -338,9 +338,7 @@ export function SecurityPanel({
 
           <div className="flex items-center justify-between border-t border-white/10 pt-4">
             <div className="flex items-center gap-2.5 min-w-0">
-              <UserAvatar
-                className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0"
-              />
+              <UserAvatar className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0" />
               <div className="min-w-0">
                 <p className="truncate text-xs font-semibold text-white">
                   {displayName}
@@ -550,16 +548,15 @@ export function SecurityPanel({
                         Profile Settings
                       </h2>
                       <p className="text-xs text-neutral-500">
-                        Update your personal details, profile picture, and workspace name.
+                        Update your personal details, profile picture, and
+                        workspace name.
                       </p>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-4 pt-1">
                     <div className="relative group shrink-0">
-                      <UserAvatar
-                        className="h-14 w-14 rounded-full object-cover border-2 border-neutral-200 dark:border-neutral-700 shadow-xs"
-                      />
+                      <UserAvatar className="h-14 w-14 rounded-full object-cover border-2 border-neutral-200 dark:border-neutral-700 shadow-xs" />
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
@@ -602,7 +599,9 @@ export function SecurityPanel({
                         >
                           Change photo
                         </button>
-                        <span className="text-neutral-300 dark:text-neutral-700">·</span>
+                        <span className="text-neutral-300 dark:text-neutral-700">
+                          ·
+                        </span>
                         <button
                           type="button"
                           onClick={() => {

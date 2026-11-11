@@ -39,12 +39,7 @@ import type {
 import { describe, Feedback, send } from "../../../controls.tsx";
 
 export type WorkspaceTab =
-  | "dashboard"
-  | "assets"
-  | "send"
-  | "receive"
-  | "request"
-  | "activity";
+  "dashboard" | "assets" | "send" | "receive" | "request" | "activity";
 
 export const MAINNET_SUPPORTED_DEPLOYMENTS: readonly [
   CatalogTokenDeployment,
@@ -2297,7 +2292,9 @@ export function PortfolioView({
 
                   <div className="space-y-2.5 rounded-[16px] bg-neutral-50 dark:bg-[#1a1a1a] p-3.5 text-xs">
                     <div className="flex justify-between">
-                      <span className="text-neutral-500 dark:text-neutral-400">Asset Class</span>
+                      <span className="text-neutral-500 dark:text-neutral-400">
+                        Asset Class
+                      </span>
                       <span className="font-semibold text-neutral-900 dark:text-white">
                         {selectedCatalogItem.kind === "NATIVE"
                           ? "Native Gas Asset"
@@ -2305,7 +2302,9 @@ export function PortfolioView({
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-neutral-500 dark:text-neutral-400">Decimals</span>
+                      <span className="text-neutral-500 dark:text-neutral-400">
+                        Decimals
+                      </span>
                       <span className="font-mono font-semibold text-neutral-900 dark:text-white">
                         {selectedCatalogItem.decimals}
                       </span>
@@ -2375,7 +2374,8 @@ export function PortfolioView({
                   </span>
                 </h1>
                 <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400">
-                  Receive direct wallet-to-wallet transfers on supported networks.
+                  Receive direct wallet-to-wallet transfers on supported
+                  networks.
                 </p>
               </div>
 
@@ -2389,10 +2389,26 @@ export function PortfolioView({
                     </label>
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                       {[
-                        { key: "ethereum-mainnet", label: "Ethereum", chainId: "Chain 1" },
-                        { key: "base-mainnet", label: "Base", chainId: "Chain 8453" },
-                        { key: "solana-mainnet", label: "Solana", chainId: "Mainnet" },
-                        { key: "near-mainnet", label: "NEAR", chainId: "Mainnet" },
+                        {
+                          key: "ethereum-mainnet",
+                          label: "Ethereum",
+                          chainId: "Chain 1",
+                        },
+                        {
+                          key: "base-mainnet",
+                          label: "Base",
+                          chainId: "Chain 8453",
+                        },
+                        {
+                          key: "solana-mainnet",
+                          label: "Solana",
+                          chainId: "Mainnet",
+                        },
+                        {
+                          key: "near-mainnet",
+                          label: "NEAR",
+                          chainId: "Mainnet",
+                        },
                       ].map((net) => {
                         const isSelected = receiveNetworkKey === net.key;
                         return (
@@ -2429,8 +2445,13 @@ export function PortfolioView({
                     </div>
                     <div className="grid grid-cols-5 gap-2">
                       {["USDC", "USDT", "ETH", "SOL", "NEAR"].map((sym) => {
-                        const isSupported = isAssetSupportedOnNetwork(sym, receiveNetworkKey);
-                        const isSelected = isSupported && receiveAssetSymbol.toUpperCase() === sym;
+                        const isSupported = isAssetSupportedOnNetwork(
+                          sym,
+                          receiveNetworkKey,
+                        );
+                        const isSelected =
+                          isSupported &&
+                          receiveAssetSymbol.toUpperCase() === sym;
                         return (
                           <button
                             key={sym}
@@ -2458,7 +2479,9 @@ export function PortfolioView({
                             <AssetAvatar
                               symbol={sym}
                               size={22}
-                              className={!isSupported ? "grayscale opacity-40" : ""}
+                              className={
+                                !isSupported ? "grayscale opacity-40" : ""
+                              }
                             />
                             <span>{sym}</span>
                             {!isSupported ? (
@@ -2506,10 +2529,14 @@ export function PortfolioView({
                       </span>
                       <button
                         type="button"
-                        onClick={() => copyAddress("receive-addr", activeReceiveAddress)}
+                        onClick={() =>
+                          copyAddress("receive-addr", activeReceiveAddress)
+                        }
                         className="shrink-0 rounded-full border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800 px-3 py-1.5 text-xs font-semibold text-neutral-900 dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-700 transition-colors"
                       >
-                        {copiedKey === "receive-addr" ? "Copied ✓" : "Copy Address"}
+                        {copiedKey === "receive-addr"
+                          ? "Copied ✓"
+                          : "Copy Address"}
                       </button>
                     </div>
 
@@ -2517,10 +2544,14 @@ export function PortfolioView({
                     <div className="flex items-center gap-2 pt-1">
                       <button
                         type="button"
-                        onClick={() => copyAddress("receive-addr-btn", activeReceiveAddress)}
+                        onClick={() =>
+                          copyAddress("receive-addr-btn", activeReceiveAddress)
+                        }
                         className="flex-1 rounded-[12px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] py-2.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors text-center"
                       >
-                        {copiedKey === "receive-addr-btn" ? "Copied ✓" : "Copy Address"}
+                        {copiedKey === "receive-addr-btn"
+                          ? "Copied ✓"
+                          : "Copy Address"}
                       </button>
                       <button
                         type="button"
@@ -2532,7 +2563,9 @@ export function PortfolioView({
                         }
                         className="flex-1 rounded-[12px] border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] py-2.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors text-center"
                       >
-                        {copiedKey === "share-address" ? "Shared / Copied ✓" : "Share Address"}
+                        {copiedKey === "share-address"
+                          ? "Shared / Copied ✓"
+                          : "Share Address"}
                       </button>
                     </div>
                   </div>
@@ -2540,7 +2573,14 @@ export function PortfolioView({
                   {/* Network & Token Warnings (Specific to selected ecosystem and asset) */}
                   <div className="rounded-[18px] border border-amber-300/80 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/20 p-4 space-y-2 text-xs">
                     <div className="flex items-center gap-2 text-amber-800 dark:text-amber-400 font-bold">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      >
                         <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
                         <line x1="12" y1="9" x2="12" y2="13" />
                         <line x1="12" y1="17" x2="12.01" y2="17" />
@@ -2551,10 +2591,14 @@ export function PortfolioView({
                     {receiveNetworkKey === "ethereum-mainnet" && (
                       <div className="space-y-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
                         <p>
-                          <strong>Ethereum Mainnet (Chain ID 1):</strong> Send only supported assets (ETH, USDC, USDT) via Ethereum Mainnet.
+                          <strong>Ethereum Mainnet (Chain ID 1):</strong> Send
+                          only supported assets (ETH, USDC, USDT) via Ethereum
+                          Mainnet.
                         </p>
                         <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80">
-                          Notice: Ethereum and Base share the same EVM address. Always verify the source network before dispatching to ensure proper routing.
+                          Notice: Ethereum and Base share the same EVM address.
+                          Always verify the source network before dispatching to
+                          ensure proper routing.
                         </p>
                       </div>
                     )}
@@ -2562,10 +2606,14 @@ export function PortfolioView({
                     {receiveNetworkKey === "base-mainnet" && (
                       <div className="space-y-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
                         <p>
-                          <strong>Base Mainnet (Chain ID 8453):</strong> Send only supported assets (ETH, USDC) via Base Mainnet.
+                          <strong>Base Mainnet (Chain ID 8453):</strong> Send
+                          only supported assets (ETH, USDC) via Base Mainnet.
                         </p>
                         <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80">
-                          Notice: Base shares the same EVM 0x address as Ethereum Mainnet. Do not send unsupported tokens or assets from other L2 chains (such as Optimism or Arbitrum).
+                          Notice: Base shares the same EVM 0x address as
+                          Ethereum Mainnet. Do not send unsupported tokens or
+                          assets from other L2 chains (such as Optimism or
+                          Arbitrum).
                         </p>
                       </div>
                     )}
@@ -2573,7 +2621,9 @@ export function PortfolioView({
                     {receiveNetworkKey === "solana-mainnet" && (
                       <div className="space-y-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
                         <p>
-                          <strong>Solana Mainnet:</strong> Send native SOL or verified SPL tokens (USDC, USDT) to this Base58 address.
+                          <strong>Solana Mainnet:</strong> Send native SOL or
+                          verified SPL tokens (USDC, USDT) to this Base58
+                          address.
                         </p>
                         <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80">
                           {receiveAssetSymbol === "SOL"
@@ -2586,7 +2636,9 @@ export function PortfolioView({
                     {receiveNetworkKey === "near-mainnet" && (
                       <div className="space-y-1 text-amber-900/90 dark:text-amber-300/90 leading-relaxed">
                         <p>
-                          <strong>NEAR Mainnet:</strong> Send native NEAR or verified NEP-141 tokens (USDT, USDC) to this 64-character implicit account.
+                          <strong>NEAR Mainnet:</strong> Send native NEAR or
+                          verified NEP-141 tokens (USDT, USDC) to this
+                          64-character implicit account.
                         </p>
                         <p className="text-[11px] text-amber-800/80 dark:text-amber-400/80">
                           {receiveAssetSymbol === "NEAR"
@@ -2632,13 +2684,17 @@ export function PortfolioView({
                   {/* Canonical Token Deployment Specs */}
                   <div className="space-y-2.5 rounded-[16px] bg-neutral-50 dark:bg-[#1a1a1a] p-3.5 text-xs">
                     <div className="flex justify-between">
-                      <span className="text-neutral-500 dark:text-neutral-400">Network</span>
+                      <span className="text-neutral-500 dark:text-neutral-400">
+                        Network
+                      </span>
                       <span className="font-semibold text-neutral-900 dark:text-white">
                         {activeReceiveDeployment.networkName}
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-neutral-500 dark:text-neutral-400">Asset Standard</span>
+                      <span className="text-neutral-500 dark:text-neutral-400">
+                        Asset Standard
+                      </span>
                       <span className="font-semibold text-neutral-900 dark:text-white">
                         {activeReceiveDeployment.kind === "NATIVE"
                           ? "Native Gas Asset"
@@ -2646,7 +2702,9 @@ export function PortfolioView({
                       </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-neutral-500 dark:text-neutral-400">Decimals</span>
+                      <span className="text-neutral-500 dark:text-neutral-400">
+                        Decimals
+                      </span>
                       <span className="font-mono font-semibold text-neutral-900 dark:text-white">
                         {activeReceiveDeployment.decimals}
                       </span>
@@ -2693,7 +2751,8 @@ export function PortfolioView({
                   </span>
                 </h1>
                 <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400">
-                  Create shareable payment links with multi-chain 1Click settlement. Payers can pay with any supported asset.
+                  Create shareable payment links with multi-chain 1Click
+                  settlement. Payers can pay with any supported asset.
                 </p>
               </div>
 
@@ -2796,11 +2855,13 @@ export function PortfolioView({
                             }
                             onClick={() => {
                               if (isSupported) {
-                                const match = MAINNET_SUPPORTED_DEPLOYMENTS.find(
-                                  (d) =>
-                                    d.networkKey === receiveDeployment.networkKey &&
-                                    d.symbol.toUpperCase() === sym,
-                                );
+                                const match =
+                                  MAINNET_SUPPORTED_DEPLOYMENTS.find(
+                                    (d) =>
+                                      d.networkKey ===
+                                        receiveDeployment.networkKey &&
+                                      d.symbol.toUpperCase() === sym,
+                                  );
                                 if (match) {
                                   setReceiveDeploymentId(match.id);
                                 }
@@ -2817,7 +2878,9 @@ export function PortfolioView({
                             <AssetAvatar
                               symbol={sym}
                               size={20}
-                              className={!isSupported ? "grayscale opacity-40" : ""}
+                              className={
+                                !isSupported ? "grayscale opacity-40" : ""
+                              }
                             />
                             <span>{sym}</span>
                             {!isSupported ? (
