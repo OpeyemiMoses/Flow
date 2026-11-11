@@ -298,6 +298,7 @@ export interface OneClickCommittedQuoteResult {
   readonly depositAddress?: string;
   readonly depositMemo?: string | null;
   readonly depositDeadline?: string;
+  readonly timeWhenInactive?: string | null;
   readonly amountInAtomic?: string;
   readonly amountOutAtomic?: string;
   readonly timeEstimateSeconds?: number | null;
@@ -365,6 +366,7 @@ export async function fetchOneClickCommittedQuote(params: {
         depositMemo?: string;
         memo?: string;
         deadline?: string;
+        timeWhenInactive?: string;
         amountIn: string;
         amountOut: string;
         timeEstimate?: number;
@@ -495,8 +497,13 @@ export async function fetchOneClickCommittedQuote(params: {
     }
 
     // 5. Validate Deadline
+    // The rate guarantee window is quoteRequest.deadline (approx 15 minutes).
+    // The physical deposit address inactivity time is quote.timeWhenInactive (approx 72 hours).
     const deadline =
-      data.quote?.deadline ?? data.quoteRequest?.deadline ?? payload.deadline;
+      data.quoteRequest?.deadline ?? payload.deadline ?? data.quote?.deadline;
+    const timeWhenInactive =
+      data.quote?.timeWhenInactive ?? data.quote?.deadline ?? null;
+
     const deadlineMs = new Date(deadline).getTime();
     if (isNaN(deadlineMs) || deadlineMs <= Date.now()) {
       return {
@@ -514,6 +521,7 @@ export async function fetchOneClickCommittedQuote(params: {
       depositAddress: depositAddress.trim(),
       depositMemo: memo ? memo.trim() : null,
       depositDeadline: deadline,
+      timeWhenInactive,
       amountInAtomic: data.quote.amountIn,
       amountOutAtomic: data.quote.amountOut,
       timeEstimateSeconds: data.quote.timeEstimate ?? null,

@@ -147,8 +147,9 @@ export async function commitPaymentAttempt(
     throw new ApiFailure(400, `INVALID_STATUS_FOR_COMMIT: ${attempt.status}`);
   }
 
-  // Requirement 12: Strict quote expiration enforcement
+  // Requirement 12: Strict quote expiration enforcement (applies only before commitment)
   if (
+    attempt.status === "QUOTE_OBSERVED" &&
     attempt.quote_expires_at &&
     new Date(attempt.quote_expires_at).getTime() < Date.now()
   ) {
@@ -161,6 +162,8 @@ export async function commitPaymentAttempt(
   let deadline = attempt.deposit_deadline
     ? new Date(attempt.deposit_deadline)
     : new Date(Date.now() + 15 * 60 * 1000);
+  let committedRes:
+    Awaited<ReturnType<typeof fetchOneClickCommittedQuote>> | undefined;
 
   if (!depositAddress) {
     // 1. Fetch recipient wallet details with full custody, chain ID, and capability checks via SECURITY DEFINER (Blocker 1)
@@ -372,7 +375,6 @@ export async function commitPaymentAttempt(
       }
 
       // Task 3: Remote commit timeout & persistence safety
-      let committedRes: Awaited<ReturnType<typeof fetchOneClickCommittedQuote>>;
       try {
         committedRes = await fetchOneClickCommittedQuote({
           originAsset: sourceOneClickId,
@@ -498,16 +500,24 @@ export async function commitPaymentAttempt(
     );
   }
 
-  const depositInstructionsPayload = attempt.deposit_instructions ?? {
-    network: attempt.source_network,
-    tokenSymbol: attempt.source_asset_symbol,
-    decimals: attempt.source_decimals,
-    expectedAtomicAmount: attempt.quoted_source_atomic_amount,
-    deadlineIso: deadline.toISOString(),
-    memo: depositMemo,
-    depositAddress,
-    payerRefundAddress: committedPayerRefund,
-  };
+  const hasExistingInstructions =
+    attempt.deposit_instructions &&
+    typeof attempt.deposit_instructions === "object" &&
+    Object.keys(attempt.deposit_instructions).length > 0;
+
+  const depositInstructionsPayload = hasExistingInstructions
+    ? (attempt.deposit_instructions as Record<string, unknown>)
+    : {
+        network: attempt.source_network,
+        tokenSymbol: attempt.source_asset_symbol,
+        decimals: attempt.source_decimals,
+        expectedAtomicAmount: attempt.quoted_source_atomic_amount,
+        deadlineIso: deadline.toISOString(),
+        timeWhenInactiveIso: committedRes?.timeWhenInactive ?? null,
+        memo: depositMemo,
+        depositAddress,
+        payerRefundAddress: committedPayerRefund,
+      };
 
   // Commit via stored procedure with persistence failure reconciliation protection (Task 3)
   let commitRows: Array<{
@@ -540,7 +550,8 @@ export async function commitPaymentAttempt(
         ${depositAddress},
         ${depositMemo},
         ${deadline},
-        ${JSON.stringify(depositInstructionsPayload)}::jsonb
+        ${JSON.stringify(depositInstructionsPayload)}::jsonb,
+        ${attempt.quoted_source_atomic_amount ? BigInt(attempt.quoted_source_atomic_amount).toString() : null}::numeric
       )
     `;
   } catch (dbErr: unknown) {
@@ -551,6 +562,8 @@ export async function commitPaymentAttempt(
         deposit_address = ${depositAddress},
         deposit_memo = ${depositMemo},
         deposit_deadline = ${deadline},
+        quote_expires_at = NULL,
+        quoted_source_atomic_amount = COALESCE(${attempt.quoted_source_atomic_amount ? BigInt(attempt.quoted_source_atomic_amount).toString() : null}::numeric, quoted_source_atomic_amount),
         deposit_instructions = ${JSON.stringify(depositInstructionsPayload)}::jsonb,
         settlement_error = ${`RECONCILIATION_REQUIRED: Provider created deposit address but local persistence failed: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}. Duplicate commitment blocked.`},
         updated_at = CURRENT_TIMESTAMP

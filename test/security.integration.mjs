@@ -3736,3 +3736,328 @@ test("security: scoped single-use rehearsal authorization lifecycle, privilege s
     opClient.release();
   }
 });
+
+test("security: 1Click payment deadline, rate guarantee vs deposit address inactivity, timely confirmation after deadline, and settlement safety", async () => {
+  const merchant = await person("deadline-merchant@flow.local");
+  const unauth = await app.createClient();
+
+  // 1. Configure merchant wallet for Base Mainnet
+  const walletRows = await workerDb.query(
+    `SELECT id FROM flow.wallets WHERE account_id = $1 LIMIT 1`,
+    [merchant.account.id],
+  );
+  let walletId;
+  if (walletRows.rows.length > 0) {
+    walletId = walletRows.rows[0].id;
+    await workerDb.query(
+      `UPDATE flow.wallets
+       SET status = 'ACTIVE'::flow.wallet_status,
+           environment = 'mainnet'
+       WHERE id = $1`,
+      [walletId],
+    );
+  } else {
+    walletId = randomUUID();
+    await workerDb.query(
+      `INSERT INTO flow.wallets (
+         id, account_id, provider, environment, provider_wallet_id,
+         near_account_id, encrypted_credential, key_id, key_digest, status,
+         policy_state, controller_account_id
+       ) VALUES (
+         $1::uuid, $2::uuid, 'OUTLAYER', 'mainnet',
+         $3, 'deadline-owner.near', 'enc_cred', 'v1', 'digest_1',
+         'ACTIVE'::flow.wallet_status, 'stored', 'flow-custody.near'
+       )`,
+      [walletId, merchant.account.id, `pw_${walletId}`],
+    );
+  }
+
+  const verifiedRecipient = "0x436BdB38888998e269E94301C2362C2f46bCF614";
+  const verifiedPayerRefund = "Ck7JNaqjS9otRa72z8AxmP8YKdheiC42AacJGoP3AJRY";
+
+  await workerDb.query(
+    `INSERT INTO flow.wallet_addresses (wallet_id, network, chain_id, address, public_key)
+     VALUES ($1, 'base-mainnet', '8453', $2, '0x00')
+     ON CONFLICT (wallet_id, network) DO UPDATE
+     SET chain_id = '8453', address = $2`,
+    [walletId, verifiedRecipient],
+  );
+
+  await workerDb.query(
+    `INSERT INTO flow.wallet_capabilities (wallet_id, network, can_derive_address, can_receive, can_sign_transfer, broadcast_mode)
+     VALUES ($1, 'base-mainnet', true, true, false, 'caller_broadcast')
+     ON CONFLICT (wallet_id, network) DO UPDATE
+     SET can_receive = true, can_sign_transfer = false`,
+    [walletId],
+  );
+
+  // 2. Create Payment Request for 1.00 Base USDC
+  const prRes = await merchant.client.post(
+    `/api/accounts/${merchant.account.id}/payment-requests`,
+    {
+      data: {
+        title: "Deadline & Settlement Safety Test",
+        destinationNetwork: "base-mainnet",
+        destinationAssetId: "base-mainnet:USDC",
+        amountMode: "FIXED",
+        requestedAmount: "1.0",
+        expiresInHours: 24,
+      },
+    },
+  );
+  assert.equal(prRes.status(), 201);
+  const paymentReq = await prRes.json();
+
+  // 3. Scenario A: Generate Quote and Commit
+  // Initial dry quote returns 11979498 lamports.
+  // When committed, flow.commit_payment_attempt persists the genuine committed atomic amount 11977245
+  // and clears quote_expires_at = NULL!
+  const attemptPublicId = `pa_${randomBytes(16).toString("hex")}`;
+  const initialQuoteExpiry = new Date(Date.now() + 60 * 1000); // 60s preview
+
+  await workerDb.query(
+    `INSERT INTO flow.payment_attempts (
+       payment_request_id, attempt_public_id, payer_mode, status,
+       source_network, source_asset_id, source_asset_symbol, source_decimals,
+       route_type, route_status, swap_type,
+       quoted_source_atomic_amount, quoted_destination_atomic_amount,
+       quote_expires_at, payer_refund_address,
+       created_at, updated_at
+     ) VALUES (
+       $1::uuid, $2, 'WALLET', 'QUOTE_OBSERVED',
+       'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
+       'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 'EXACT_OUTPUT',
+       11979498, 1000000,
+       $3, $4,
+       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+     )`,
+    [paymentReq.id, attemptPublicId, initialQuoteExpiry, verifiedPayerRefund],
+  );
+
+  const depositAddress = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+  const depositDeadline = new Date(Date.now() + 15 * 60 * 1000); // 15-minute rate guarantee window
+  const committedAmountIn = "11977245"; // Reconciled committed amount
+
+  const commitRes = await app.db.query(
+    `SELECT * FROM flow.commit_payment_attempt(
+       $1, $2, $3, $4, $5::jsonb, $6::numeric
+     )`,
+    [
+      attemptPublicId,
+      depositAddress,
+      null,
+      depositDeadline,
+      JSON.stringify({
+        network: "solana-mainnet",
+        expectedAtomicAmount: committedAmountIn,
+        deadlineIso: depositDeadline.toISOString(),
+        depositAddress,
+        payerRefundAddress: verifiedPayerRefund,
+      }),
+      committedAmountIn,
+    ],
+  );
+  assert.equal(commitRes.rows.length, 1);
+  assert.equal(commitRes.rows[0].status, "DEPOSIT_COMMITTED");
+
+  // Invariant 1: Committed attempt clears dry preview expiration (quote_expires_at = NULL)
+  // Invariant 2: Committed attempt persists exact committed source atomic amount (11977245)
+  const committedDbRow = await workerDb.query(
+    `SELECT quote_expires_at, quoted_source_atomic_amount, deposit_deadline
+     FROM flow.payment_attempts
+     WHERE attempt_public_id = $1`,
+    [attemptPublicId],
+  );
+  assert.equal(
+    committedDbRow.rows[0].quote_expires_at,
+    null,
+    "Dry preview quote_expires_at must be cleared to NULL upon commit",
+  );
+  assert.equal(
+    committedDbRow.rows[0].quoted_source_atomic_amount,
+    "11977245",
+    "Committed amountIn must be stored in database",
+  );
+
+  // 4. Scenario B: Timely Deposit Confirmed After Deadline (Task 6)
+  // Deposit was submitted on-chain BEFORE deposit_deadline, but network indexing/finality confirmed it after deadline.
+  // Must NOT be classified as late deposit, and must transition to SETTLING!
+  const pastDeadline = new Date(Date.now() - 2 * 60 * 1000); // 2 minutes ago
+  await workerDb.query(
+    `UPDATE flow.payment_attempts
+     SET deposit_deadline = $1
+     WHERE attempt_public_id = $2`,
+    [pastDeadline, attemptPublicId],
+  );
+
+  // On-chain blockTime is 3 minutes ago (BEFORE pastDeadline!)
+  const timelyBlockTime = Math.floor(
+    (pastDeadline.getTime() - 60 * 1000) / 1000,
+  );
+  const timelyTxHash =
+    "5Y3m4" +
+    randomBytes(32)
+      .toString("base64")
+      .replace(/[^a-zA-Z0-9]/g, "T")
+      .slice(0, 70);
+
+  const timelyVerifRes = await workerDb.query(
+    `SELECT * FROM flow.record_payment_verification(
+       $1, 'SOURCE_DEPOSIT', 'solana-mainnet', $2,
+       $3, $4, 'solana-mainnet:SOL', 'So11111111111111111111111111111111111111112',
+       11977245::numeric, 100, 'slot_100', 'FINALIZED',
+       NULL, 'CHAIN_RPC_DIRECT', $5::jsonb, 0
+     )`,
+    [
+      attemptPublicId,
+      timelyTxHash,
+      verifiedPayerRefund,
+      depositAddress,
+      JSON.stringify({ blockTime: timelyBlockTime }),
+    ],
+  );
+  assert.equal(
+    timelyVerifRes.rows[0].is_late_deposit,
+    false,
+    "Timely on-chain deposit confirmed late must NOT be marked late",
+  );
+  assert.equal(
+    timelyVerifRes.rows[0].status,
+    "SETTLING",
+    "Timely deposit must transition attempt to SETTLING",
+  );
+
+  // 5. Scenario C: Genuinely Late Deposit (Task 6)
+  // On-chain blockTime is AFTER deposit_deadline.
+  // Must transition to EXCEPTION_REFUND_REQUIRED with LATE_DEPOSIT_REFUND_REQUIRED.
+  const lateAttemptPublicId = `pa_${randomBytes(16).toString("hex")}`;
+  await workerDb.query(
+    `INSERT INTO flow.payment_attempts (
+       payment_request_id, attempt_public_id, payer_mode, status,
+       source_network, source_asset_id, source_asset_symbol, source_decimals,
+       route_type, route_status, swap_type,
+       quoted_source_atomic_amount, quoted_destination_atomic_amount,
+       deposit_deadline, quote_expires_at, payer_refund_address, deposit_address,
+       is_provider_verified, verification_tier,
+       created_at, updated_at
+     ) VALUES (
+       $1::uuid, $2, 'WALLET', 'DEPOSIT_COMMITTED',
+       'solana-mainnet', 'solana-mainnet:SOL', 'SOL', 9,
+       'CROSS_CHAIN_1CLICK', 'SUPPORTED_AND_QUOTABLE', 'EXACT_OUTPUT',
+       11977245, 1000000,
+       $3, NULL, $4, $5,
+       true, 'PROVIDER_VERIFIED',
+       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+     )`,
+    [
+      paymentReq.id,
+      lateAttemptPublicId,
+      pastDeadline,
+      verifiedPayerRefund,
+      depositAddress,
+    ],
+  );
+
+  // On-chain blockTime was 1 minute ago (AFTER pastDeadline!)
+  const lateBlockTime = Math.floor((pastDeadline.getTime() + 60 * 1000) / 1000);
+  const lateTxHash =
+    "5Y3m4" +
+    randomBytes(32)
+      .toString("base64")
+      .replace(/[^a-zA-Z0-9]/g, "L")
+      .slice(0, 70);
+
+  const lateVerifRes = await workerDb.query(
+    `SELECT * FROM flow.record_payment_verification(
+       $1, 'SOURCE_DEPOSIT', 'solana-mainnet', $2,
+       $3, $4, 'solana-mainnet:SOL', 'So11111111111111111111111111111111111111112',
+       11977245::numeric, 101, 'slot_101', 'CONFIRMED',
+       NULL, 'CHAIN_RPC_DIRECT', $5::jsonb, 0
+     )`,
+    [
+      lateAttemptPublicId,
+      lateTxHash,
+      verifiedPayerRefund,
+      depositAddress,
+      JSON.stringify({ blockTime: lateBlockTime }),
+    ],
+  );
+  assert.equal(
+    lateVerifRes.rows[0].is_late_deposit,
+    true,
+    "Genuinely late deposit must be detected as late",
+  );
+  assert.equal(
+    lateVerifRes.rows[0].status,
+    "EXCEPTION_REFUND_REQUIRED",
+    "Late deposit must transition to EXCEPTION_REFUND_REQUIRED",
+  );
+
+  // Verify exception_status in database
+  const lateDbRow = await workerDb.query(
+    `SELECT status, exception_status FROM flow.payment_attempts WHERE attempt_public_id = $1`,
+    [lateAttemptPublicId],
+  );
+  assert.equal(lateDbRow.rows[0].status, "EXCEPTION_REFUND_REQUIRED");
+  assert.equal(
+    lateDbRow.rows[0].exception_status,
+    "LATE_DEPOSIT_REFUND_REQUIRED",
+  );
+
+  // 6. Scenario D: Parent Payment Request Expiration Safety (Task 9)
+  // Expire the parent payment request
+  await workerDb.query(
+    `UPDATE flow.payment_requests
+     SET expires_at = CURRENT_TIMESTAMP - interval '1 hour', status = 'ACTIVE'
+     WHERE id = $1`,
+    [paymentReq.id],
+  );
+
+  // A previously committed attempt (attemptPublicId, currently SETTLING) must settle cleanly without error!
+  const destTxHash = "0x" + randomBytes(32).toString("hex");
+
+  // Record verified destination settlement
+  await workerDb.query(
+    `SELECT * FROM flow.record_payment_verification(
+       $1, 'DESTINATION_SETTLEMENT', 'base-mainnet', $2,
+       '0x0000000000000000000000000000000000000000', $3, 'base-mainnet:USDC', '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913',
+       1000000::numeric, 200, '0x' || repeat('a', 64), 'FINALIZED',
+       NULL, 'CHAIN_RPC_DIRECT', '{}'::jsonb, 0
+     )`,
+    [attemptPublicId, destTxHash, verifiedRecipient],
+  );
+
+  const settleRes = await workerDb.query(
+    `SELECT * FROM flow.worker_settle_payment_attempt($1, $2, $3)`,
+    [attemptPublicId, timelyTxHash, destTxHash],
+  );
+  assert.equal(settleRes.rows.length, 1);
+  assert.equal(
+    settleRes.rows[0].status,
+    "SETTLED",
+    "Parent request expiration must NOT block settlement of a committed funded attempt",
+  );
+
+  // 7. Scenario E: Idempotent Re-Commit and Public Polling
+  // Re-committing an already committed attempt returns existing instructions idempotently
+  const reCommitRes = await app.db.query(
+    `SELECT * FROM flow.commit_payment_attempt($1, $2, $3, $4, $5::jsonb, $6::numeric)`,
+    [attemptPublicId, depositAddress, null, depositDeadline, "{}", 11977245],
+  );
+  assert.equal(reCommitRes.rows.length, 1);
+  assert.equal(reCommitRes.rows[0].status, "SETTLED");
+
+  // Public status polling endpoint reflects SETTLED state with exact amounts
+  const pollRes = await unauth.get(
+    `/api/pay/${paymentReq.publicId}/attempt/${attemptPublicId}`,
+  );
+  assert.equal(pollRes.status(), 200);
+  const pollJson = await pollRes.json();
+  assert.equal(pollJson.status, "SETTLED");
+  assert.equal(
+    pollJson.requiredAtomicAmount,
+    "11977245",
+    "Public status must reflect reconciled committed atomic amount",
+  );
+  assert.equal(pollJson.destinationTxHash, destTxHash);
+});

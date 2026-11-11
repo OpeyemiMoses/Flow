@@ -124,4 +124,87 @@ describe("one-click-adapter: execution status lifecycle stages", () => {
       server.close();
     }
   });
+
+  it("distinguishes quoteRequest guaranteed rate deadline from quote deposit address inactivity time", async () => {
+    const quoteRequestDeadline = new Date(
+      Date.now() + 15 * 60 * 1000,
+    ).toISOString();
+    const timeWhenInactive = new Date(
+      Date.now() + 72 * 60 * 60 * 1000,
+    ).toISOString();
+
+    const server = http.createServer((req, res) => {
+      const url = new URL(req.url!, `http://${req.headers.host}`);
+      if (url.pathname === "/v0/quote") {
+        res.setHeader("Content-Type", "application/json");
+        res.end(
+          JSON.stringify({
+            depositAddress: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+            quote: {
+              amountIn: "11977245",
+              amountOut: "1000000",
+              deadline: timeWhenInactive,
+              timeWhenInactive: timeWhenInactive,
+            },
+            quoteRequest: {
+              originAsset: "solana:sol",
+              destinationAsset: "base:usdc",
+              amount: "1000000",
+              refundTo: "Ck7JNaqjS9otRa72z8AxmP8YKdheiC42AacJGoP3AJRY",
+              recipient: "0x436BdB38888998e269E94301C2362C2f46bCF614",
+              deadline: quoteRequestDeadline,
+            },
+            signature: "sig123",
+          }),
+        );
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    const apiBase = `http://127.0.0.1:${port}`;
+
+    try {
+      const { fetchOneClickCommittedQuote } =
+        await import("../src/server/providers/one-click-adapter.ts");
+      const res = await fetchOneClickCommittedQuote({
+        originAsset: "solana:sol",
+        destinationAsset: "base:usdc",
+        swapType: "EXACT_OUTPUT",
+        amountAtomic: "1000000",
+        refundTo: "Ck7JNaqjS9otRa72z8AxmP8YKdheiC42AacJGoP3AJRY",
+        recipient: "0x436BdB38888998e269E94301C2362C2f46bCF614",
+        apiBase,
+        skipSignatureVerification: true,
+      });
+
+      assert.equal(res.ok, true);
+      assert.equal(
+        res.depositAddress,
+        "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      );
+      assert.equal(
+        res.depositDeadline,
+        quoteRequestDeadline,
+        "Must bind to 15-minute rate guarantee deadline!",
+      );
+      assert.equal(
+        res.timeWhenInactive,
+        timeWhenInactive,
+        "Must extract 72-hour physical address inactivity time!",
+      );
+      assert.equal(
+        res.amountInAtomic,
+        "11977245",
+        "Must extract committed amountIn atomic!",
+      );
+    } finally {
+      server.close();
+    }
+  });
 });

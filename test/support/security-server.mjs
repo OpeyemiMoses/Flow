@@ -198,7 +198,10 @@ export async function securityServer() {
       }
       await delay(100);
     }
-    assert.ok(ready, "Production Next.js server did not become ready");
+    assert.ok(
+      ready,
+      `Production Next.js server did not become ready. Server logs:\n${serverLogs}`,
+    );
     browser = await chromium.launch({
       executablePath: process.env.FLOW_TEST_CHROME_PATH || undefined,
       headless: true,
