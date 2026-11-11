@@ -3,26 +3,28 @@
 **Milestone**: Final Low-Value Inbound Payment Readiness Audit  
 **Target Action**: Prepare exactly ONE low-value real inbound cross-chain payment (without executing yet)  
 **Safety Status**:
+
 - `FLOW_EXECUTION=disabled` (STRICTLY ENFORCED)
 - `FLOW_PROVIDER_COMPATIBILITY_MODE=disabled` (STRICTLY ENFORCED)
 - `can_sign_transfer=false` (STRICTLY ENFORCED ACROSS ALL NETWORKS)
-- **Zero OutLayer Wallet Registrations Initiated**  
-- **Zero Live Payable Deposit Addresses Created**  
+- **Zero OutLayer Wallet Registrations Initiated**
+- **Zero Live Payable Deposit Addresses Created**
 
 ---
 
 ## 1. Executive Summary & GO / NO-GO Determination
 
-| Determination | Status | Rationale |
-| :--- | :--- | :--- |
-| **Execution Decision** | **NO-GO FOR IMMEDIATE EXECUTION** | In accordance with strict instructions: *"prepare exactly ONE low-value real inbound cross-chain payment, without executing it yet. Do not send funds, create a live payable quote, unlock outgoing signing or request another wallet registration."* |
-| **Preflight Readiness** | **GO FOR AUTHORIZATION PREFLIGHT** | All architectural, cryptographic, RPC, database, and safety prerequisites have been audited and verified end-to-end. The system is 100% prepared to safely handle a single \$1.00 USDC inbound cross-chain payment when explicitly authorized. |
+| Determination           | Status                             | Rationale                                                                                                                                                                                                                                             |
+| :---------------------- | :--------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Execution Decision**  | **NO-GO FOR IMMEDIATE EXECUTION**  | In accordance with strict instructions: _"prepare exactly ONE low-value real inbound cross-chain payment, without executing it yet. Do not send funds, create a live payable quote, unlock outgoing signing or request another wallet registration."_ |
+| **Preflight Readiness** | **GO FOR AUTHORIZATION PREFLIGHT** | All architectural, cryptographic, RPC, database, and safety prerequisites have been audited and verified end-to-end. The system is 100% prepared to safely handle a single \$1.00 USDC inbound cross-chain payment when explicitly authorized.        |
 
 ---
 
 ## 2. Important Architecture Correction: Inbound vs. Outgoing Signing Separation
 
 ### The Architectural Invariant
+
 An incoming 1Click payment is an **inbound cross-chain settlement**. The recipient account on FLOW is purely a **passive recipient of funds** on Base Mainnet.
 
 ```
@@ -39,6 +41,7 @@ An incoming 1Click payment is an **inbound cross-chain settlement**. The recipie
 ```
 
 ### Key Audit Findings:
+
 1. **Outgoing Signing Is Never Touched**:
    - OutLayer container signing keys, `SigningWorker`, and `FinancialAuthorizationPipeline.authorizeOutgoingPayment` are strictly bound to **outgoing transfers** where FLOW broadcasts a signed transaction.
    - For inbound payments, FLOW creates no signed transaction, holds no solver liquidity, and broadcasts no contract call.
@@ -59,7 +62,9 @@ An incoming 1Click payment is an **inbound cross-chain settlement**. The recipie
 Every quote returned by 1Click (`https://1click.chaindefuser.com/v0/quote`) is cryptographically signed by the 1Click Manager Ed25519 keypair.
 
 ### Live Signature Verification Proof
+
 We issued a live preflight quote request for 1.00 USDC on Base (`amount: "1000000"`) from Solana SOL:
+
 - **Provider Status**: `HTTP 201 Created`
 - **Returned Signature**: `ed25519:3fhDfuSGadHmukPA17eryzQZRaDjURyJQUo82w5GTjhDR9dnXA7fJoXc4z3qTt6ciw5cPv5n55LCPmPSDDTbyaUh`
 - **Correlation ID**: `b98b5d84-6a77-4247-b2fe-968fa8714ccb`
@@ -124,7 +129,9 @@ Direct live JSON-RPC queries confirmed connectivity, block synchronization, and 
    - Height: `224,041,211` (Synchronized)
 
 ### Two-Sided Settlement Invariant:
+
 `PaymentMonitoringWorker` (`payment-monitoring-worker.ts`) and the database stored procedure `flow.worker_settle_payment_attempt`:
+
 - Require a verified `SOURCE_DEPOSIT` verification record with `finality = 'FINALIZED'`.
 - Require a verified `DESTINATION_SETTLEMENT` verification record with `finality = 'FINALIZED'`.
 - Require `OnChainVerifier.verifyEvmTransfer` to confirm:
@@ -139,14 +146,14 @@ Direct live JSON-RPC queries confirmed connectivity, block synchronization, and 
 
 ## 7. Failure & Recovery Case Matrix
 
-| Scenario | Tested Behavior | Protection Mechanism |
-| :--- | :--- | :--- |
-| **Expired Quote** | Payer attempts commit after `quoteExpiresAt` | Rejected with `400 QUOTE_EXPIRED` without grace extension |
-| **Underpaid Deposit** | Payer sends fewer tokens than `amountIn` | Solver does not route; attempt remains in monitoring; expires to `EXPIRED` |
-| **Refund Routing** | Swap fails or liquidity drops post-deposit | Solver sends refund to `payerRefundAddress` on Solana; worker transitions to `REFUNDED` |
-| **Duplicate Deposit** | Payer deposits twice for the same quote | Stored procedure `worker_settle_payment_attempt` is idempotent; locks row `FOR UPDATE` |
-| **Provider Timeout** | 1Click API is unreachable or slow | `fetchOneClickCommittedQuote` aborts after 8s; database rolls back transaction |
-| **Destination Mismatch** | Delivery made to wrong address | `OnChainVerifier` checks recipient topic; fails verification with `RECIPIENT_ADDRESS_MISMATCH` |
+| Scenario                 | Tested Behavior                              | Protection Mechanism                                                                           |
+| :----------------------- | :------------------------------------------- | :--------------------------------------------------------------------------------------------- |
+| **Expired Quote**        | Payer attempts commit after `quoteExpiresAt` | Rejected with `400 QUOTE_EXPIRED` without grace extension                                      |
+| **Underpaid Deposit**    | Payer sends fewer tokens than `amountIn`     | Solver does not route; attempt remains in monitoring; expires to `EXPIRED`                     |
+| **Refund Routing**       | Swap fails or liquidity drops post-deposit   | Solver sends refund to `payerRefundAddress` on Solana; worker transitions to `REFUNDED`        |
+| **Duplicate Deposit**    | Payer deposits twice for the same quote      | Stored procedure `worker_settle_payment_attempt` is idempotent; locks row `FOR UPDATE`         |
+| **Provider Timeout**     | 1Click API is unreachable or slow            | `fetchOneClickCommittedQuote` aborts after 8s; database rolls back transaction                 |
+| **Destination Mismatch** | Delivery made to wrong address               | `OnChainVerifier` checks recipient topic; fails verification with `RECIPIENT_ADDRESS_MISMATCH` |
 
 ---
 
