@@ -44,26 +44,8 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   const [refundAddress, setRefundAddress] = useState<string>("");
   const [copiedLink, setCopiedLink] = useState(false);
   const [isAnyTokenModalOpen, setIsAnyTokenModalOpen] = useState(false);
-  const [isPayWithDropdownOpen, setIsPayWithDropdownOpen] = useState(false);
+  const [isPayWithDropdownOpen, setIsPayWithDropdownOpen] = useState(true);
   const payWithDropdownRef = useRef<HTMLDivElement>(null);
-
-  // Close dropdown on outside click
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (
-        payWithDropdownRef.current &&
-        !payWithDropdownRef.current.contains(e.target as Node)
-      ) {
-        setIsPayWithDropdownOpen(false);
-      }
-    }
-    if (isPayWithDropdownOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-    }
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, [isPayWithDropdownOpen]);
 
   // Indicative Quote State
   const [quote, setQuote] = useState<IndicativeQuote | null>(null);
@@ -138,6 +120,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
     if (eco === selectedEcosystem) return;
     setSelectedEcosystem(eco);
     setSelectedRouteId("");
+    setIsPayWithDropdownOpen(true);
     setQuote(null);
     setQuoteError(null);
 
@@ -1229,7 +1212,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
 
                         {/* Dropdown Menu matching screenshot */}
                         {isPayWithDropdownOpen && (
-                          <div className="absolute left-0 top-full mt-1.5 w-full z-40 rounded-2xl border border-neutral-200 bg-white shadow-xl p-1.5 space-y-1 max-h-72 overflow-y-auto animate-in fade-in">
+                          <div className="mt-2 w-full rounded-2xl border border-neutral-200 bg-white shadow-sm p-1.5 space-y-1 max-h-72 overflow-y-auto animate-in fade-in">
                             {ecosystemRoutes.map((route) => {
                               const isSelected = activeRoute?.id === route.id;
                               return (
@@ -1238,7 +1221,6 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                                   type="button"
                                   onClick={() => {
                                     setSelectedRouteId(route.id);
-                                    setIsPayWithDropdownOpen(false);
                                   }}
                                   className={`w-full flex items-center justify-between p-2.5 rounded-xl text-left transition-all cursor-pointer ${
                                     isSelected
@@ -1299,7 +1281,9 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                   <div>
                     <div className="flex items-center gap-1.5 mb-1.5">
                       <label className="text-xs font-semibold text-neutral-800">
-                        Payer refund address
+                        {payerMode === "EXCHANGE"
+                          ? "Self-custody refund address required for exchange withdrawals"
+                          : "Payer refund address"}
                       </label>
                       <span
                         className="text-[11px] text-neutral-400"
