@@ -1386,7 +1386,9 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                         </span>
                         <span className="inline-flex items-center gap-1 text-[10px] text-neutral-500">
                           <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                          <span>Quote updates live ({secondsRemaining}s) ⓘ</span>
+                          <span>
+                            Quote updates live ({secondsRemaining}s) ⓘ
+                          </span>
                         </span>
                       </div>
                       <div className="text-[11px] font-bold">
