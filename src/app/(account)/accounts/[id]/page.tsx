@@ -57,6 +57,7 @@ export default async function AccountPage({
         account={account}
         allAccounts={allAccounts}
         initialView={initialView}
+        userEmail={actor.email}
       />
     </main>
   );

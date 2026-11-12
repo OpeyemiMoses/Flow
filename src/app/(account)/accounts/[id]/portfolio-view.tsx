@@ -82,16 +82,19 @@ export function PortfolioView({
   initialPortfolio,
   account,
   initialView = "dashboard",
+  userEmail,
 }: {
   accountId: string;
   initialPortfolio: SerializedAccountPortfolio;
   account?: WorkspaceAccountSummary;
   allAccounts?: ReadonlyArray<WorkspaceAccountSummary>;
   initialView?: WorkspaceTab;
+  userEmail?: string;
 }) {
   const [portfolio, setPortfolio] =
     useState<SerializedAccountPortfolio>(initialPortfolio);
   const [activeTab, setActiveTab] = useState<NavTabId>(initialView);
+  const isBusiness = account?.kind === "BUSINESS";
   const [refreshing, setRefreshing] = useState(false);
   const [cooldown, setCooldown] = useState(
     initialPortfolio.cooldownRemainingSeconds ?? 0,
@@ -613,7 +616,7 @@ export function PortfolioView({
         onOpenNotifications={() => setIsNotificationsOpen(true)}
         onOpenAssistant={() => setIsAssistantOpen(true)}
         userName={account?.name ?? "Personal"}
-        userEmail="opeyemimosesawt@gmail.com"
+        userEmail={userEmail ?? "opeyemimosesawt@gmail.com"}
       />
 
       {/* Main Content Area */}
@@ -640,15 +643,32 @@ export function PortfolioView({
             {/* Dashboard Welcome Header & Security Badge */}
             <div className="flex flex-wrap items-center justify-between gap-4 pt-1 pb-1">
               <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
+                  {isBusiness ? "BUSINESS WORKSPACE" : "YOUR FLOW"}
+                </p>
                 <h1 className="font-serif text-2xl sm:text-3xl font-medium tracking-tight text-neutral-950">
                   Welcome back.
                 </h1>
                 <p className="text-xs text-neutral-500">
                   Move money, get paid, and manage your assets — all in one
-                  place.
+                  place.{" "}
+                  {account?.name && (
+                    <span className="font-semibold text-neutral-900">
+                      ({account.name} · {account.role.toLowerCase()})
+                    </span>
+                  )}
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                {isBusiness && (
+                  <Link
+                    prefetch={false}
+                    href={`/accounts/${accountId}/team`}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-neutral-950 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-neutral-800 transition-colors"
+                  >
+                    Manage team
+                  </Link>
+                )}
                 <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-neutral-100 text-neutral-700 border border-neutral-200">
                   <span
                     className={`h-1.5 w-1.5 rounded-full ${
