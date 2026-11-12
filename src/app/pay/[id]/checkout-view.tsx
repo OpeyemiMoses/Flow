@@ -1472,9 +1472,9 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                           <IconWallet size={18} />
                         </span>
                         <div className="min-w-0">
-                          <p className="font-display font-bold text-xs text-neutral-950 truncate">
+                          <h2 className="font-display font-bold text-xs text-neutral-950 truncate">
                             {request.title}
-                          </p>
+                          </h2>
                           <p className="font-mono text-[11px] text-neutral-500 truncate">
                             {request.recipientAddress
                               ? `${request.recipientAddress.slice(0, 6)}...${request.recipientAddress.slice(-4)}`
