@@ -20,6 +20,8 @@ import {
   IconExternalLink,
   IconWallet,
 } from "../../../components/icons.tsx";
+import { UnifiedAssetSelectorModal } from "../../../components/unified-asset-selector-modal.tsx";
+import type { DiscoveredToken } from "../../../server/providers/near-intents-discovery.ts";
 
 interface CheckoutViewProps {
   request: PublicPaymentRequest;
@@ -32,12 +34,16 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   const [selectedEcosystem, setSelectedEcosystem] = useState<
     "evm" | "solana" | "near"
   >("evm");
+  const [selectedNetworkFilter, setSelectedNetworkFilter] =
+    useState<string>("base-mainnet");
   const [selectedRouteId, setSelectedRouteId] = useState<string>("");
   const [customAmount, setCustomAmount] = useState<string>(
     request.displayAmount ?? "10",
   );
   const [refundAddress, setRefundAddress] = useState<string>("");
   const [copiedLink, setCopiedLink] = useState(false);
+  const [payTab, setPayTab] = useState<"STABLES" | "TOKEN">("STABLES");
+  const [isAnyTokenModalOpen, setIsAnyTokenModalOpen] = useState(false);
 
   // Indicative Quote State
   const [quote, setQuote] = useState<IndicativeQuote | null>(null);
@@ -1130,99 +1136,156 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                     </div>
                   </div>
 
-                  {/* Step 1: Select Source Ecosystem ("You're paying from") */}
-                  <div className="space-y-2.5">
-                    <label className="block text-xs font-semibold text-neutral-800">
-                      You&apos;re paying from
-                    </label>
-                    <div className="grid grid-cols-3 gap-2.5">
+                  {/* Segmented Control: Pay with stables vs Pay with token (Matches FLOW Dashboard Checkout and Assistant-9.png) */}
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-1.5 p-1 rounded-2xl bg-neutral-100 w-full">
                       <button
                         type="button"
-                        onClick={() => handleSelectEcosystem("evm")}
-                        className={`flex items-center justify-center gap-2 rounded-[14px] border py-3 px-3 text-xs font-semibold transition-all ${
-                          selectedEcosystem === "evm"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 shadow-2xs"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                        onClick={() => setPayTab("STABLES")}
+                        className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all ${
+                          payTab === "STABLES"
+                            ? "bg-white text-neutral-950 shadow-xs"
+                            : "text-neutral-600 hover:text-neutral-950"
                         }`}
                       >
-                        <ChainBadge chainKey="ethereum-mainnet" size={16} />
-                        <span>Ethereum &amp; Base</span>
+                        Pay with stables
                       </button>
-
                       <button
                         type="button"
-                        onClick={() => handleSelectEcosystem("solana")}
-                        className={`flex items-center justify-center gap-2 rounded-[14px] border py-3 px-3 text-xs font-semibold transition-all ${
-                          selectedEcosystem === "solana"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 shadow-2xs"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                        onClick={() => {
+                          setPayTab("TOKEN");
+                          setIsAnyTokenModalOpen(true);
+                        }}
+                        className={`flex-1 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                          payTab === "TOKEN"
+                            ? "bg-white text-neutral-950 shadow-xs"
+                            : "text-neutral-600 hover:text-neutral-950"
                         }`}
                       >
-                        <ChainBadge chainKey="solana-mainnet" size={16} />
-                        <span>Solana</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSelectEcosystem("near")}
-                        className={`flex items-center justify-center gap-2 rounded-[14px] border py-3 px-3 text-xs font-semibold transition-all ${
-                          selectedEcosystem === "near"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 shadow-2xs"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
-                        }`}
-                      >
-                        <ChainBadge chainKey="near-mainnet" size={16} />
-                        <span>NEAR Protocol</span>
+                        <span>✨</span>
+                        <span>Pay with token</span>
                       </button>
                     </div>
-                  </div>
 
-                  {/* Step 2: Select Source Asset & Network */}
-                  <div className="space-y-2.5">
-                    <label className="block text-xs font-semibold text-neutral-800">
-                      Source asset &amp; network
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                      {ecosystemRoutes.map((route) => {
-                        const isSelected = activeRoute?.id === route.id;
+                    {/* 4 Network Selection Rows for Stables */}
+                    <div className="space-y-2">
+                      {[
+                        {
+                          key: "base-mainnet",
+                          eco: "evm" as const,
+                          name: "Base Mainnet",
+                          sub: "USDC",
+                        },
+                        {
+                          key: "ethereum-mainnet",
+                          eco: "evm" as const,
+                          name: "Ethereum Mainnet",
+                          sub: "USDC • USDT",
+                        },
+                        {
+                          key: "solana-mainnet",
+                          eco: "solana" as const,
+                          name: "Solana Mainnet",
+                          sub: "SOL • USDC",
+                        },
+                        {
+                          key: "near-mainnet",
+                          eco: "near" as const,
+                          name: "NEAR Mainnet",
+                          sub: "NEAR • USDC",
+                        },
+                      ].map((net) => {
+                        const isSelectedNet = selectedNetworkFilter === net.key;
                         return (
                           <button
-                            key={route.id}
+                            key={net.key}
                             type="button"
-                            onClick={() => setSelectedRouteId(route.id)}
-                            className={`flex items-center justify-between rounded-[14px] border p-3.5 text-left transition-all ${
-                              isSelected
-                                ? "border-[#FF1A1A] bg-red-50/30 shadow-2xs"
-                                : "border-neutral-200 bg-white hover:bg-neutral-50"
+                            onClick={() => {
+                              setSelectedNetworkFilter(net.key);
+                              handleSelectEcosystem(net.eco);
+                              const route = request.eligibleSourceRoutes.find(
+                                (r) => r.networkKey === net.key,
+                              );
+                              if (route) setSelectedRouteId(route.id);
+                            }}
+                            className={`w-full flex items-center justify-between p-3.5 rounded-2xl border text-left transition-all ${
+                              isSelectedNet
+                                ? "border-neutral-950 bg-neutral-50/80 shadow-xs scale-[1.01]"
+                                : "border-neutral-200/90 bg-white hover:border-neutral-300"
                             }`}
                           >
-                            <div>
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-display text-xs font-bold text-neutral-950">
-                                  {route.assetSymbol}
-                                </span>
-                                <span className="text-[10px] text-neutral-400">
-                                  ({route.standard})
-                                </span>
+                            <div className="flex items-center gap-3">
+                              <ChainBadge chainKey={net.key} size={24} />
+                              <div>
+                                <div className="text-xs font-bold text-neutral-950">
+                                  {net.name}
+                                </div>
+                                <div className="text-[10px] text-neutral-500">
+                                  {net.sub}
+                                </div>
                               </div>
-                              <p className="text-[11px] text-neutral-500">
-                                {route.networkName}
-                              </p>
                             </div>
-                            <span
-                              className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                                route.routeType === "DIRECT_TRANSFER"
-                                  ? "bg-emerald-50 text-emerald-700"
-                                  : "bg-red-50 text-[#FF1A1A]"
-                              }`}
-                            >
-                              {route.routeType === "DIRECT_TRANSFER"
-                                ? "Direct"
-                                : "1Click"}
+                            <span className="text-neutral-400 font-bold">
+                              &gt;
                             </span>
                           </button>
                         );
                       })}
+                    </div>
+                  </div>
+
+                  {/* Token Options for Selected Network */}
+                  <div className="space-y-2.5 pt-1">
+                    <label className="block text-xs font-semibold text-neutral-800">
+                      Selected Network Assets
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      {ecosystemRoutes
+                        .filter((r) =>
+                          selectedNetworkFilter
+                            ? r.networkKey === selectedNetworkFilter
+                            : true,
+                        )
+                        .map((route) => {
+                          const isSelected = activeRoute?.id === route.id;
+                          return (
+                            <button
+                              key={route.id}
+                              type="button"
+                              onClick={() => setSelectedRouteId(route.id)}
+                              className={`flex items-center justify-between rounded-[14px] border p-3.5 text-left transition-all ${
+                                isSelected
+                                  ? "border-[#FF1A1A] bg-red-50/30 shadow-2xs"
+                                  : "border-neutral-200 bg-white hover:bg-neutral-50"
+                              }`}
+                            >
+                              <div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-display text-xs font-bold text-neutral-950">
+                                    {route.assetSymbol}
+                                  </span>
+                                  <span className="text-[10px] text-neutral-400">
+                                    ({route.standard})
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-neutral-500">
+                                  {route.networkName}
+                                </p>
+                              </div>
+                              <span
+                                className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                                  route.routeType === "DIRECT_TRANSFER"
+                                    ? "bg-emerald-50 text-emerald-700"
+                                    : "bg-red-50 text-[#FF1A1A]"
+                                }`}
+                              >
+                                {route.routeType === "DIRECT_TRANSFER"
+                                  ? "Direct"
+                                  : "1Click"}
+                              </span>
+                            </button>
+                          );
+                        })}
                     </div>
                   </div>
 
@@ -2011,6 +2074,35 @@ export function CheckoutView({ request }: CheckoutViewProps) {
           </div>
         )}
       </main>
+
+      {/* Any Token Discovery Modal (Matches FLOW Dashboard Checkout and Assistant-9.png) */}
+      <UnifiedAssetSelectorModal
+        isOpen={isAnyTokenModalOpen}
+        onClose={() => setIsAnyTokenModalOpen(false)}
+        darkTheme={true}
+        filterCapability="CAN_PAY_FROM"
+        onSelectToken={(token: DiscoveredToken) => {
+          if (
+            token.ecosystem === "evm" ||
+            token.ecosystem === "solana" ||
+            token.ecosystem === "near"
+          ) {
+            setSelectedEcosystem(token.ecosystem);
+          }
+          const matching = request.eligibleSourceRoutes.find(
+            (r) =>
+              r.assetSymbol.toUpperCase() === token.symbol.toUpperCase() &&
+              (r.networkKey.includes(token.networkKey) ||
+                token.networkKey.includes(r.networkKey)),
+          );
+          if (matching) {
+            setSelectedRouteId(matching.id);
+          }
+          setQuote(null);
+          setQuoteError(null);
+          setIsAnyTokenModalOpen(false);
+        }}
+      />
     </div>
   );
 }
