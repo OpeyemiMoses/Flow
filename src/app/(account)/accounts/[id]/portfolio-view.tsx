@@ -240,6 +240,29 @@ export function PortfolioView({
   }, [accountId, activeTab]);
 
   useEffect(() => {
+    let active = true;
+    const poll = () => {
+      send<SerializedAccountPortfolio>(
+        `/api/accounts/${accountId}/portfolio`,
+        {},
+        "GET",
+      )
+        .then((res) => {
+          if (active && res?.balances) {
+            setPortfolio(res);
+          }
+        })
+        .catch(() => {});
+    };
+    poll();
+    const interval = setInterval(poll, 10000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [accountId, activeTab]);
+
+  useEffect(() => {
     if (cooldown <= 0) return;
     const timer = setInterval(() => {
       setCooldown((prev) => (prev > 1 ? prev - 1 : 0));
@@ -284,13 +307,21 @@ export function PortfolioView({
   const balances = portfolio.balances;
 
   const mergedCatalogRows = useMemo(() => {
-    return CURATED_SUPPORTED_DEPLOYMENTS.map((item) => {
+    return MAINNET_SUPPORTED_DEPLOYMENTS.map((item) => {
       const matchingBalances = balances.filter(
-        (b: SerializedWalletBalanceRecord) =>
-          b.networkAsset.network.toLowerCase() ===
-            item.networkKey.toLowerCase() &&
-          b.networkAsset.asset.symbol.toUpperCase() ===
-            item.symbol.toUpperCase(),
+        (b: SerializedWalletBalanceRecord) => {
+          const bNet = b.networkAsset.network.toLowerCase();
+          const itemNet = item.networkKey.toLowerCase();
+          const isNetworkMatch =
+            bNet === itemNet ||
+            itemNet.startsWith(bNet) ||
+            itemNet.split("-")[0] === bNet;
+          return (
+            isNetworkMatch &&
+            b.networkAsset.asset.symbol.toUpperCase() ===
+              item.symbol.toUpperCase()
+          );
+        },
       );
       const primaryMatch = matchingBalances[0] ?? null;
       return {
@@ -318,29 +349,29 @@ export function PortfolioView({
 
   const selectedCatalogItem: CatalogTokenDeployment = useMemo(() => {
     return (
-      CURATED_SUPPORTED_DEPLOYMENTS.find((d) => d.id === selectedAssetId) ??
-      CURATED_SUPPORTED_DEPLOYMENTS[0]
+      MAINNET_SUPPORTED_DEPLOYMENTS.find((d) => d.id === selectedAssetId) ??
+      MAINNET_SUPPORTED_DEPLOYMENTS[0]
     );
   }, [selectedAssetId]);
 
   const sourceDeployment: CatalogTokenDeployment = useMemo(
     () =>
-      CURATED_SUPPORTED_DEPLOYMENTS.find((d) => d.id === sourceDeploymentId) ??
-      CURATED_SUPPORTED_DEPLOYMENTS[0],
+      MAINNET_SUPPORTED_DEPLOYMENTS.find((d) => d.id === sourceDeploymentId) ??
+      MAINNET_SUPPORTED_DEPLOYMENTS[0],
     [sourceDeploymentId],
   );
 
   const destDeployment: CatalogTokenDeployment = useMemo(
     () =>
-      CURATED_SUPPORTED_DEPLOYMENTS.find((d) => d.id === destDeploymentId) ??
-      CURATED_SUPPORTED_DEPLOYMENTS[0],
+      MAINNET_SUPPORTED_DEPLOYMENTS.find((d) => d.id === destDeploymentId) ??
+      MAINNET_SUPPORTED_DEPLOYMENTS[0],
     [destDeploymentId],
   );
 
   const receiveDeployment: CatalogTokenDeployment = useMemo(
     () =>
-      CURATED_SUPPORTED_DEPLOYMENTS.find((d) => d.id === receiveDeploymentId) ??
-      CURATED_SUPPORTED_DEPLOYMENTS[0],
+      MAINNET_SUPPORTED_DEPLOYMENTS.find((d) => d.id === receiveDeploymentId) ??
+      MAINNET_SUPPORTED_DEPLOYMENTS[0],
     [receiveDeploymentId],
   );
 
@@ -403,13 +434,17 @@ export function PortfolioView({
 
   const sourceObservedBalance = useMemo(() => {
     return (
-      balances.find(
-        (b: SerializedWalletBalanceRecord) =>
-          b.networkAsset.network.toLowerCase() ===
-            sourceDeployment.networkKey.toLowerCase() &&
+      balances.find((b: SerializedWalletBalanceRecord) => {
+        const bNet = b.networkAsset.network.toLowerCase();
+        const sNet = sourceDeployment.networkKey.toLowerCase();
+        const isNetworkMatch =
+          bNet === sNet || sNet.startsWith(bNet) || sNet.split("-")[0] === bNet;
+        return (
+          isNetworkMatch &&
           b.networkAsset.asset.symbol.toUpperCase() ===
-            sourceDeployment.symbol.toUpperCase(),
-      ) ?? null
+            sourceDeployment.symbol.toUpperCase()
+        );
+      }) ?? null
     );
   }, [balances, sourceDeployment]);
 
@@ -592,7 +627,9 @@ export function PortfolioView({
   const baseEthBalance = useMemo(() => {
     const match = balances.find(
       (b) =>
-        b.networkAsset.network === "base" &&
+        (b.networkAsset.network === "base" ||
+          b.networkAsset.network === "base-mainnet" ||
+          b.networkAsset.chainId === "8453") &&
         b.networkAsset.asset.symbol.toUpperCase() === "ETH",
     );
     return match?.displayBalance ?? "0.00";
@@ -601,10 +638,18 @@ export function PortfolioView({
   const baseUsdcBalance = useMemo(() => {
     const match = balances.find(
       (b) =>
-        b.networkAsset.network === "base" &&
+        (b.networkAsset.network === "base" ||
+          b.networkAsset.network === "base-mainnet" ||
+          b.networkAsset.chainId === "8453") &&
         b.networkAsset.asset.symbol.toUpperCase() === "USDC",
     );
-    return match?.displayBalance ?? "0.00";
+    if (!match) return "0.00";
+    const num = Number(match.displayBalance);
+    if (isNaN(num)) return match.displayBalance;
+    return num.toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 6,
+    });
   }, [balances]);
 
   const solNativeBalance = useMemo(() => {

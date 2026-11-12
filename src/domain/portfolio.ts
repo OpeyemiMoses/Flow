@@ -75,10 +75,11 @@ export function serializePortfolio(
           environment: projection.wallet.environment,
           policy: projection.wallet.policyState,
           executionDisabled: true,
-          depositEligible: false,
+          depositEligible: !projection.wallet.isTestnet,
           transferEligible: false,
-          disclaimer:
-            "This testnet wallet is in PROVISIONING state with execution disabled. It is strictly ineligible for deposits, transfers, or execution. Testnet assets have no monetary value.",
+          disclaimer: projection.wallet.isTestnet
+            ? "This testnet wallet is in PROVISIONING state with execution disabled. It is strictly ineligible for deposits, transfers, or execution. Testnet assets have no monetary value."
+            : "Mainnet custody wallet. Inbound payments verified on-chain. Outgoing transfer execution is disabled by security policy.",
           addresses: projection.wallet.addresses ?? [],
         }
       : null,

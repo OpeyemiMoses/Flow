@@ -4,6 +4,10 @@ import { getPrismaClient, type FlowDb } from "../../foundation/prisma.ts";
 import { isValidTransactionHash } from "../../domain/ledger.ts";
 import { CURATED_SUPPORTED_DEPLOYMENTS } from "../../domain/supported-assets-catalog.ts";
 import {
+  getDefaultRpcConfig,
+  reconcileWalletBalances,
+} from "../assets/connectors/multi-chain-reconciler.ts";
+import {
   recordVerificationInDatabase,
   verifyOnChainTransfer,
   type EvidenceSource,
@@ -755,6 +759,44 @@ export class PaymentMonitoringWorker {
         sourceTx: sTx,
         destTx: dTx,
       });
+
+      // Immediately reconcile recipient wallet balance from canonical RPC upon settlement
+      try {
+        const recipientWallets = await this.workerDb.$queryRaw<
+          Array<{ walletId: string; environment: string; walletStatus: string }>
+        >`
+          SELECT w.id as "walletId", w.environment, w.status::text as "walletStatus"
+          FROM flow.payment_attempts pa
+          JOIN flow.payment_requests pr ON pr.id = pa.payment_request_id
+          JOIN flow.wallets w ON w.account_id = pr.account_id
+          WHERE pa.id = ${attempt.id}::uuid
+          LIMIT 1
+        `;
+        const rWallet = recipientWallets[0];
+        if (rWallet && rWallet.walletStatus === "ACTIVE") {
+          const rpcConfig = getDefaultRpcConfig(
+            rWallet.environment as "testnet" | "mainnet",
+          );
+          await reconcileWalletBalances(
+            this.workerDb,
+            rWallet.walletId,
+            rpcConfig,
+          );
+          log("info", "settlement_wallet_balance_reconciled", {
+            attemptPublicId: attempt.attemptPublicId,
+            walletId: rWallet.walletId,
+            environment: rWallet.environment,
+          });
+        }
+      } catch (balanceErr) {
+        log("error", "settlement_wallet_balance_reconcile_failed", {
+          attemptPublicId: attempt.attemptPublicId,
+          error:
+            balanceErr instanceof Error
+              ? balanceErr.message
+              : String(balanceErr),
+        });
+      }
 
       return { transitioned: true, newStatus: "SETTLED" };
     }

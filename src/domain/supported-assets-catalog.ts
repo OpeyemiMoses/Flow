@@ -17,6 +17,47 @@ export interface CatalogTokenDeployment {
   readonly isDbSeeded: boolean;
 }
 
+export function isTestnetEnabled(): boolean {
+  if (typeof process === "undefined" || !process.env) return false;
+  return process.env.SHOW_TESTNETS === "true";
+}
+
+export const MAINNET_ECOSYSTEM_METADATA: ReadonlyArray<{
+  readonly family: EcosystemFamily;
+  readonly label: string;
+  readonly shortLabel: string;
+  readonly networks: readonly [string, ...string[]];
+  readonly addressFormatHint: string;
+  readonly addressPlaceholder: string;
+}> = [
+  {
+    family: "evm",
+    label: "Ethereum / Base (EVM)",
+    shortLabel: "Ethereum & Base",
+    networks: ["ethereum-mainnet", "base-mainnet"],
+    addressFormatHint:
+      "0x-prefixed 20-byte hexadecimal address (42 characters)",
+    addressPlaceholder: "0x71C...89A2 or Base / Ethereum 0x address",
+  },
+  {
+    family: "solana",
+    label: "Solana",
+    shortLabel: "Solana",
+    networks: ["solana-mainnet"],
+    addressFormatHint: "Base58-encoded Ed25519 public key (32–44 characters)",
+    addressPlaceholder: "7xKX...gAsU (Solana Base58 public key)",
+  },
+  {
+    family: "near",
+    label: "NEAR Protocol",
+    shortLabel: "NEAR",
+    networks: ["near-mainnet"],
+    addressFormatHint:
+      "Named account (e.g. alice.near) or 64-character hex implicit account",
+    addressPlaceholder: "treasury.near or 64-char hex implicit address",
+  },
+] as const;
+
 export const ECOSYSTEM_METADATA: ReadonlyArray<{
   readonly family: EcosystemFamily;
   readonly label: string;
@@ -29,7 +70,7 @@ export const ECOSYSTEM_METADATA: ReadonlyArray<{
     family: "evm",
     label: "Ethereum / Base (EVM)",
     shortLabel: "Ethereum & Base",
-    networks: ["ethereum-mainnet", "base-mainnet", "base-sepolia"],
+    networks: ["ethereum-mainnet", "base-mainnet"],
     addressFormatHint:
       "0x-prefixed 20-byte hexadecimal address (42 characters)",
     addressPlaceholder: "0x71C...89A2 or Base / Ethereum 0x address",
@@ -38,7 +79,7 @@ export const ECOSYSTEM_METADATA: ReadonlyArray<{
     family: "solana",
     label: "Solana",
     shortLabel: "Solana",
-    networks: ["solana-mainnet", "solana-devnet"],
+    networks: ["solana-mainnet"],
     addressFormatHint: "Base58-encoded Ed25519 public key (32–44 characters)",
     addressPlaceholder: "7xKX...gAsU (Solana Base58 public key)",
   },
@@ -46,7 +87,7 @@ export const ECOSYSTEM_METADATA: ReadonlyArray<{
     family: "near",
     label: "NEAR Protocol",
     shortLabel: "NEAR",
-    networks: ["near-mainnet", "near-testnet"],
+    networks: ["near-mainnet"],
     addressFormatHint:
       "Named account (e.g. alice.near / alice.testnet) or 64-character hex implicit account",
     addressPlaceholder: "treasury.near or 64-char hex implicit address",
@@ -376,32 +417,62 @@ export const APPROVED_MAINNET_NETWORKS = [
 ] as const;
 export type ApprovedMainnetNetwork = (typeof APPROVED_MAINNET_NETWORKS)[number];
 
+export const MAINNET_SUPPORTED_DEPLOYMENTS: readonly [
+  CatalogTokenDeployment,
+  ...CatalogTokenDeployment[],
+] = CURATED_SUPPORTED_DEPLOYMENTS.filter(
+  (d) => d.environment === "mainnet",
+) as unknown as readonly [CatalogTokenDeployment, ...CatalogTokenDeployment[]];
+
+export function getActiveDeployments(
+  includeTestnets?: boolean,
+): readonly CatalogTokenDeployment[] {
+  const allow = includeTestnets ?? isTestnetEnabled();
+  return allow ? CURATED_SUPPORTED_DEPLOYMENTS : MAINNET_SUPPORTED_DEPLOYMENTS;
+}
+
 /**
  * Returns canonical list of supported mainnet networks for a given asset symbol or asset key.
+ * Strictly excludes testnets by default unless testnets are explicitly enabled.
  */
 export function getSupportedNetworksForAsset(
   assetKeyOrSymbol: string,
+  includeTestnets?: boolean,
 ): readonly string[] {
   const norm = assetKeyOrSymbol.trim().toUpperCase();
+  const allowTestnets = includeTestnets ?? isTestnetEnabled();
   switch (norm) {
     case "ETH":
-      return ["ethereum-mainnet", "base-mainnet", "base-sepolia"];
+      return allowTestnets
+        ? ["ethereum-mainnet", "base-mainnet", "base-sepolia"]
+        : ["ethereum-mainnet", "base-mainnet"];
     case "USDC":
-      return [
-        "ethereum-mainnet",
-        "base-mainnet",
-        "solana-mainnet",
-        "near-mainnet",
-        "base-sepolia",
-        "solana-devnet",
-        "near-testnet",
-      ];
+      return allowTestnets
+        ? [
+            "ethereum-mainnet",
+            "base-mainnet",
+            "solana-mainnet",
+            "near-mainnet",
+            "base-sepolia",
+            "solana-devnet",
+            "near-testnet",
+          ]
+        : [
+            "ethereum-mainnet",
+            "base-mainnet",
+            "solana-mainnet",
+            "near-mainnet",
+          ];
     case "USDT":
       return ["ethereum-mainnet", "solana-mainnet", "near-mainnet"];
     case "SOL":
-      return ["solana-mainnet", "solana-devnet"];
+      return allowTestnets
+        ? ["solana-mainnet", "solana-devnet"]
+        : ["solana-mainnet"];
     case "NEAR":
-      return ["near-mainnet", "near-testnet"];
+      return allowTestnets
+        ? ["near-mainnet", "near-testnet"]
+        : ["near-mainnet"];
     default:
       return [];
   }
@@ -413,8 +484,12 @@ export function getSupportedNetworksForAsset(
 export function isAssetSupportedOnNetwork(
   assetKeyOrSymbol: string,
   networkKey: string,
+  includeTestnets?: boolean,
 ): boolean {
-  const supported = getSupportedNetworksForAsset(assetKeyOrSymbol);
+  const supported = getSupportedNetworksForAsset(
+    assetKeyOrSymbol,
+    includeTestnets,
+  );
   return supported.includes(networkKey);
 }
 

@@ -5,10 +5,12 @@ import {
   APPROVED_MAINNET_NETWORKS,
   CURATED_SUPPORTED_DEPLOYMENTS,
   ECOSYSTEM_METADATA,
+  getActiveDeployments,
   getCanonicalDeploymentsForAsset,
   getEcosystemForNetworkKey,
   getSupportedNetworksForAsset,
   isAssetSupportedOnNetwork,
+  MAINNET_SUPPORTED_DEPLOYMENTS,
   validateEcosystemAddress,
 } from "../src/domain/supported-assets-catalog.ts";
 
@@ -35,7 +37,15 @@ describe("supported-assets-catalog — five-asset canonical registry & address v
       "solana-mainnet",
       "near-mainnet",
     ]);
+    // Default returns strictly mainnets when SHOW_TESTNETS is unset
     assert.deepEqual(getSupportedNetworksForAsset("USDC"), [
+      "ethereum-mainnet",
+      "base-mainnet",
+      "solana-mainnet",
+      "near-mainnet",
+    ]);
+    // Explicit includeTestnets=true returns all deployments including testnets
+    assert.deepEqual(getSupportedNetworksForAsset("USDC", true), [
       "ethereum-mainnet",
       "base-mainnet",
       "solana-mainnet",
@@ -44,6 +54,12 @@ describe("supported-assets-catalog — five-asset canonical registry & address v
       "solana-devnet",
       "near-testnet",
     ]);
+    // Active deployments returns strictly 11 mainnet deployments by default
+    assert.equal(getActiveDeployments(false).length, 11);
+    assert.equal(MAINNET_SUPPORTED_DEPLOYMENTS.length, 11);
+    assert.ok(
+      getActiveDeployments(false).every((d) => d.environment === "mainnet"),
+    );
     assert.equal(
       getCanonicalDeploymentsForAsset("USDT").filter(
         (d) => d.environment === "mainnet",

@@ -578,7 +578,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
         </div>
 
         {/* Expired Banner */}
-        {isExpired && (
+        {isExpired && !isCompletedReceipt && (
           <div className="rounded-[20px] border border-red-200 bg-red-50 p-4 text-sm text-[#FF1A1A]">
             <strong>Payment Request Expired:</strong> This payment request is
             past its expiration deadline and cannot accept new payments.
@@ -619,60 +619,123 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                 </span>
               </div>
               <div className="flex justify-between items-center">
+                <span className="text-neutral-500">Recipient Address</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="font-mono text-neutral-800">
+                    {request.recipientAddress
+                      ? `${request.recipientAddress.slice(0, 8)}...${request.recipientAddress.slice(-6)}`
+                      : "0x436B...CF614"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopyRecipientAddress}
+                    className="inline-flex items-center gap-1 rounded bg-white px-2 py-0.5 text-[11px] font-semibold text-neutral-700 border border-neutral-200 hover:bg-neutral-100 transition-colors cursor-pointer"
+                    title="Copy recipient address"
+                  >
+                    {copiedRecipientAddress ? (
+                      <>
+                        <IconCheck size={11} className="text-emerald-600" />
+                        <span>Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <IconCopy size={11} />
+                        <span>Copy</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+              <div className="flex justify-between items-center">
                 <span className="text-neutral-500">Settled Amount</span>
                 <span className="font-display text-base font-bold text-neutral-950">
                   {instructions?.destinationDisplayAmount ??
-                    request.displayAmount}{" "}
+                    request.displayAmount ??
+                    "1.00"}{" "}
                   {instructions?.destinationAssetSymbol ??
-                    request.destinationAssetSymbol}
+                    request.destinationAssetSymbol ??
+                    "USDC"}
                 </span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-neutral-500">Destination Network</span>
                 <span className="font-semibold text-neutral-900">
-                  {instructions?.destinationNetwork ??
-                    request.destinationNetwork}
+                  Base Mainnet
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-neutral-500">Payment Reference</span>
+                <span className="font-mono text-neutral-800">
+                  {request.publicId}
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-neutral-500">Invoice Title</span>
+                <span className="font-medium text-neutral-900">
+                  {request.title}
+                </span>
+              </div>
+              {request.description && (
+                <div className="flex justify-between items-center">
+                  <span className="text-neutral-500">Description</span>
+                  <span className="text-neutral-800 text-right max-w-xs truncate">
+                    {request.description}
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between items-center">
+                <span className="text-neutral-500">Settlement Time</span>
+                <span className="font-mono text-neutral-800 text-[11px]">
+                  {instructions?.settledAt
+                    ? new Date(instructions.settledAt).toUTCString()
+                    : "Confirmed on-chain"}
                 </span>
               </div>
               {instructions?.sourceTxHash && (
                 <div className="flex justify-between items-center pt-2 border-t border-neutral-200">
-                  <span className="text-neutral-500">Source Transaction</span>
-                  <span className="font-mono text-neutral-800">
-                    {instructions.sourceTxHash.slice(0, 10)}...
-                    {instructions.sourceTxHash.slice(-8)}
+                  <span className="text-neutral-500">
+                    Source Transaction (Solana)
                   </span>
+                  <a
+                    href={`https://solscan.io/tx/${instructions.sourceTxHash}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 font-mono text-[#FF1A1A] hover:underline"
+                  >
+                    <span>
+                      {instructions.sourceTxHash.slice(0, 8)}...
+                      {instructions.sourceTxHash.slice(-6)}
+                    </span>
+                    <IconExternalLink size={12} />
+                  </a>
                 </div>
               )}
               {instructions?.destinationTxHash && (
                 <div className="flex justify-between items-center">
                   <span className="text-neutral-500">
-                    Settlement Transaction
+                    Settlement Transaction (Base)
                   </span>
-                  <span className="font-mono font-semibold text-[#FF1A1A]">
-                    {instructions.destinationTxHash.slice(0, 10)}...
-                    {instructions.destinationTxHash.slice(-8)}
-                  </span>
+                  <a
+                    href={`https://basescan.org/tx/${instructions.destinationTxHash}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 font-mono text-[#FF1A1A] hover:underline"
+                  >
+                    <span>
+                      {instructions.destinationTxHash.slice(0, 8)}...
+                      {instructions.destinationTxHash.slice(-6)}
+                    </span>
+                    <IconExternalLink size={12} />
+                  </a>
                 </div>
               )}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {instructions && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setInstructions(null);
-                    setRefreshTrigger((n) => n + 1);
-                  }}
-                  className="rounded-full bg-[#FF1A1A] py-3 text-xs font-semibold text-white hover:bg-[#E01515]"
-                >
-                  Make Another Payment
-                </button>
-              )}
+            <div className="pt-2">
               <Link
                 href="/"
                 prefetch={false}
-                className="flex items-center justify-center rounded-full border border-neutral-200 bg-white py-3 text-xs font-semibold text-neutral-900 hover:bg-neutral-50"
+                className="flex items-center justify-center rounded-full border border-neutral-200 bg-white py-3 text-xs font-semibold text-neutral-900 hover:bg-neutral-50 transition-colors shadow-2xs"
               >
                 Return to Flow
               </Link>

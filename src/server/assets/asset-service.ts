@@ -347,6 +347,10 @@ export async function getAccountBalances(
       JOIN flow.network_assets na ON na.id = wb.network_asset_id
       JOIN flow.assets a ON a.id = na.asset_id
       WHERE wb.wallet_id = ${wallet.id}::uuid
+        AND (
+          ${wallet.environment === "testnet"} = true
+          OR na.chain_id IN ('1', '8453', 'solana-mainnet', 'near-mainnet')
+        )
       ORDER BY na.network, na.chain_id, a.symbol
     `;
 
