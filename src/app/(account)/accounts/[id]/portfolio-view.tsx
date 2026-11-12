@@ -1717,7 +1717,7 @@ export function PortfolioView({
           <div className="max-w-2xl mx-auto space-y-6">
             <div>
               <h1 className="font-serif text-3xl sm:text-4xl font-normal tracking-tight text-neutral-950">
-                Send
+                Send &amp; Convert
               </h1>
               <p className="mt-1 text-xs sm:text-sm text-neutral-600">
                 Transfer or swap assets across 35+ chains via NEAR Intents.
