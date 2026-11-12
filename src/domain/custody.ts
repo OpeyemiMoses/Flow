@@ -559,7 +559,9 @@ export function validateAddressForNetwork(
   switch (network) {
     case "near:mainnet":
     case "near:testnet":
-    case "near": {
+    case "near":
+    case "near-mainnet":
+    case "near-testnet": {
       const valid = isValidNearAddress(trimmed);
       return valid
         ? { valid: true, normalized: trimmed.toLowerCase() }
@@ -573,7 +575,11 @@ export function validateAddressForNetwork(
     case "eip155:8453": // Base
     case "eip155:1": // Ethereum
     case "base":
-    case "ethereum": {
+    case "ethereum":
+    case "base-mainnet":
+    case "base-sepolia":
+    case "ethereum-mainnet":
+    case "ethereum-sepolia": {
       const valid = isValidEvmAddress(trimmed);
       return valid
         ? { valid: true, normalized: trimmed.toLowerCase() }
@@ -585,7 +591,9 @@ export function validateAddressForNetwork(
     }
 
     case "solana:mainnet":
-    case "solana": {
+    case "solana":
+    case "solana-mainnet":
+    case "solana-devnet": {
       const valid = isValidSolanaAddress(trimmed);
       return valid
         ? { valid: true, normalized: trimmed }

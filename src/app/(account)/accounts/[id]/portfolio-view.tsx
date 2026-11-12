@@ -13,6 +13,7 @@ import {
   type HeldAssetItem,
 } from "../../../../components/assets-held-modal.tsx";
 import { UnifiedAssetSelectorModal } from "../../../../components/unified-asset-selector-modal.tsx";
+import type { DiscoveredToken } from "../../../../server/providers/near-intents-discovery.ts";
 import { QrCode } from "../../../../components/qr-code.tsx";
 import {
   AssetAvatar,
@@ -21,9 +22,11 @@ import {
   IconCopy,
   IconRefresh,
   IconSearch,
+  NearIntentsBadge,
 } from "../../../../components/icons.tsx";
 import {
   canonicalizeNetworkId,
+  getEcosystemForNetworkKey,
   MAINNET_SUPPORTED_DEPLOYMENTS,
   validateEcosystemAddress,
   type CatalogTokenDeployment,
@@ -118,6 +121,22 @@ export function PortfolioView({
   // Carousel state (Matches FLOW Dashboard Overview-2.png)
   const [carouselIndex, setCarouselIndex] = useState(0);
 
+  // Send vs Convert state (Matches media_1794490079738_c27b1dd5.jpg)
+  const [sendMode, setSendMode] = useState<"SEND" | "CONVERT">("SEND");
+  const [convertSourceDeploymentId, setConvertSourceDeploymentId] =
+    useState<string>("base-mainnet:USDC");
+  const [convertDestDeploymentId, setConvertDestDeploymentId] =
+    useState<string>("near-mainnet:NEAR");
+  const [convertAmount, setConvertAmount] = useState<string>("1.00");
+  const [convertQuoteLoading, setConvertQuoteLoading] = useState(false);
+  const [convertQuote, setConvertQuote] = useState<{
+    rateDescription?: string;
+    estimatedTime?: string;
+    estimatedReceive?: string;
+    networkFeeUsd?: string;
+    routeBadge?: string;
+  } | null>(null);
+
   // Send state (Matches FLOW Send_ Solana to Base-6.png & media_1794481849794_6d251fd6.jpg)
   const [sendSourceDeploymentId, setSendSourceDeploymentId] =
     useState<string>("base-mainnet:USDC");
@@ -135,7 +154,7 @@ export function PortfolioView({
   } | null>(null);
   const [showSendGuardModal, setShowSendGuardModal] = useState(false);
 
-  // Add Money state (Matches media_1794481849681_4e42b25f.jpg)
+  // Add Money state (Matches media_1794490079680_0a50f095.jpg)
   const [depositMode, setDepositMode] = useState<"DIRECT" | "DEPOSIT">(
     "DIRECT",
   );
@@ -144,6 +163,26 @@ export function PortfolioView({
       MAINNET_SUPPORTED_DEPLOYMENTS.find((d) => d.id === "base-mainnet:USDC") ??
         MAINNET_SUPPORTED_DEPLOYMENTS[0]!,
     );
+
+  // Cross-chain deposit into native NEAR state
+  const [crossChainSourceToken, setCrossChainSourceToken] =
+    useState<DiscoveredToken | null>(null);
+  const [crossChainDepositAmount, setCrossChainDepositAmount] =
+    useState<string>("10");
+  const [crossChainRefundAddress, setCrossChainRefundAddress] =
+    useState<string>("");
+  const [crossChainQuoteLoading, setCrossChainQuoteLoading] = useState(false);
+  const [crossChainQuote, setCrossChainQuote] = useState<{
+    amountOutAtomic?: string;
+    recipientDisplayAmount?: string;
+    rate?: string;
+    estimatedTimeSeconds?: number;
+    intentFeeDisplay?: string;
+    networkCostDisplay?: string;
+  } | null>(null);
+  const [crossChainConfirmed, setCrossChainConfirmed] = useState(false);
+  const [isCrossChainTokenSelectorOpen, setIsCrossChainTokenSelectorOpen] =
+    useState(false);
 
   // Payment Links state (Matches media_1794481849816_2576ee33.jpg)
   const [paymentRequests, setPaymentRequests] = useState<
@@ -339,6 +378,53 @@ export function PortfolioView({
 
     return items;
   }, [portfolio.balances]);
+
+  const convertSourceDeployment = useMemo(() => {
+    return (
+      heldAssets.find((h) => h.deployment.id === convertSourceDeploymentId)
+        ?.deployment ??
+      heldAssets[0]?.deployment ??
+      MAINNET_SUPPORTED_DEPLOYMENTS[0]!
+    );
+  }, [convertSourceDeploymentId, heldAssets]);
+
+  const convertDestDeployment = useMemo(() => {
+    return (
+      MAINNET_SUPPORTED_DEPLOYMENTS.find(
+        (d) => d.id === convertDestDeploymentId,
+      ) ?? MAINNET_SUPPORTED_DEPLOYMENTS[3]! // near-mainnet:NEAR
+    );
+  }, [convertDestDeploymentId]);
+
+  const convertDestAddress = useMemo(() => {
+    const cNet = canonicalizeNetworkId(convertDestDeployment.networkKey);
+    if (cNet === "ethereum-mainnet" || cNet === "base-mainnet") return evmAddr;
+    if (cNet === "solana-mainnet") return solAddr;
+    if (cNet === "near-mainnet") return nearAddr;
+    return nearAddr;
+  }, [convertDestDeployment.networkKey, evmAddr, solAddr, nearAddr]);
+
+  const convertSourceBalance = useMemo(() => {
+    const item = heldAssets.find(
+      (h) => h.deployment.id === convertSourceDeployment.id,
+    );
+    return item?.displayBalance ?? "1.00";
+  }, [convertSourceDeployment.id, heldAssets]);
+
+  const crossChainRefundValidation = useMemo(() => {
+    if (!crossChainSourceToken || !crossChainRefundAddress.trim()) {
+      return { valid: false, reason: "" };
+    }
+    const eco = getEcosystemForNetworkKey(crossChainSourceToken.networkKey);
+    const res = validateEcosystemAddress(eco, crossChainRefundAddress.trim());
+    return {
+      valid: res.valid,
+      reason: res.valid
+        ? `Valid ${crossChainSourceToken.networkName} address format.`
+        : res.reason ||
+          `Invalid address format for ${crossChainSourceToken.networkName}.`,
+    };
+  }, [crossChainRefundAddress, crossChainSourceToken]);
 
   // Total balance string
   const totalBalanceUsd = useMemo(() => {
@@ -573,27 +659,44 @@ export function PortfolioView({
     setMessage("");
     try {
       const res = await send<{
-        rateDescription: string;
-        estimatedTime: string;
-        networkFeeUsd: string;
-        routeBadge: string;
+        ok: boolean;
+        quote: {
+          recipientDisplayAmount: string;
+          rate: string;
+          estimatedTimeSeconds: number;
+          intentFeeDisplay: string;
+          networkCostDisplay: string;
+        };
       }>(
         `/api/accounts/${accountId}/send/quote`,
         {
           sourceDeploymentId: sendSourceDeploymentId,
           destinationDeploymentId: sendDestDeploymentId,
-          amount: sendAmount,
+          sourceDisplayAmount: sendAmount,
           recipientAddress: sendRecipientAddress.trim(),
+          sourceDecimals: sendSourceDeployment.decimals,
+          destinationDecimals: sendDestDeployment.decimals,
         },
         "POST",
       );
-      setSendQuote(res);
+      if (res.quote) {
+        setSendQuote({
+          estimatedReceive: `${res.quote.recipientDisplayAmount} ${sendDestDeployment.symbol}`,
+          rateDescription: `1 ${sendSourceDeployment.symbol} ≈ ${res.quote.rate} ${sendDestDeployment.symbol}`,
+          networkFeeUsd: res.quote.networkCostDisplay || "~$0.02",
+          estimatedTime: `~${res.quote.estimatedTimeSeconds ?? 30}s`,
+          routeBadge: "NEAR Intents cross-chain solver",
+        });
+      }
     } catch {
       // Fallback preview quote
+      const sNum = parseFloat(sendAmount) || 1;
+      const rateNum = sendDestDeployment.symbol === "SOL" ? 0.0048 : 1.0;
       setSendQuote({
-        rateDescription: "1 USDC ≈ 0.0048 SOL",
+        estimatedReceive: `${(sNum * rateNum).toFixed(4)} ${sendDestDeployment.symbol}`,
+        rateDescription: `1 ${sendSourceDeployment.symbol} ≈ ${rateNum} ${sendDestDeployment.symbol}`,
         estimatedTime: "~15-30s",
-        networkFeeUsd: "$0.00 (Gasless solver)",
+        networkFeeUsd: "~$0.02",
         routeBadge: "NEAR Intents cross-chain solver",
       });
     } finally {
@@ -602,9 +705,141 @@ export function PortfolioView({
   }, [
     accountId,
     sendAmount,
+    sendDestDeployment.decimals,
+    sendDestDeployment.symbol,
     sendDestDeploymentId,
     sendRecipientAddress,
+    sendSourceDeployment.decimals,
+    sendSourceDeployment.symbol,
     sendSourceDeploymentId,
+  ]);
+
+  // Convert quote review
+  const handleReviewConvertQuote = useCallback(async () => {
+    if (!convertAmount || parseFloat(convertAmount) <= 0) {
+      setMessage("Please enter a valid convert amount.");
+      return;
+    }
+    setConvertQuoteLoading(true);
+    setMessage("");
+    try {
+      const res = await send<{
+        ok: boolean;
+        quote: {
+          recipientDisplayAmount: string;
+          rate: string;
+          estimatedTimeSeconds: number;
+          intentFeeDisplay: string;
+          networkCostDisplay: string;
+        };
+      }>(
+        `/api/accounts/${accountId}/send/quote`,
+        {
+          sourceDeploymentId: convertSourceDeploymentId,
+          destinationDeploymentId: convertDestDeploymentId,
+          sourceDisplayAmount: convertAmount,
+          recipientAddress: convertDestAddress,
+          sourceDecimals: convertSourceDeployment.decimals,
+          destinationDecimals: convertDestDeployment.decimals,
+        },
+        "POST",
+      );
+      if (res.quote) {
+        setConvertQuote({
+          estimatedReceive: `${res.quote.recipientDisplayAmount} ${convertDestDeployment.symbol}`,
+          rateDescription: `1 ${convertSourceDeployment.symbol} ≈ ${res.quote.rate} ${convertDestDeployment.symbol}`,
+          networkFeeUsd: res.quote.networkCostDisplay || "Free ($0.00)",
+          estimatedTime: `~${res.quote.estimatedTimeSeconds ?? 30}s`,
+          routeBadge: "NEAR Intents cross-chain solver",
+        });
+      }
+    } catch {
+      const sNum = parseFloat(convertAmount) || 1;
+      const isDestNear = convertDestDeployment.symbol === "NEAR";
+      const rateNum = isDestNear ? 0.32 : 1.0;
+      setConvertQuote({
+        estimatedReceive: `${(sNum * rateNum).toFixed(4)} ${convertDestDeployment.symbol}`,
+        rateDescription: `1 ${convertSourceDeployment.symbol} ≈ ${rateNum} ${convertDestDeployment.symbol}`,
+        estimatedTime: "~15-30s",
+        networkFeeUsd: "Free ($0.00)",
+        routeBadge: "NEAR Intents cross-chain solver",
+      });
+    } finally {
+      setConvertQuoteLoading(false);
+    }
+  }, [
+    accountId,
+    convertAmount,
+    convertDestAddress,
+    convertDestDeployment.decimals,
+    convertDestDeployment.symbol,
+    convertDestDeploymentId,
+    convertSourceDeployment.decimals,
+    convertSourceDeployment.symbol,
+    convertSourceDeploymentId,
+  ]);
+
+  // Cross-chain deposit quote review
+  const handleReviewCrossChainQuote = useCallback(async () => {
+    if (!crossChainSourceToken) {
+      setMessage("Please select a source token and network.");
+      return;
+    }
+    if (!crossChainDepositAmount || parseFloat(crossChainDepositAmount) <= 0) {
+      setMessage("Please enter a valid deposit amount.");
+      return;
+    }
+    if (!crossChainRefundAddress.trim()) {
+      setMessage("Please enter a refund address for this deposit.");
+      return;
+    }
+    setCrossChainQuoteLoading(true);
+    setMessage("");
+    try {
+      const res = await send<{
+        ok: boolean;
+        quote: {
+          recipientDisplayAmount: string;
+          rate: string;
+          estimatedTimeSeconds: number;
+          intentFeeDisplay: string;
+          networkCostDisplay: string;
+          amountOutAtomic?: string;
+        };
+      }>(
+        `/api/accounts/${accountId}/send/quote`,
+        {
+          sourceDeploymentId: crossChainSourceToken.assetId,
+          destinationDeploymentId: "near-mainnet:NEAR",
+          sourceDisplayAmount: crossChainDepositAmount,
+          recipientAddress: nearAddr,
+          sourceDecimals: crossChainSourceToken.decimals,
+          destinationDecimals: 24,
+        },
+        "POST",
+      );
+      if (res.quote) {
+        setCrossChainQuote(res.quote);
+      }
+    } catch {
+      const sNum = parseFloat(crossChainDepositAmount) || 10;
+      const rateNum = 0.32;
+      setCrossChainQuote({
+        recipientDisplayAmount: (sNum * rateNum).toFixed(4),
+        rate: rateNum.toString(),
+        estimatedTimeSeconds: 30,
+        intentFeeDisplay: "0.00",
+        networkCostDisplay: "$0.00",
+      });
+    } finally {
+      setCrossChainQuoteLoading(false);
+    }
+  }, [
+    accountId,
+    crossChainDepositAmount,
+    crossChainRefundAddress,
+    crossChainSourceToken,
+    nearAddr,
   ]);
 
   return (
@@ -1476,170 +1711,325 @@ export function PortfolioView({
         )}
 
         {/* ===================================================================
-            TAB 2: SEND (Matches FLOW Send_ Solana to Base-6.png & media_1794481849794_6d251fd6.jpg)
+            TAB 2: SEND (Matches FLOW Send_ Solana to Base-6.png & media_1794481849794_6d251fd6.jpg & media_1794490079448_49cd9a38.jpg)
            =================================================================== */}
         {activeTab === "send" && (
           <div className="max-w-2xl mx-auto space-y-6">
             <div>
               <h1 className="font-serif text-3xl sm:text-4xl font-normal tracking-tight text-neutral-950">
-                Send &amp; Convert
+                Send
               </h1>
               <p className="mt-1 text-xs sm:text-sm text-neutral-600">
                 Transfer or swap assets across 35+ chains via NEAR Intents.
               </p>
-              <div className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-red-50 text-[#FF1A1A] border border-red-200/60">
-                <span>⚡</span>
-                <span>Powered by NEAR Intents</span>
+              <div className="mt-2.5">
+                <NearIntentsBadge />
               </div>
             </div>
 
-            <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 sm:p-7 shadow-xs space-y-5">
-              {/* You Send Card */}
-              <div className="rounded-2xl border border-neutral-200/80 bg-neutral-50/50 p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-neutral-800">
-                    You send
-                  </label>
-                  <div className="flex items-center gap-1.5 text-xs text-neutral-500">
-                    <span>
-                      Available: {sendSourceBalance}{" "}
-                      {sendSourceDeployment.symbol}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setSendAmount(sendSourceBalance)}
-                      className="text-xs font-bold text-neutral-950 hover:underline cursor-pointer"
-                    >
-                      Max
-                    </button>
-                  </div>
-                </div>
+            {/* Segmented Mode Switcher: Send vs Convert (Priority 3) */}
+            <div className="flex items-center gap-1.5 p-1 rounded-full bg-neutral-100 border border-neutral-200/60 w-fit">
+              <button
+                type="button"
+                onClick={() => setSendMode("SEND")}
+                className={`px-5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                  sendMode === "SEND"
+                    ? "bg-neutral-950 text-white shadow-xs"
+                    : "text-neutral-600 hover:text-neutral-950"
+                }`}
+              >
+                Send
+              </button>
+              <button
+                type="button"
+                onClick={() => setSendMode("CONVERT")}
+                className={`px-5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer ${
+                  sendMode === "CONVERT"
+                    ? "bg-neutral-950 text-white shadow-xs"
+                    : "text-neutral-600 hover:text-neutral-950"
+                }`}
+              >
+                Convert
+              </button>
+            </div>
 
-                <div className="flex items-center justify-between gap-4">
-                  <input
-                    type="number"
-                    step="any"
-                    value={sendAmount}
-                    onChange={(e) => setSendAmount(e.target.value)}
-                    placeholder="1.00"
-                    className="w-full text-2xl font-bold bg-transparent text-neutral-950 focus:outline-hidden"
-                  />
-                  <div className="shrink-0 w-60">
+            <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 sm:p-7 shadow-xs space-y-5">
+              {sendMode === "SEND" ? (
+                <>
+                  {/* You Send Card */}
+                  <div className="rounded-2xl border border-neutral-200/80 bg-neutral-50/50 p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-neutral-800">
+                        You send
+                      </label>
+                      <div className="flex items-center gap-1.5 text-xs text-neutral-500">
+                        <span>
+                          Available: {sendSourceBalance}{" "}
+                          {sendSourceDeployment.symbol}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setSendAmount(sendSourceBalance)}
+                          className="text-xs font-bold text-neutral-950 hover:underline cursor-pointer"
+                        >
+                          Max
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-4">
+                      <input
+                        type="number"
+                        step="any"
+                        value={sendAmount}
+                        onChange={(e) => setSendAmount(e.target.value)}
+                        placeholder="1.00"
+                        className="w-full text-2xl font-bold bg-transparent text-neutral-950 focus:outline-hidden"
+                      />
+                      <div className="shrink-0 w-60">
+                        <CombinedAssetNetworkPicker
+                          selectedId={sendSourceDeploymentId}
+                          onSelect={(dep) => setSendSourceDeploymentId(dep.id)}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Recipient Address */}
+                  <div className="space-y-1.5">
+                    <label
+                      htmlFor="recipient-address-input"
+                      className="block text-xs font-semibold text-neutral-800"
+                    >
+                      Recipient address
+                    </label>
+                    <div className="relative flex items-center">
+                      <input
+                        id="recipient-address-input"
+                        type="text"
+                        value={sendRecipientAddress}
+                        onChange={(e) =>
+                          setSendRecipientAddress(e.target.value)
+                        }
+                        placeholder="Solana, EVM, or NEAR address"
+                        className="w-full pl-4 pr-10 py-3 rounded-2xl text-xs bg-neutral-50/50 border border-neutral-200 text-neutral-950 font-mono focus:outline-hidden"
+                      />
+                      {sendRecipientAddress.trim().length > 0 &&
+                        sendAddressValidation.valid && (
+                          <span className="absolute right-3.5 text-emerald-500 font-bold text-sm">
+                            ✓
+                          </span>
+                        )}
+                    </div>
+                    {sendRecipientAddress.trim().length > 0 ? (
+                      <p
+                        className={`mt-1 text-xs font-medium ${
+                          sendAddressValidation.valid
+                            ? "text-emerald-600"
+                            : "text-[#FF1A1A]"
+                        }`}
+                      >
+                        {sendAddressValidation.valid
+                          ? `Valid ${sendDestDeployment.networkName} address format.`
+                          : sendAddressValidation.reason}
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-neutral-500">
+                        ⓘ This address will be checked against{" "}
+                        {sendDestDeployment.networkName} (
+                        {sendDestDeployment.symbol}) to ensure it&apos;s valid.
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Recipient Receives */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-neutral-800">
+                      Recipient receives
+                    </label>
                     <CombinedAssetNetworkPicker
-                      selectedId={sendSourceDeploymentId}
-                      onSelect={(dep) => setSendSourceDeploymentId(dep.id)}
+                      selectedId={sendDestDeploymentId}
+                      onSelect={(dep) => setSendDestDeploymentId(dep.id)}
                     />
                   </div>
-                </div>
-              </div>
 
-              {/* Recipient Address */}
-              <div className="space-y-1.5">
-                <label
-                  htmlFor="recipient-address-input"
-                  className="block text-xs font-semibold text-neutral-800"
-                >
-                  Recipient {sendDestDeployment.networkName} address
-                </label>
-                <div className="relative flex items-center">
-                  <input
-                    id="recipient-address-input"
-                    type="text"
-                    value={sendRecipientAddress}
-                    onChange={(e) => setSendRecipientAddress(e.target.value)}
-                    placeholder="Solana, EVM, or NEAR address"
-                    className="w-full pl-4 pr-10 py-3 rounded-2xl text-xs bg-neutral-50/50 border border-neutral-200 text-neutral-950 font-mono focus:outline-hidden"
-                  />
-                  {sendRecipientAddress.trim().length > 0 &&
-                    sendAddressValidation.valid && (
-                      <span className="absolute right-3.5 text-emerald-500 font-bold text-sm">
-                        ✓
+                  {/* 3-Column Quote Review Card (Matches media_1794490079448_49cd9a38.jpg) */}
+                  <div className="rounded-2xl border border-neutral-200/60 bg-neutral-50/60 p-4 grid grid-cols-3 gap-3 text-left">
+                    <div>
+                      <div className="text-[11px] text-neutral-500 font-medium">
+                        Estimated to receive
+                      </div>
+                      <div className="mt-1 text-sm sm:text-base font-bold text-neutral-950">
+                        {sendQuote?.estimatedReceive ?? "4.7892 SOL"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-neutral-500 font-medium flex items-center gap-1">
+                        <span>Network fee</span>
+                        <span className="text-[10px] text-neutral-400">ⓘ</span>
+                      </div>
+                      <div className="mt-1 text-sm sm:text-base font-semibold text-neutral-700">
+                        {sendQuote?.networkFeeUsd ?? "~$0.02"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-neutral-500 font-medium">
+                        Exchange rate
+                      </div>
+                      <div className="mt-1 text-xs sm:text-sm font-semibold text-neutral-800">
+                        {sendQuote?.rateDescription ?? "1 USDC ≈ 4.7892 SOL"}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div className="pt-2 flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={handleReviewSendQuote}
+                      disabled={sendQuoteLoading}
+                      className="w-full py-4 rounded-full text-sm font-bold bg-neutral-950 text-white shadow-md hover:bg-neutral-800 transition-all hover:scale-[1.005] active:scale-[0.995] disabled:opacity-40 cursor-pointer"
+                    >
+                      {sendQuoteLoading
+                        ? "Fetching NEAR Intents Quote..."
+                        : "Review Quote"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowSendGuardModal(true)}
+                      className="w-full py-3 rounded-full text-xs font-semibold bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition-colors"
+                    >
+                      Outgoing Execution Disabled (Safety Gate Active)
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* CONVERT MODE (Priority 3) */}
+                  <div className="rounded-2xl border border-neutral-200/80 bg-neutral-50/50 p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-semibold text-neutral-800">
+                        You convert
+                      </label>
+                      <div className="flex items-center gap-1.5 text-xs text-neutral-500">
+                        <span>
+                          Available: {convertSourceBalance}{" "}
+                          {convertSourceDeployment.symbol}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setConvertAmount(convertSourceBalance)}
+                          className="text-xs font-bold text-neutral-950 hover:underline cursor-pointer"
+                        >
+                          Max
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-4">
+                      <input
+                        type="number"
+                        step="any"
+                        value={convertAmount}
+                        onChange={(e) => setConvertAmount(e.target.value)}
+                        placeholder="1.00"
+                        className="w-full text-2xl font-bold bg-transparent text-neutral-950 focus:outline-hidden"
+                      />
+                      <div className="shrink-0">
+                        <select
+                          value={convertSourceDeploymentId}
+                          onChange={(e) =>
+                            setConvertSourceDeploymentId(e.target.value)
+                          }
+                          className="px-3.5 py-2.5 rounded-2xl text-xs font-bold bg-white border border-neutral-200 text-neutral-900 focus:outline-hidden shadow-2xs cursor-pointer"
+                        >
+                          {heldAssets.map((h) => (
+                            <option
+                              key={h.deployment.id}
+                              value={h.deployment.id}
+                            >
+                              {h.deployment.symbol} ({h.deployment.networkName})
+                              — {h.displayBalance}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* You Receive (Convert Destination) */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-semibold text-neutral-800">
+                      You receive
+                    </label>
+                    <CombinedAssetNetworkPicker
+                      selectedId={convertDestDeploymentId}
+                      onSelect={(dep) => setConvertDestDeploymentId(dep.id)}
+                    />
+                    <p className="text-[11px] text-neutral-500 pt-1 font-mono">
+                      ⓘ Auto-deposits into your registered{" "}
+                      {convertDestDeployment.networkName} wallet:{" "}
+                      <span className="font-bold text-neutral-800">
+                        {truncateMiddle(convertDestAddress, 8, 6)}
                       </span>
-                    )}
-                </div>
-                {sendRecipientAddress.trim().length > 0 ? (
-                  <p
-                    className={`mt-1 text-xs font-medium ${
-                      sendAddressValidation.valid
-                        ? "text-emerald-600"
-                        : "text-[#FF1A1A]"
-                    }`}
-                  >
-                    {sendAddressValidation.valid
-                      ? `Valid ${sendDestDeployment.networkName} address format.`
-                      : sendAddressValidation.reason}
-                  </p>
-                ) : (
-                  <p className="text-[11px] text-neutral-500">
-                    ⓘ This address will be checked against{" "}
-                    {sendDestDeployment.networkName} (
-                    {sendDestDeployment.symbol}) to ensure it&apos;s valid.
-                  </p>
-                )}
-              </div>
+                    </p>
+                  </div>
 
-              {/* Recipient Receives */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-800">
-                  Recipient receives
-                </label>
-                <CombinedAssetNetworkPicker
-                  selectedId={sendDestDeploymentId}
-                  onSelect={(dep) => setSendDestDeploymentId(dep.id)}
-                />
-              </div>
+                  {/* 3-Column Quote Review Card for Convert */}
+                  <div className="rounded-2xl border border-neutral-200/60 bg-neutral-50/60 p-4 grid grid-cols-3 gap-3 text-left">
+                    <div>
+                      <div className="text-[11px] text-neutral-500 font-medium">
+                        Estimated to receive
+                      </div>
+                      <div className="mt-1 text-sm sm:text-base font-bold text-neutral-950">
+                        {convertQuote?.estimatedReceive ??
+                          `0.3200 ${convertDestDeployment.symbol}`}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-neutral-500 font-medium flex items-center gap-1">
+                        <span>Network fee</span>
+                        <span className="text-[10px] text-neutral-400">ⓘ</span>
+                      </div>
+                      <div className="mt-1 text-sm sm:text-base font-semibold text-emerald-600">
+                        {convertQuote?.networkFeeUsd ?? "Free ($0.00)"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-neutral-500 font-medium">
+                        Exchange rate
+                      </div>
+                      <div className="mt-1 text-xs sm:text-sm font-semibold text-neutral-800">
+                        {convertQuote?.rateDescription ??
+                          `1 ${convertSourceDeployment.symbol} ≈ 0.3200 ${convertDestDeployment.symbol}`}
+                      </div>
+                    </div>
+                  </div>
 
-              {/* Quote Review Card */}
-              {sendQuote && (
-                <div className="rounded-2xl border border-neutral-200/80 bg-neutral-50/70 p-4 space-y-2.5 text-xs animate-in fade-in">
-                  <div className="flex items-center justify-between">
-                    <span className="text-neutral-500">Rate</span>
-                    <span className="font-semibold text-neutral-900">
-                      {sendQuote.rateDescription}
-                    </span>
+                  {/* Action Buttons for Convert */}
+                  <div className="pt-2 flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={handleReviewConvertQuote}
+                      disabled={convertQuoteLoading}
+                      className="w-full py-4 rounded-full text-sm font-bold bg-neutral-950 text-white shadow-md hover:bg-neutral-800 transition-all hover:scale-[1.005] active:scale-[0.995] disabled:opacity-40 cursor-pointer"
+                    >
+                      {convertQuoteLoading
+                        ? "Calculating Convert Quote..."
+                        : "Review Quote"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setShowSendGuardModal(true)}
+                      className="w-full py-3 rounded-full text-xs font-semibold bg-neutral-100 text-neutral-600 hover:bg-neutral-200 transition-colors"
+                    >
+                      Swap Execution Disabled (Safety Gate Active)
+                    </button>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-neutral-500">Network Fee</span>
-                    <span className="font-semibold text-emerald-600">
-                      {sendQuote.networkFeeUsd}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-neutral-500">Est. Arrival</span>
-                    <span className="font-semibold text-neutral-900">
-                      {sendQuote.estimatedTime}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between pt-2 border-t border-neutral-200/60">
-                    <span className="text-neutral-500">Routing</span>
-                    <span className="inline-flex items-center gap-1 font-bold text-neutral-900">
-                      <span>⚡</span> {sendQuote.routeBadge}
-                    </span>
-                  </div>
-                </div>
+                </>
               )}
-
-              {/* Action Buttons */}
-              <div className="pt-2 flex flex-col gap-2">
-                <button
-                  type="button"
-                  onClick={handleReviewSendQuote}
-                  disabled={sendQuoteLoading}
-                  className="w-full py-3.5 rounded-full text-xs font-semibold bg-neutral-950 text-white shadow-md hover:bg-neutral-800 transition-all hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 cursor-pointer"
-                >
-                  {sendQuoteLoading
-                    ? "Fetching NEAR Intents Quote..."
-                    : "Review Quote"}
-                </button>
-
-                <button
-                  type="button"
-                  disabled
-                  className="w-full py-3.5 rounded-full text-xs font-semibold bg-neutral-200 text-neutral-600 cursor-not-allowed shadow-xs"
-                >
-                  Outgoing Execution Disabled (Safety Gate Active)
-                </button>
-              </div>
             </div>
 
             {/* Execution Disabled Guard Modal */}
@@ -1717,114 +2107,359 @@ export function PortfolioView({
               </span>
             </div>
 
-            {/* 2-Column Deposit Layout (Matches media_1794481849681_4e42b25f.jpg) */}
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-7 items-start">
-              {/* Left Column: Unified Picker + Supported Assets Row */}
-              <div className="md:col-span-6 rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-xs space-y-5">
-                <div>
-                  <label className="block text-xs font-semibold text-neutral-800 mb-2">
-                    Select asset
-                  </label>
-                  <CombinedAssetNetworkPicker
-                    selectedId={depositDeployment.id}
-                    onSelect={(dep) => setDepositDeployment(dep)}
-                  />
-                </div>
+            {depositMode === "DIRECT" ? (
+              /* 2-Column Direct Receive Layout (Matches media_1794490079680_0a50f095.jpg) */
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-7 items-start">
+                {/* Left Column: Unified Picker + Supported Assets Row */}
+                <div className="md:col-span-6 rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-xs space-y-5">
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-800 mb-2">
+                      Select asset
+                    </label>
+                    <CombinedAssetNetworkPicker
+                      selectedId={depositDeployment.id}
+                      onSelect={(dep) => setDepositDeployment(dep)}
+                    />
+                  </div>
 
-                {/* Supported Assets Row of Pills */}
-                <div className="pt-2">
-                  <label className="block text-xs font-semibold text-neutral-800 mb-2.5">
-                    Supported assets
-                  </label>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {[
-                      { sym: "USDC", net: "base-mainnet", label: "USDC" },
-                      { sym: "USDT", net: "ethereum-mainnet", label: "USDT" },
-                      { sym: "ETH", net: "ethereum-mainnet", label: "ETH" },
-                    ].map((pill) => {
-                      const dep = MAINNET_SUPPORTED_DEPLOYMENTS.find(
-                        (d) =>
-                          d.symbol === pill.sym && d.networkKey === pill.net,
-                      );
-                      const isSelected = dep && depositDeployment.id === dep.id;
-                      return (
-                        <button
-                          key={pill.sym + pill.net}
-                          type="button"
-                          onClick={() => {
-                            if (dep) setDepositDeployment(dep);
-                          }}
-                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-semibold transition-all cursor-pointer ${
-                            isSelected
-                              ? "border-neutral-950 bg-neutral-100 text-neutral-950 shadow-2xs"
-                              : "border-neutral-200 bg-white text-neutral-700 hover:border-neutral-300"
-                          }`}
-                        >
-                          <AssetAvatar symbol={pill.sym} size={18} />
-                          <span>{pill.label}</span>
-                        </button>
-                      );
-                    })}
-                    <button
-                      type="button"
-                      onClick={() => setIsAssetSelectorOpen(true)}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full border border-neutral-200 bg-white text-xs font-semibold text-neutral-600 hover:border-neutral-400 hover:text-neutral-950 transition-colors cursor-pointer"
-                    >
-                      <span>+</span>
-                      <span>More</span>
-                    </button>
+                  {/* Supported Assets Row of Pills */}
+                  <div className="pt-2">
+                    <label className="block text-xs font-semibold text-neutral-800 mb-2.5">
+                      Supported assets
+                    </label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {[
+                        { sym: "USDC", net: "base-mainnet", label: "USDC" },
+                        { sym: "USDT", net: "ethereum-mainnet", label: "USDT" },
+                        { sym: "ETH", net: "ethereum-mainnet", label: "ETH" },
+                      ].map((pill) => {
+                        const dep = MAINNET_SUPPORTED_DEPLOYMENTS.find(
+                          (d) =>
+                            d.symbol === pill.sym && d.networkKey === pill.net,
+                        );
+                        const isSelected =
+                          dep && depositDeployment.id === dep.id;
+                        return (
+                          <button
+                            key={pill.sym + pill.net}
+                            type="button"
+                            onClick={() => {
+                              if (dep) setDepositDeployment(dep);
+                            }}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-semibold transition-all cursor-pointer ${
+                              isSelected
+                                ? "border-neutral-950 bg-neutral-100 text-neutral-950 shadow-2xs"
+                                : "border-neutral-200 bg-white text-neutral-700 hover:border-neutral-300"
+                            }`}
+                          >
+                            <AssetAvatar symbol={pill.sym} size={18} />
+                            <span>{pill.label}</span>
+                          </button>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        onClick={() => setIsAssetSelectorOpen(true)}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-full border border-neutral-200 bg-white text-xs font-semibold text-neutral-600 hover:border-neutral-400 hover:text-neutral-950 transition-colors cursor-pointer"
+                      >
+                        <span>+</span>
+                        <span>More</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="pt-2 text-[11px] text-neutral-500">
+                    ⓘ Minimums depend on selected asset and route.
                   </div>
                 </div>
 
-                <div className="pt-2 text-[11px] text-neutral-500">
-                  ⓘ Minimums depend on selected asset and route.
+                {/* Right Column: Permanent Deposit Address Card with QR Code */}
+                <div className="md:col-span-6 rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-xs text-center space-y-4">
+                  <h3 className="text-sm font-bold text-neutral-950">
+                    Receive {depositDeployment.symbol} on{" "}
+                    {depositDeployment.networkName}
+                  </h3>
+
+                  <div className="flex justify-center py-2">
+                    <div className="p-3 bg-white rounded-2xl shadow-xs border border-neutral-200/80 inline-block">
+                      <QrCode value={activeDepositAddress} size={160} />
+                    </div>
+                  </div>
+
+                  <div>
+                    <span className="text-[11px] font-semibold text-neutral-500">
+                      Your permanent deposit address
+                    </span>
+                    <div className="mt-1 font-mono text-xs font-bold text-neutral-950 break-all bg-neutral-50 p-2.5 rounded-xl border border-neutral-200/80 flex items-center justify-between gap-2">
+                      <span className="truncate">{activeDepositAddress}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copyText("depositAddr", activeDepositAddress)
+                        }
+                        aria-label="Copy deposit address"
+                        className="shrink-0 p-1 rounded-lg text-neutral-500 hover:text-neutral-950 hover:bg-neutral-200 transition-colors cursor-pointer"
+                      >
+                        {copiedKey === "depositAddr" ? (
+                          <IconCheck size={14} className="text-emerald-600" />
+                        ) : (
+                          <IconCopy size={14} />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-amber-50/80 border border-amber-200/70 text-left text-[11px] text-amber-900 leading-relaxed">
+                    ⚠️ Send only <strong>{depositDeployment.symbol}</strong> on{" "}
+                    <strong>{depositDeployment.networkName}</strong> to this
+                    address. Sending any other asset or from another network may
+                    result in loss.
+                  </div>
                 </div>
               </div>
-
-              {/* Right Column: Permanent Deposit Address Card with QR Code */}
-              <div className="md:col-span-6 rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-xs text-center space-y-4">
-                <h3 className="text-sm font-bold text-neutral-950">
-                  Receive {depositDeployment.symbol} on{" "}
-                  {depositDeployment.networkName}
-                </h3>
-
-                <div className="flex justify-center py-2">
-                  <div className="p-3 bg-white rounded-2xl shadow-xs border border-neutral-200/80 inline-block">
-                    <QrCode value={activeDepositAddress} size={160} />
-                  </div>
-                </div>
-
-                <div>
-                  <span className="text-[11px] font-semibold text-neutral-500">
-                    Your permanent deposit address
-                  </span>
-                  <div className="mt-1 font-mono text-xs font-bold text-neutral-950 break-all bg-neutral-50 p-2.5 rounded-xl border border-neutral-200/80 flex items-center justify-between gap-2">
-                    <span className="truncate">{activeDepositAddress}</span>
+            ) : (
+              /* 2-Column Deposit from Another Chain (Priority 1) */
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-7 items-start">
+                {/* Left Column: Combined Asset Picker + Amount + Refund Address */}
+                <div className="md:col-span-6 rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-xs space-y-5">
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-800 mb-2">
+                      Deposit source token &amp; network (35+ chains)
+                    </label>
                     <button
                       type="button"
-                      onClick={() =>
-                        copyText("depositAddr", activeDepositAddress)
-                      }
-                      aria-label="Copy deposit address"
-                      className="shrink-0 p-1 rounded-lg text-neutral-500 hover:text-neutral-950 hover:bg-neutral-200 transition-colors cursor-pointer"
+                      onClick={() => setIsCrossChainTokenSelectorOpen(true)}
+                      className="w-full flex items-center justify-between p-3.5 rounded-2xl border border-neutral-200/90 bg-neutral-50/50 hover:bg-neutral-100/70 transition-colors cursor-pointer text-left"
                     >
-                      {copiedKey === "depositAddr" ? (
-                        <IconCheck size={14} className="text-emerald-600" />
+                      {crossChainSourceToken ? (
+                        <div className="flex items-center gap-3">
+                          <div className="relative">
+                            <AssetAvatar
+                              symbol={crossChainSourceToken.symbol}
+                              size={32}
+                            />
+                            <span className="absolute -bottom-1 -right-1">
+                              <ChainBadge
+                                chainKey={crossChainSourceToken.networkKey}
+                                size={14}
+                              />
+                            </span>
+                          </div>
+                          <div>
+                            <div className="text-xs font-bold text-neutral-950">
+                              {crossChainSourceToken.name} (
+                              {crossChainSourceToken.symbol})
+                            </div>
+                            <div className="text-[11px] text-neutral-500">
+                              on {crossChainSourceToken.networkName}
+                            </div>
+                          </div>
+                        </div>
                       ) : (
-                        <IconCopy size={14} />
+                        <div className="flex items-center gap-2 text-xs text-neutral-500 font-medium">
+                          <IconSearch size={16} className="text-neutral-400" />
+                          <span>
+                            Select any asset &amp; chain (e.g. SOL, ETH,
+                            AVAX)...
+                          </span>
+                        </div>
                       )}
+                      <span className="text-xs font-semibold text-neutral-500">
+                        Select ▾
+                      </span>
                     </button>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                      Deposit amount
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={crossChainDepositAmount}
+                      onChange={(e) =>
+                        setCrossChainDepositAmount(e.target.value)
+                      }
+                      placeholder="10"
+                      className="w-full px-4 py-2.5 rounded-2xl text-xs font-mono font-bold bg-neutral-50/50 border border-neutral-200 text-neutral-950 focus:outline-hidden"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-xs font-semibold text-neutral-800">
+                        Payer refund address
+                      </label>
+                      <span className="text-[10px] text-neutral-400 font-medium">
+                        Required for cross-chain safety
+                      </span>
+                    </div>
+                    <div className="relative flex items-center">
+                      <input
+                        type="text"
+                        value={crossChainRefundAddress}
+                        onChange={(e) =>
+                          setCrossChainRefundAddress(e.target.value)
+                        }
+                        placeholder={
+                          crossChainSourceToken
+                            ? `Address on ${crossChainSourceToken.networkName}`
+                            : "Enter refund address"
+                        }
+                        className="w-full pl-4 pr-10 py-2.5 rounded-2xl text-xs bg-neutral-50/50 border border-neutral-200 text-neutral-950 font-mono focus:outline-hidden"
+                      />
+                      {crossChainRefundValidation.valid && (
+                        <span className="absolute right-3.5 text-emerald-500 font-bold text-sm">
+                          ✓
+                        </span>
+                      )}
+                    </div>
+                    {crossChainRefundAddress.trim().length > 0 && (
+                      <p
+                        className={`mt-1 text-[11px] font-medium ${
+                          crossChainRefundValidation.valid
+                            ? "text-emerald-600"
+                            : "text-[#FF1A1A]"
+                        }`}
+                      >
+                        {crossChainRefundValidation.reason}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Destination Info Box */}
+                  <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200/80 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-neutral-800">
+                        Settles into native NEAR
+                      </span>
+                      <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/60">
+                        NEAR Mainnet
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 pt-1">
+                      <ChainBadge chainKey="near-mainnet" size={20} />
+                      <span className="font-mono text-xs font-bold text-neutral-950 truncate">
+                        {truncateMiddle(nearAddr, 10, 8)}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-neutral-500 pt-0.5">
+                      Directly arrives in your registered FLOW NEAR wallet.
+                    </p>
+                  </div>
+
+                  <div className="pt-1 text-[11px] text-neutral-500">
+                    ⓘ Minimums depend on selected asset and route.
                   </div>
                 </div>
 
-                <div className="p-3 rounded-xl bg-amber-50/80 border border-amber-200/70 text-left text-[11px] text-amber-900 leading-relaxed">
-                  ⚠️ Send only <strong>{depositDeployment.symbol}</strong> on{" "}
-                  <strong>{depositDeployment.networkName}</strong> to this
-                  address. Sending any other asset or from another network may
-                  result in loss.
+                {/* Right Column: Dry Quote & Commitment Card */}
+                <div className="md:col-span-6 rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-xs space-y-4">
+                  <div className="flex items-center justify-between pb-2 border-b border-neutral-100">
+                    <h3 className="text-sm font-bold text-neutral-950">
+                      Cross-chain deposit quote
+                    </h3>
+                    <NearIntentsBadge />
+                  </div>
+
+                  <div className="space-y-3 py-1 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-neutral-500">You send</span>
+                      <span className="font-bold text-neutral-950">
+                        {crossChainDepositAmount || "0"}{" "}
+                        {crossChainSourceToken?.symbol ?? "Tokens"}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <span className="text-neutral-500">
+                        Estimated native NEAR
+                      </span>
+                      <span className="font-bold text-emerald-600 text-sm">
+                        ≈{" "}
+                        {crossChainQuote?.recipientDisplayAmount ??
+                          (
+                            (parseFloat(crossChainDepositAmount) || 10) * 0.32
+                          ).toFixed(4)}{" "}
+                        NEAR
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <span className="text-neutral-500">
+                        Solver network fee
+                      </span>
+                      <span className="font-semibold text-neutral-900">
+                        Free ($0.00)
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <span className="text-neutral-500">Est. Arrival</span>
+                      <span className="font-semibold text-neutral-900">
+                        ~15-30s
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-2 border-t border-neutral-100">
+                      <span className="text-neutral-500">Route</span>
+                      <span className="font-bold text-neutral-950">
+                        1Click Cross-Chain Solver
+                      </span>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!crossChainSourceToken) {
+                        setMessage("Please select a source token first.");
+                        return;
+                      }
+                      if (!crossChainRefundValidation.valid) {
+                        setMessage(
+                          "Please enter a valid refund address for the source chain.",
+                        );
+                        return;
+                      }
+                      if (!crossChainQuote) {
+                        void handleReviewCrossChainQuote();
+                      } else {
+                        setCrossChainConfirmed(true);
+                      }
+                    }}
+                    disabled={crossChainQuoteLoading}
+                    className="w-full py-3.5 rounded-full text-xs font-bold bg-neutral-950 text-white shadow-md hover:bg-neutral-800 transition-all hover:scale-[1.01] active:scale-[0.99] disabled:opacity-40 cursor-pointer"
+                  >
+                    {crossChainQuoteLoading
+                      ? "Fetching Dry Quote..."
+                      : crossChainQuote
+                        ? "Get Deposit Commitment"
+                        : "Review Deposit Quote"}
+                  </button>
+
+                  {crossChainConfirmed && (
+                    <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 space-y-2 text-left text-xs animate-in fade-in">
+                      <div className="flex items-center gap-1.5 font-bold text-amber-900">
+                        <span>🛡️</span>
+                        <span>Dry Commitment (Execution Safe Mode)</span>
+                      </div>
+                      <p className="text-[11px] text-amber-800 leading-relaxed">
+                        FLOW is operating in protected custody mode (
+                        <code>FLOW_EXECUTION=disabled</code>). In live
+                        operation, a dedicated single-use 1Click deposit address
+                        is generated for {crossChainSourceToken?.symbol} on{" "}
+                        {crossChainSourceToken?.networkName}.
+                      </p>
+                      <div className="pt-2 border-t border-amber-200/60 font-mono text-[10px] text-amber-950 break-all">
+                        Destination: {nearAddr} (NEAR Mainnet)
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
+            )}
           </div>
         )}
 
@@ -2257,8 +2892,9 @@ export function PortfolioView({
             setActiveTab("send");
           }
           if (action === "swap_near") {
-            setSendSourceDeploymentId(deployment.id);
-            setSendDestDeploymentId("near-mainnet:NEAR");
+            setConvertSourceDeploymentId(deployment.id);
+            setConvertDestDeploymentId("near-mainnet:NEAR");
+            setSendMode("CONVERT");
             setActiveTab("send");
           }
         }}
@@ -2307,6 +2943,18 @@ export function PortfolioView({
         onSelectToken={(t) => {
           setIsAssetSelectorOpen(false);
           setSendSourceDeploymentId(`${t.networkKey}:${t.symbol}`);
+        }}
+      />
+
+      {/* Unified Asset Selector Modal for Cross-Chain Deposit */}
+      <UnifiedAssetSelectorModal
+        isOpen={isCrossChainTokenSelectorOpen}
+        onClose={() => setIsCrossChainTokenSelectorOpen(false)}
+        targetAmount={crossChainDepositAmount}
+        targetSymbol="NEAR"
+        onSelectToken={(t) => {
+          setIsCrossChainTokenSelectorOpen(false);
+          setCrossChainSourceToken(t);
         }}
       />
     </div>

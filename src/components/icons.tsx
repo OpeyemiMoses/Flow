@@ -726,6 +726,102 @@ export const COINGECKO_ASSET_IMAGES: Record<
       "https://coin-images.coingecko.com/coins/images/10365/large/near.jpg",
     alt: "Wrapped NEAR (wNEAR)",
   },
+  AAVE: {
+    src: "https://coin-images.coingecko.com/coins/images/12645/large/aave-token-round.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/12645/large/aave-token-round.png",
+    alt: "Aave (AAVE)",
+  },
+  LINK: {
+    src: "https://coin-images.coingecko.com/coins/images/877/large/chainlink-new-logo.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/877/large/chainlink-new-logo.png",
+    alt: "Chainlink (LINK)",
+  },
+  AVAX: {
+    src: "https://coin-images.coingecko.com/coins/images/12559/large/Avalanche_Circle_RedWhite_Trans.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/12559/large/Avalanche_Circle_RedWhite_Trans.png",
+    alt: "Avalanche (AVAX)",
+  },
+  BNB: {
+    src: "https://coin-images.coingecko.com/coins/images/825/large/bnb-icon2_2x.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/825/large/bnb-icon2_2x.png",
+    alt: "BNB (BNB)",
+  },
+  SUI: {
+    src: "https://coin-images.coingecko.com/coins/images/26375/large/sui-ocean-square.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/26375/large/sui-ocean-square.png",
+    alt: "Sui (SUI)",
+  },
+  OP: {
+    src: "https://coin-images.coingecko.com/coins/images/25244/large/Optimism.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/25244/large/Optimism.png",
+    alt: "Optimism (OP)",
+  },
+  BTC: {
+    src: "https://coin-images.coingecko.com/coins/images/1/large/bitcoin.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/1/large/bitcoin.png",
+    alt: "Bitcoin (BTC)",
+  },
+  WBTC: {
+    src: "https://coin-images.coingecko.com/coins/images/7598/large/wrapped_bitcoin_wbtc.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/7598/large/wrapped_bitcoin_wbtc.png",
+    alt: "Wrapped Bitcoin (WBTC)",
+  },
+  ARB: {
+    src: "https://coin-images.coingecko.com/coins/images/16547/large/arbitrum_logo.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/16547/large/arbitrum_logo.png",
+    alt: "Arbitrum (ARB)",
+  },
+  MATIC: {
+    src: "https://coin-images.coingecko.com/coins/images/4713/large/polygon.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/4713/large/polygon.png",
+    alt: "Polygon (MATIC)",
+  },
+  POL: {
+    src: "https://coin-images.coingecko.com/coins/images/4713/large/polygon.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/4713/large/polygon.png",
+    alt: "Polygon (POL)",
+  },
+  TRX: {
+    src: "https://coin-images.coingecko.com/coins/images/1094/large/tron-logo.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/1094/large/tron-logo.png",
+    alt: "TRON (TRX)",
+  },
+  PEPE: {
+    src: "https://coin-images.coingecko.com/coins/images/29850/large/pepe-token.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/29850/large/pepe-token.png",
+    alt: "Pepe (PEPE)",
+  },
+  SHIB: {
+    src: "https://coin-images.coingecko.com/coins/images/11939/large/shiba.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/11939/large/shiba.png",
+    alt: "Shiba Inu (SHIB)",
+  },
+  UNI: {
+    src: "https://coin-images.coingecko.com/coins/images/12504/large/uniswap-uni.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/12504/large/uniswap-uni.png",
+    alt: "Uniswap (UNI)",
+  },
+  DAI: {
+    src: "https://coin-images.coingecko.com/coins/images/9956/large/Badge_Dai.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/9956/large/Badge_Dai.png",
+    alt: "Dai (DAI)",
+  },
 };
 
 export const COINGECKO_CHAIN_IMAGES: Record<
@@ -758,6 +854,54 @@ export const COINGECKO_CHAIN_IMAGES: Record<
       "https://coin-images.coingecko.com/asset_platforms/images/34/large/near.jpeg",
     alt: "NEAR Mainnet",
   },
+  tron: {
+    src: "https://coin-images.coingecko.com/coins/images/1094/large/tron-logo.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/1094/large/tron-logo.png",
+    alt: "Tron Network",
+  },
+  arbitrum: {
+    src: "https://coin-images.coingecko.com/asset_platforms/images/16547/large/arbitrum_logo.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/16547/large/arbitrum_logo.png",
+    alt: "Arbitrum One",
+  },
+  avalanche: {
+    src: "https://coin-images.coingecko.com/asset_platforms/images/12559/large/Avalanche_Circle_RedWhite_Trans.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/12559/large/Avalanche_Circle_RedWhite_Trans.png",
+    alt: "Avalanche",
+  },
+  bnb: {
+    src: "https://coin-images.coingecko.com/asset_platforms/images/825/large/bnb-icon2_2x.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/825/large/bnb-icon2_2x.png",
+    alt: "BNB Chain",
+  },
+  sui: {
+    src: "https://coin-images.coingecko.com/asset_platforms/images/26375/large/sui-ocean-square.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/26375/large/sui-ocean-square.png",
+    alt: "Sui Network",
+  },
+  optimism: {
+    src: "https://coin-images.coingecko.com/asset_platforms/images/25244/large/Optimism.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/25244/large/Optimism.png",
+    alt: "Optimism",
+  },
+  polygon: {
+    src: "https://coin-images.coingecko.com/asset_platforms/images/4713/large/polygon.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/asset_platforms/images/4713/large/polygon.png",
+    alt: "Polygon",
+  },
+  bitcoin: {
+    src: "https://coin-images.coingecko.com/coins/images/1/large/bitcoin.png",
+    coingeckoUrl:
+      "https://coin-images.coingecko.com/coins/images/1/large/bitcoin.png",
+    alt: "Bitcoin",
+  },
 };
 
 export function ChainBadge({
@@ -776,6 +920,23 @@ export function ChainBadge({
   else if (lower.includes("near")) matchKey = "near";
   else if (lower.includes("eth") || lower.includes("evm"))
     matchKey = "ethereum";
+  else if (lower.includes("tron") || lower.includes("trx")) matchKey = "tron";
+  else if (lower.includes("arb")) matchKey = "arbitrum";
+  else if (lower.includes("avax") || lower.includes("avalanche"))
+    matchKey = "avalanche";
+  else if (
+    lower.includes("bnb") ||
+    lower.includes("bsc") ||
+    lower.includes("binance")
+  )
+    matchKey = "bnb";
+  else if (lower.includes("sui")) matchKey = "sui";
+  else if (lower.includes("op") || lower.includes("optimism"))
+    matchKey = "optimism";
+  else if (lower.includes("poly") || lower.includes("matic"))
+    matchKey = "polygon";
+  else if (lower.includes("btc") || lower.includes("bitcoin"))
+    matchKey = "bitcoin";
 
   const chain = matchKey ? COINGECKO_CHAIN_IMAGES[matchKey] : undefined;
   if (chain) {
@@ -904,5 +1065,42 @@ export function AssetAvatar({
     >
       {upper.slice(0, 4)}
     </span>
+  );
+}
+
+export function IconNearIntents({
+  size = 14,
+  className = "",
+}: {
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-label="NEAR Intents"
+    >
+      <path d="M4 19V5l11 14V5" />
+      <path d="M15 5l5 7-5 7" />
+    </svg>
+  );
+}
+
+export function NearIntentsBadge({ className = "" }: { className?: string }) {
+  return (
+    <div
+      className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-red-50 text-[#FF1A1A] border border-red-200/60 shadow-2xs select-none ${className}`}
+    >
+      <IconNearIntents size={13} className="shrink-0" />
+      <span>Powered by NEAR Intents</span>
+    </div>
   );
 }

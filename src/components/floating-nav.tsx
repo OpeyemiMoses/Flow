@@ -45,25 +45,6 @@ const TABS: NavTabItem[] = [
     ),
   },
   {
-    id: "assets",
-    label: "Wallets & Assets",
-    icon: (
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <rect x="2" y="5" width="20" height="14" rx="2" />
-        <path d="M16 12h.01" />
-      </svg>
-    ),
-  },
-  {
     id: "send",
     label: "Send",
     icon: (
@@ -84,7 +65,7 @@ const TABS: NavTabItem[] = [
   },
   {
     id: "receive",
-    label: "Receive",
+    label: "+ Add Money",
     icon: (
       <svg
         width="14"
@@ -103,7 +84,7 @@ const TABS: NavTabItem[] = [
   },
   {
     id: "request",
-    label: "Request",
+    label: "Payment Links",
     icon: (
       <svg
         width="14"
@@ -154,7 +135,27 @@ export function FloatingNav({
 }: FloatingNavProps) {
   const [profileOpen, setProfileOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [currentUserName, setCurrentUserName] = useState(userName);
   const profileRef = useRef<HTMLDivElement>(null);
+
+  // Sync custom user name from localStorage
+  useEffect(() => {
+    const sync = () => {
+      try {
+        const stored = window.localStorage.getItem("flow-user-name");
+        if (stored && stored.trim().length > 0) {
+          setCurrentUserName(stored);
+        } else {
+          setCurrentUserName(userName);
+        }
+      } catch {
+        setCurrentUserName(userName);
+      }
+    };
+    sync();
+    window.addEventListener("flow-name-change", sync);
+    return () => window.removeEventListener("flow-name-change", sync);
+  }, [userName]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -276,9 +277,9 @@ export function FloatingNav({
               aria-expanded={profileOpen}
               className="flex items-center gap-2 pl-1.5 pr-2.5 py-1 rounded-full bg-white dark:bg-[#141414] border border-neutral-200/80 dark:border-neutral-800/80 shadow-xs hover:border-neutral-300 dark:hover:border-neutral-700 transition-all select-none cursor-pointer"
             >
-              <UserAvatar alt={userName} size={28} />
+              <UserAvatar alt={currentUserName} size={28} />
               <span className="hidden sm:inline text-xs font-semibold text-neutral-900 dark:text-neutral-100">
-                Personal
+                {currentUserName}
               </span>
               <svg
                 width="12"
@@ -300,7 +301,7 @@ export function FloatingNav({
               <div className="absolute right-0 mt-2 w-56 rounded-2xl bg-white dark:bg-[#141414] border border-neutral-200/90 dark:border-neutral-800 shadow-xl p-1.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
                 <div className="px-3 py-2 border-b border-neutral-100 dark:border-neutral-800 mb-1">
                   <p className="text-xs font-bold text-neutral-900 dark:text-white truncate">
-                    {userName}
+                    {currentUserName}
                   </p>
                   <p className="text-[11px] text-neutral-500 truncate">
                     {userEmail}

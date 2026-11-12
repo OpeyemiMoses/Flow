@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   EligibleSourceRoute,
   PublicPaymentRequest,
@@ -13,9 +13,11 @@ import type {
 import { FlowLogo } from "../../../components/flow-logo.tsx";
 import { QrCode } from "../../../components/qr-code.tsx";
 import {
+  AssetAvatar,
   ChainBadge,
   IconAlertTriangle,
   IconCheck,
+  IconChevronDown,
   IconCopy,
   IconExternalLink,
   IconWallet,
@@ -31,6 +33,7 @@ type PayerMode = "WALLET" | "EXCHANGE";
 
 export function CheckoutView({ request }: CheckoutViewProps) {
   const [payerMode, setPayerMode] = useState<PayerMode>("WALLET");
+  const [payTab, setPayTab] = useState<"STABLES" | "ANY_TOKEN">("STABLES");
   const [selectedEcosystem, setSelectedEcosystem] = useState<
     "evm" | "solana" | "near"
   >("evm");
@@ -41,6 +44,26 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   const [refundAddress, setRefundAddress] = useState<string>("");
   const [copiedLink, setCopiedLink] = useState(false);
   const [isAnyTokenModalOpen, setIsAnyTokenModalOpen] = useState(false);
+  const [isPayWithDropdownOpen, setIsPayWithDropdownOpen] = useState(false);
+  const payWithDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (
+        payWithDropdownRef.current &&
+        !payWithDropdownRef.current.contains(e.target as Node)
+      ) {
+        setIsPayWithDropdownOpen(false);
+      }
+    }
+    if (isPayWithDropdownOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isPayWithDropdownOpen]);
 
   // Indicative Quote State
   const [quote, setQuote] = useState<IndicativeQuote | null>(null);
@@ -1074,591 +1097,549 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                 /* ============================================================
                    STAGE A: PAYMENT SELECTION (Full Left Column)
                    ============================================================ */
-                <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 sm:p-8 shadow-sm space-y-6">
-                  {/* Merchant & Request Header */}
-                  <div className="flex flex-wrap items-start justify-between gap-4 border-b border-neutral-100 pb-5">
-                    <div className="flex items-center gap-3.5">
-                      <span className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[#FF1A1A] font-display text-lg font-bold text-white shadow-xs">
-                        {request.recipientName.slice(0, 1).toUpperCase()}
-                      </span>
-                      <div>
-                        <p className="text-xs font-medium text-neutral-500">
-                          Pay{" "}
-                          <strong className="text-neutral-900">
-                            {request.recipientName}
-                          </strong>
-                        </p>
-                        <h2 className="font-display text-xl font-bold text-neutral-950">
-                          {request.title}
-                        </h2>
-                        {request.description && (
-                          <p className="mt-0.5 text-xs text-neutral-500">
-                            {request.description}
-                          </p>
+                <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 sm:p-8 shadow-xs space-y-6">
+                  {/* Mode Switcher matching media_1794490079536_b30a594b.jpg */}
+                  <div>
+                    <h2 className="text-xs font-bold uppercase tracking-wider text-neutral-800 mb-3">
+                      Pay with
+                    </h2>
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => setPayTab("STABLES")}
+                        className={`flex items-center gap-2 px-5 py-2.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
+                          payTab === "STABLES"
+                            ? "bg-neutral-950 text-white shadow-xs"
+                            : "border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                        }`}
+                      >
+                        <svg
+                          width="15"
+                          height="15"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <rect x="2" y="5" width="20" height="14" rx="2" />
+                          <line x1="2" y1="10" x2="22" y2="10" />
+                        </svg>
+                        <span>Pay with stablecoins</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPayTab("ANY_TOKEN");
+                          setIsAnyTokenModalOpen(true);
+                        }}
+                        className={`flex items-center gap-2 px-5 py-2.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
+                          payTab === "ANY_TOKEN"
+                            ? "bg-neutral-950 text-white shadow-xs"
+                            : "border border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                        }`}
+                      >
+                        <span className="text-amber-500">✦</span>
+                        <span>Pay with any token</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Multi-ecosystem buttons for tests & fast switching */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-neutral-100">
+                    <span className="text-[11px] font-semibold text-neutral-500">
+                      Paying from:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleSelectEcosystem("evm")}
+                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all cursor-pointer ${
+                        selectedEcosystem === "evm"
+                          ? "border-[#FF1A1A] bg-red-50 text-[#FF1A1A] shadow-2xs"
+                          : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                      }`}
+                    >
+                      <ChainBadge chainKey="ethereum-mainnet" size={14} />
+                      <span>Ethereum &amp; Base</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleSelectEcosystem("solana")}
+                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all cursor-pointer ${
+                        selectedEcosystem === "solana"
+                          ? "border-[#FF1A1A] bg-red-50 text-[#FF1A1A] shadow-2xs"
+                          : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                      }`}
+                    >
+                      <ChainBadge chainKey="solana-mainnet" size={14} />
+                      <span>Solana</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleSelectEcosystem("near")}
+                      className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border transition-all cursor-pointer ${
+                        selectedEcosystem === "near"
+                          ? "border-[#FF1A1A] bg-red-50 text-[#FF1A1A] shadow-2xs"
+                          : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
+                      }`}
+                    >
+                      <ChainBadge chainKey="near-mainnet" size={14} />
+                      <span>NEAR Protocol</span>
+                    </button>
+                  </div>
+
+                  {/* Two fields side by side: "You pay with" & "You send (estimated)" */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {/* You pay with dropdown */}
+                    <div>
+                      <label className="block text-xs font-semibold text-neutral-800 mb-1.5">
+                        You pay with
+                      </label>
+                      <div className="relative" ref={payWithDropdownRef}>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setIsPayWithDropdownOpen((prev) => !prev)
+                          }
+                          className="w-full flex items-center justify-between p-3 rounded-2xl border border-neutral-200 bg-white hover:border-neutral-400 transition-all text-left shadow-2xs cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2.5">
+                            <AssetAvatar
+                              symbol={activeRoute?.assetSymbol ?? "USDC"}
+                              size={28}
+                            />
+                            <div>
+                              <p className="font-bold text-xs text-neutral-950">
+                                {activeRoute?.assetSymbol ?? "USDC"}
+                              </p>
+                              <p className="text-[11px] text-neutral-500">
+                                on {activeRoute?.networkName ?? "Base"}
+                              </p>
+                            </div>
+                          </div>
+                          <IconChevronDown
+                            size={14}
+                            className={`text-neutral-400 transition-transform ${isPayWithDropdownOpen ? "rotate-180" : ""}`}
+                          />
+                        </button>
+
+                        {/* Dropdown Menu matching screenshot */}
+                        {isPayWithDropdownOpen && (
+                          <div className="absolute left-0 top-full mt-1.5 w-full z-40 rounded-2xl border border-neutral-200 bg-white shadow-xl p-1.5 space-y-1 max-h-72 overflow-y-auto animate-in fade-in">
+                            {ecosystemRoutes.map((route) => {
+                              const isSelected = activeRoute?.id === route.id;
+                              return (
+                                <button
+                                  key={route.id}
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedRouteId(route.id);
+                                    setIsPayWithDropdownOpen(false);
+                                  }}
+                                  className={`w-full flex items-center justify-between p-2.5 rounded-xl text-left transition-all cursor-pointer ${
+                                    isSelected
+                                      ? "bg-red-50 text-neutral-950 font-bold"
+                                      : "hover:bg-neutral-50 text-neutral-700"
+                                  }`}
+                                >
+                                  <div className="flex items-center gap-2.5">
+                                    <AssetAvatar
+                                      symbol={route.assetSymbol}
+                                      size={24}
+                                    />
+                                    <div>
+                                      <p className="text-xs font-semibold">
+                                        {route.assetSymbol}
+                                      </p>
+                                      <p className="text-[10px] text-neutral-500">
+                                        on {route.networkName}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  {isSelected && (
+                                    <IconCheck
+                                      size={14}
+                                      className="text-[#FF1A1A]"
+                                    />
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
                         )}
                       </div>
                     </div>
 
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold text-emerald-700">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                      Active Request
-                    </span>
-                  </div>
-
-                  {/* Amount Due & Recipient Settlement Summary */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5 rounded-[20px] border border-neutral-200/70 bg-neutral-50/70 p-4">
-                    <div>
-                      <span className="text-[11px] font-medium text-neutral-500">
-                        {request.amountMode === "FIXED"
-                          ? "Amount due"
-                          : "Optional Amount"}
-                      </span>
-                      <p className="mt-1 font-display text-2xl font-bold text-neutral-950">
-                        {request.amountMode === "FIXED"
-                          ? `${request.displayAmount} ${request.destinationAssetSymbol}`
-                          : "Payer Specified"}
-                      </p>
-                    </div>
-                    <div className="sm:border-l sm:border-neutral-200/80 sm:pl-4">
-                      <span className="text-[11px] font-medium text-neutral-500">
-                        Recipient receives
-                      </span>
-                      <p className="mt-1 font-display text-sm font-bold text-neutral-950">
-                        {request.destinationAssetSymbol} on{" "}
-                        {request.destinationNetwork}
-                      </p>
-                      <p className="text-[11px] text-neutral-500">
-                        Automatic cross-chain settlement
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Step 1: Select Source Ecosystem ("You're paying from") */}
-                  <div className="space-y-2.5">
-                    <label className="block text-xs font-semibold text-neutral-800">
-                      You&apos;re paying from
-                    </label>
-                    <div className="grid grid-cols-3 gap-2.5">
-                      <button
-                        type="button"
-                        onClick={() => handleSelectEcosystem("evm")}
-                        className={`flex items-center justify-center gap-2 rounded-[14px] border py-3 px-3 text-xs font-semibold transition-all ${
-                          selectedEcosystem === "evm"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 shadow-2xs"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
-                        }`}
-                      >
-                        <ChainBadge chainKey="ethereum-mainnet" size={16} />
-                        <span>Ethereum &amp; Base</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSelectEcosystem("solana")}
-                        className={`flex items-center justify-center gap-2 rounded-[14px] border py-3 px-3 text-xs font-semibold transition-all ${
-                          selectedEcosystem === "solana"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 shadow-2xs"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
-                        }`}
-                      >
-                        <ChainBadge chainKey="solana-mainnet" size={16} />
-                        <span>Solana</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSelectEcosystem("near")}
-                        className={`flex items-center justify-center gap-2 rounded-[14px] border py-3 px-3 text-xs font-semibold transition-all ${
-                          selectedEcosystem === "near"
-                            ? "border-[#FF1A1A] bg-red-50/40 text-neutral-950 shadow-2xs"
-                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
-                        }`}
-                      >
-                        <ChainBadge chainKey="near-mainnet" size={16} />
-                        <span>NEAR Protocol</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Step 2: Select Source Asset & Network */}
-                  <div className="space-y-2.5">
-                    <label className="block text-xs font-semibold text-neutral-800">
-                      Source asset &amp; network
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                      {ecosystemRoutes.map((route) => {
-                        const isSelected = activeRoute?.id === route.id;
-                        return (
-                          <button
-                            key={route.id}
-                            type="button"
-                            onClick={() => setSelectedRouteId(route.id)}
-                            className={`flex items-center justify-between rounded-[14px] border p-3.5 text-left transition-all ${
-                              isSelected
-                                ? "border-[#FF1A1A] bg-red-50/30 shadow-2xs"
-                                : "border-neutral-200 bg-white hover:bg-neutral-50"
-                            }`}
-                          >
-                            <div>
-                              <div className="flex items-center gap-1.5">
-                                <span className="font-display text-xs font-bold text-neutral-950">
-                                  {route.assetSymbol}
-                                </span>
-                                <span className="text-[10px] text-neutral-400">
-                                  ({route.standard})
-                                </span>
-                              </div>
-                              <p className="text-[11px] text-neutral-500">
-                                {route.networkName}
-                              </p>
-                            </div>
-                            <span
-                              className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                                route.routeType === "DIRECT_TRANSFER"
-                                  ? "bg-emerald-50 text-emerald-700"
-                                  : "bg-red-50 text-[#FF1A1A]"
-                              }`}
-                            >
-                              {route.routeType === "DIRECT_TRANSFER"
-                                ? "Direct"
-                                : "1Click"}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Modal Trigger for Any Token across 35+ chains */}
-                  <div className="pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setIsAnyTokenModalOpen(true)}
-                      className="inline-flex items-center gap-2 text-xs font-semibold text-neutral-700 hover:text-neutral-950 px-3.5 py-2.5 rounded-xl border border-neutral-200 bg-neutral-50/50 hover:bg-neutral-100 transition-all cursor-pointer"
-                    >
-                      <span>✨</span>
-                      <span>
-                        Pay with any token across 35+ chains via NEAR Intents →
-                      </span>
-                    </button>
-                  </div>
-
-                  {/* Optional Custom Amount Input */}
-                  {request.amountMode === "OPTIONAL" && (
+                    {/* You send (estimated) */}
                     <div>
                       <label className="block text-xs font-semibold text-neutral-800 mb-1.5">
-                        Amount to Send ({activeRoute?.assetSymbol ?? "Asset"})
+                        You send (estimated)
                       </label>
+                      <div className="flex items-center justify-between p-3 rounded-2xl border border-neutral-200 bg-white shadow-2xs">
+                        <input
+                          type="text"
+                          value={quote?.sourceDisplayAmount ?? customAmount}
+                          onChange={(e) => setCustomAmount(e.target.value)}
+                          disabled={request.amountMode === "FIXED"}
+                          placeholder="1.00"
+                          className="w-full font-display text-xl font-bold text-neutral-950 focus:outline-hidden bg-transparent"
+                        />
+                        <span className="font-bold text-xs text-neutral-500 pl-2">
+                          {activeRoute?.assetSymbol ?? "USDC"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Payer refund address */}
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <label className="text-xs font-semibold text-neutral-800">
+                        Payer refund address
+                      </label>
+                      <span
+                        className="text-[11px] text-neutral-400"
+                        title="Self-custody wallet for automated refund fallback"
+                      >
+                        ⓘ
+                      </span>
+                    </div>
+                    <div className="relative flex items-center">
                       <input
                         type="text"
-                        value={customAmount}
-                        onChange={(e) => setCustomAmount(e.target.value)}
-                        placeholder="e.g. 25"
-                        className="w-full rounded-[14px] border border-neutral-200 bg-white px-4 py-3 font-display text-base font-bold text-neutral-950 focus:border-neutral-950 focus:outline-none"
+                        value={refundAddress}
+                        onChange={(e) => setRefundAddress(e.target.value)}
+                        placeholder="Enter 0x... or Solana Base58 or NEAR account"
+                        className="w-full px-4 py-3 rounded-2xl border border-neutral-200 bg-white text-xs font-mono text-neutral-950 focus:outline-hidden focus:border-neutral-900 shadow-2xs pr-10"
                       />
+                      {refundAddress.trim().length > 0 &&
+                        !refundValidationMessage && (
+                          <span className="absolute right-3.5 text-emerald-500 font-bold text-sm">
+                            ✓
+                          </span>
+                        )}
                     </div>
-                  )}
+                    {refundAddress.trim().length > 0 &&
+                    !refundValidationMessage ? (
+                      <p className="mt-1 text-xs font-medium text-emerald-600 flex items-center gap-1">
+                        <span>✓</span>
+                        <span>
+                          Valid refund address (
+                          {selectedEcosystem.toUpperCase()})
+                        </span>
+                      </p>
+                    ) : refundValidationMessage ? (
+                      <p className="mt-1 text-xs font-medium text-amber-700">
+                        {refundValidationMessage}
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-[11px] text-neutral-500">
+                        ✓ Valid refund address (Ethereum, Base, Solana, or NEAR)
+                      </p>
+                    )}
+                  </div>
 
-                  {/* Step 3: Payment Method (Self-Custody Wallet vs Exchange Withdrawal) */}
-                  <div className="space-y-2.5">
-                    <label className="block text-xs font-semibold text-neutral-800">
-                      Payment method
-                    </label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {/* Payment method selector: Wallet vs Exchange */}
+                  <div className="space-y-2 pt-1 border-t border-neutral-100">
+                    <span className="text-[11px] font-semibold text-neutral-500">
+                      Payment method:
+                    </span>
+                    <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
                         onClick={() => setPayerMode("WALLET")}
-                        className={`flex items-center gap-3 rounded-[14px] border p-3.5 text-left transition-all ${
+                        className={`flex items-center gap-2 p-2.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
                           payerMode === "WALLET"
-                            ? "border-[#FF1A1A] bg-red-50/30 shadow-2xs"
-                            : "border-neutral-200 bg-white hover:bg-neutral-50"
+                            ? "border-neutral-950 bg-neutral-950 text-white"
+                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
                         }`}
                       >
-                        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-neutral-950 text-white">
-                          <IconWallet size={15} />
-                        </span>
-                        <div>
-                          <p className="font-display text-xs font-bold text-neutral-950">
-                            Self-Custody Wallet
-                          </p>
-                          <p className="text-[11px] text-neutral-500">
-                            MetaMask, Phantom, Coinbase
-                          </p>
-                        </div>
+                        <IconWallet size={14} />
+                        <span>Self-Custody Wallet</span>
                       </button>
 
                       <button
                         type="button"
                         onClick={() => setPayerMode("EXCHANGE")}
-                        className={`flex items-center gap-3 rounded-[14px] border p-3.5 text-left transition-all ${
+                        className={`flex items-center gap-2 p-2.5 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
                           payerMode === "EXCHANGE"
-                            ? "border-[#FF1A1A] bg-red-50/30 shadow-2xs"
-                            : "border-neutral-200 bg-white hover:bg-neutral-50"
+                            ? "border-neutral-950 bg-neutral-950 text-white"
+                            : "border-neutral-200 bg-white text-neutral-700 hover:bg-neutral-50"
                         }`}
                       >
-                        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-neutral-100 text-neutral-800">
-                          <IconExternalLink size={15} />
-                        </span>
-                        <div>
-                          <p className="font-display text-xs font-bold text-neutral-950">
-                            Exchange Withdrawal
-                          </p>
-                          <p className="text-[11px] text-neutral-500">
-                            Binance, Coinbase, Kraken
-                          </p>
-                        </div>
+                        <IconExternalLink size={14} />
+                        <span>Exchange Withdrawal</span>
                       </button>
                     </div>
-
-                    {/* Refund Address Input for Exchange Mode or Cross-Chain Payments */}
-                    {isRefundRequired && (
-                      <div className="mt-3 rounded-[16px] border border-amber-200 bg-amber-50/70 p-4 space-y-2.5 text-xs">
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <p className="font-semibold text-amber-950">
-                            {payerMode === "EXCHANGE"
-                              ? "Self-custody refund address required for exchange withdrawals"
-                              : "Refund wallet address"}
-                          </p>
-                        </div>
-
-                        <p className="text-[11px] text-neutral-600">
-                          {payerMode === "EXCHANGE"
-                            ? "Exchanges cannot route incoming refunds to your account. You must provide a self-custody wallet address you control in case this payment needs to be returned. The recipient's Flow wallet address cannot be used."
-                            : "Enter your wallet's public address. If this payment cannot be completed, funds will be returned to this address. No wallet connection required. Never enter your recovery phrase or private key."}
-                        </p>
-
-                        <input
-                          type="text"
-                          value={refundAddress}
-                          onChange={(e) => {
-                            setRefundAddress(e.target.value);
-                          }}
-                          placeholder="Enter 0x... or Solana Base58 or NEAR account"
-                          className="w-full rounded-[12px] border border-neutral-200 bg-white px-3.5 py-2.5 text-xs text-neutral-950 placeholder:text-neutral-400 focus:border-neutral-950 focus:outline-none"
-                        />
-
-                        {refundValidationMessage && (
-                          <p className="text-[11px] font-semibold text-amber-800 flex items-center gap-1.5">
-                            <IconAlertTriangle
-                              size={14}
-                              className="shrink-0 text-amber-800"
-                            />
-                            <span>{refundValidationMessage}</span>
-                          </p>
-                        )}
-                      </div>
-                    )}
                   </div>
 
-                  {/* Step 4: Indicative Route Quote & Payment Action */}
-                  <div className="rounded-[20px] border border-neutral-200/90 bg-neutral-50/80 p-5 space-y-4">
+                  {/* Quote Breakdown Card */}
+                  <div className="p-4 rounded-2xl border border-neutral-200 bg-neutral-50/60 space-y-3">
                     <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-neutral-950">
-                        Quote Summary
-                      </span>
-                      {loadingQuote ? (
-                        <span className="text-[11px] text-neutral-500 animate-pulse">
-                          Discovering route...
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-neutral-950">
+                          Quote Summary
                         </span>
-                      ) : quote ? (
-                        <span
-                          className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
-                            quote.routeStatus === "SUPPORTED_AND_QUOTABLE"
-                              ? "bg-emerald-50 text-emerald-700"
-                              : quote.routeStatus === "UNSUPPORTED_PAIR"
-                                ? "bg-neutral-200 text-neutral-700"
-                                : "bg-amber-50 text-amber-800"
-                          }`}
-                        >
-                          {quote.routeStatus.replace(/_/g, " ")}
+                        <span className="inline-flex items-center gap-1 text-[10px] text-neutral-500">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          <span>Quote updates live ({secondsRemaining}s) ⓘ</span>
                         </span>
-                      ) : quoteError ? (
-                        <span className="rounded-full bg-red-50 px-2.5 py-0.5 text-[10px] font-bold text-[#FF1A1A]">
-                          PROVIDER ERROR
-                        </span>
-                      ) : null}
+                      </div>
+                      <div className="text-[11px] font-bold">
+                        {loadingQuote ? (
+                          <span className="text-neutral-400 animate-pulse">
+                            Updating...
+                          </span>
+                        ) : quote?.routeStatus === "UNSUPPORTED_PAIR" ? (
+                          <span className="px-2 py-0.5 rounded-full bg-neutral-200 text-neutral-800 text-[10px] font-bold">
+                            UNSUPPORTED PAIR
+                          </span>
+                        ) : quote?.routeStatus === "SUPPORTED_AND_QUOTABLE" ? (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[10px] font-bold">
+                            Live Rate
+                          </span>
+                        ) : quoteError ? (
+                          <span className="text-[#FF1A1A] text-[10px]">
+                            Quote Error
+                          </span>
+                        ) : null}
+                      </div>
                     </div>
 
-                    {loadingQuote ? (
-                      <div className="py-5 text-center text-xs text-neutral-500">
-                        Fetching live cross-chain quote...
-                      </div>
-                    ) : quote &&
-                      quote.routeStatus === "SUPPORTED_AND_QUOTABLE" ? (
-                      <div className="space-y-3 text-xs">
-                        <div className="rounded-[14px] border border-neutral-200/80 bg-white p-3.5 space-y-2">
-                          <div className="flex justify-between items-center">
-                            <span className="text-neutral-500">You Pay:</span>
-                            <span className="font-display text-sm font-bold text-neutral-950">
-                              {quote.sourceDisplayAmount}{" "}
-                              {quote.sourceAssetSymbol}
-                            </span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-neutral-500">
-                              Recipient Gets:
-                            </span>
-                            <span className="font-display text-sm font-bold text-[#FF1A1A]">
-                              {quote.destinationDisplayAmount}{" "}
-                              {quote.destinationAssetSymbol}
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="space-y-1.5 text-[11px] text-neutral-600">
-                          <div className="flex justify-between">
-                            <span>Exchange Rate:</span>
-                            <span className="font-semibold text-neutral-900">
-                              {quote.exchangeRateDescription}
-                            </span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Estimated Settlement:</span>
-                            <span className="font-semibold text-neutral-900">
-                              {quote.estimatedDurationSeconds !== null
-                                ? `~${quote.estimatedDurationSeconds} seconds`
-                                : "Instant"}
-                            </span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span>Settlement Fee:</span>
-                            <span className="font-semibold text-neutral-900">
-                              {quote.fees.withdrawFeeDisplay
-                                ? `${quote.fees.withdrawFeeDisplay} ${quote.fees.withdrawFeeAssetSymbol || request.destinationAssetSymbol} (included)`
-                                : "Included in quote"}
-                            </span>
-                          </div>
-                          {quote.fees.refundFeeDisplay && (
-                            <div className="flex justify-between">
-                              <span>Conditional Refund Fee:</span>
-                              <span className="font-semibold text-neutral-900">
-                                {quote.fees.refundFeeDisplay}{" "}
-                                {quote.fees.refundFeeAssetSymbol ||
-                                  quote.sourceAssetSymbol}{" "}
-                                <span className="text-[10px] text-neutral-500 font-normal">
-                                  (charged only on refund)
-                                </span>
-                              </span>
-                            </div>
-                          )}
-                          <div className="flex justify-between">
-                            <span>Estimated Network Gas:</span>
-                            <span className="font-semibold text-neutral-900">
-                              ~
-                              {quote.fees.networkGasEstimateDisplay ||
-                                "0.000005"}{" "}
-                              {quote.fees.networkGasAssetSymbol ||
-                                quote.sourceAssetSymbol}{" "}
-                              <span className="text-[10px] text-neutral-500 font-normal">
-                                (paid by wallet)
-                              </span>
-                            </span>
-                          </div>
-                          <div className="pt-1 text-[10px] text-neutral-500 italic">
-                            * Note: USD values are live indicative estimates
-                            based on current oracle rates, not a guaranteed
-                            maximum. Payer authorization is bounded strictly in{" "}
-                            {quote.sourceAssetSymbol} atomic units (
-                            {quote.sourceAtomicAmount}{" "}
-                            {quote.sourceAssetSymbol === "SOL"
-                              ? "lamports"
-                              : "atomic units"}
-                            ).
-                          </div>
-                          <div className="flex justify-between items-center pt-1.5 border-t border-neutral-200/70">
-                            <span>Quote refreshes in:</span>
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono font-semibold text-neutral-800">
-                                {secondsRemaining > 0
-                                  ? `${secondsRemaining}s`
-                                  : "Expired"}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => setRefreshTrigger((n) => n + 1)}
-                                className="font-semibold text-[#FF1A1A] hover:underline"
-                              >
-                                Refresh
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    ) : quote &&
-                      quote.routeStatus === "NOT_YET_ENABLED_FOR_PAYMENT" ? (
-                      <div className="rounded-[14px] border border-purple-200 bg-purple-50/70 p-3.5 text-xs text-purple-900">
-                        <strong>Direct Transfer:</strong> 1:1 direct on-chain
-                        transfer on {quote.destinationNetwork}. Live execution
-                        is disabled for safety.
-                      </div>
-                    ) : quote && quote.routeStatus === "UNSUPPORTED_PAIR" ? (
-                      <div className="rounded-[14px] border border-neutral-200 bg-white p-3.5 text-xs text-neutral-700 space-y-1">
-                        <div className="font-bold text-neutral-950">
+                    {quote?.routeStatus === "UNSUPPORTED_PAIR" ? (
+                      <div className="p-3 rounded-xl bg-white border border-neutral-200 text-xs text-neutral-700">
+                        <p className="font-bold text-neutral-950">
                           Unsupported Route Pair
-                        </div>
-                        <div>
-                          {quote.statusMessage ??
+                        </p>
+                        <p className="text-[11px] text-neutral-500 mt-0.5">
+                          {quote.statusMessage ||
                             "No automated solver routes currently support this token pair."}
-                        </div>
-                      </div>
-                    ) : quoteError ? (
-                      <div className="rounded-[14px] border border-red-200 bg-red-50 p-3.5 text-xs text-[#FF1A1A]">
-                        <strong>Quote Discovery Error:</strong> {quoteError}
+                        </p>
                       </div>
                     ) : (
-                      <div className="py-3 text-center text-xs text-neutral-500">
-                        Select a source asset to discover live quotes.
+                      <div className="space-y-2 text-xs">
+                        <div className="flex justify-between items-center text-neutral-600">
+                          <span>
+                            You send ({activeRoute?.assetSymbol} on{" "}
+                            {activeRoute?.networkName})
+                          </span>
+                          <span className="font-mono font-bold text-neutral-950">
+                            {quote?.sourceDisplayAmount ?? customAmount}{" "}
+                            {activeRoute?.assetSymbol}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center text-neutral-600">
+                          <span>Fee ⓘ</span>
+                          <span className="font-semibold text-neutral-900">
+                            Free (0.00 {activeRoute?.assetSymbol})
+                          </span>
+                        </div>
+                        <div className="border-t border-neutral-200/80 pt-2 flex justify-between items-center">
+                          <span className="font-bold text-neutral-950">
+                            Total
+                          </span>
+                          <span className="font-mono font-bold text-neutral-950">
+                            {quote?.sourceDisplayAmount ?? customAmount}{" "}
+                            {activeRoute?.assetSymbol}
+                          </span>
+                        </div>
                       </div>
                     )}
-
-                    {commitError && (
-                      <div className="rounded-[12px] border border-red-200 bg-red-50 p-3 text-xs text-[#FF1A1A]">
-                        <strong>Commit Error:</strong> {commitError}
-                      </div>
-                    )}
-
-                    {/* Primary CTA Button */}
-                    <button
-                      type="button"
-                      onClick={handleProceedToPayment}
-                      disabled={
-                        committing ||
-                        !quote ||
-                        quote.routeStatus !== "SUPPORTED_AND_QUOTABLE" ||
-                        (isRefundRequired && !!refundValidationMessage) ||
-                        (quote.isExecutionDisabled ?? true)
-                      }
-                      className={`w-full rounded-full py-3.5 px-6 text-xs sm:text-sm font-semibold transition-all ${
-                        !committing &&
-                        quote &&
-                        quote.routeStatus === "SUPPORTED_AND_QUOTABLE" &&
-                        (!isRefundRequired || !refundValidationMessage) &&
-                        !quote.isExecutionDisabled
-                          ? "bg-[#FF1A1A] hover:bg-[#E01515] text-white cursor-pointer shadow-md"
-                          : "bg-neutral-950 text-white/90 opacity-85 cursor-not-allowed"
-                      }`}
-                    >
-                      {committing
-                        ? "Securing Deposit Address..."
-                        : quote &&
-                            quote.routeStatus === "SUPPORTED_AND_QUOTABLE"
-                          ? quote.isExecutionDisabled
-                            ? "Pay Now (Payment Execution Disabled)"
-                            : "Continue to payment →"
-                          : "Select Quotable Route to Continue"}
-                    </button>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* RIGHT 5 COLUMNS: Recipient Wallet (State A) OR Deposit Instructions (State B) + Trust Highlights */}
+            {/* RIGHT 5 COLUMNS: Matches media_1794490079536_b30a594b.jpg */}
             <div className="lg:col-span-5 space-y-5">
               {!instructions ? (
-                /* STATE A: Recipient Wallet Address (Before Payment Commitment) */
-                <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 shadow-sm space-y-5">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
-                        RECIPIENT DESTINATION
-                      </span>
-                      <h2 className="font-serif text-xl text-neutral-950">
-                        Recipient Wallet Address
-                      </h2>
-                    </div>
-                    <span className="rounded-full bg-neutral-100 px-2.5 py-1 text-[10px] font-semibold text-neutral-700">
-                      Permanent Address
+                /* STATE A: Right Column Invoice Summary & Proceed Button */
+                <div className="rounded-[28px] border border-neutral-200/90 bg-white p-6 sm:p-7 shadow-xs space-y-5">
+                  {/* Recipient Card */}
+                  <div>
+                    <span className="text-xs font-semibold text-neutral-800 block mb-2">
+                      Recipient
                     </span>
-                  </div>
-
-                  <div className="flex flex-col items-center justify-center rounded-[22px] border border-neutral-200/70 bg-neutral-50 p-6">
-                    {request.recipientAddress ? (
-                      <>
-                        <QrCode value={request.recipientAddress} size={156} />
-                        <p className="mt-3 text-xs font-medium text-neutral-600 text-center">
-                          Recipient destination wallet on{" "}
-                          <strong className="text-neutral-900">
-                            {request.destinationNetwork}
-                          </strong>
-                        </p>
-                      </>
-                    ) : (
-                      <div className="flex flex-col items-center justify-center py-6 text-center">
-                        <span className="text-sm font-semibold text-neutral-700">
-                          Recipient address unavailable
+                    <div className="flex items-center justify-between p-3.5 rounded-2xl border border-neutral-200/80 bg-neutral-50/70">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-red-100 text-[#FF1A1A]">
+                          <IconWallet size={18} />
                         </span>
-                        <p className="mt-1 text-xs text-neutral-500 max-w-[260px]">
-                          This payment request does not have an active
-                          registered destination address for{" "}
-                          {request.destinationNetwork}.
-                        </p>
+                        <div className="min-w-0">
+                          <p className="font-display font-bold text-xs text-neutral-950 truncate">
+                            {request.title}
+                          </p>
+                          <p className="font-mono text-[11px] text-neutral-500 truncate">
+                            {request.recipientAddress
+                              ? `${request.recipientAddress.slice(0, 6)}...${request.recipientAddress.slice(-4)}`
+                              : "Address unavailable"}
+                          </p>
+                        </div>
                       </div>
-                    )}
-                  </div>
-
-                  <div className="space-y-3">
-                    <div className="rounded-[14px] border border-neutral-200/80 bg-neutral-50/70 p-3.5 space-y-2 text-xs">
-                      <div className="flex justify-between items-center">
-                        <span className="text-neutral-500">Recipient:</span>
-                        <span className="font-bold text-neutral-900">
-                          {request.recipientName}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-neutral-500">Destination:</span>
-                        <span className="font-semibold text-neutral-900">
-                          {request.destinationAssetSymbol} on{" "}
-                          {request.destinationNetwork}
-                        </span>
-                      </div>
+                      {request.recipientAddress && (
+                        <button
+                          type="button"
+                          onClick={handleCopyRecipientAddress}
+                          className="p-1.5 rounded-lg text-neutral-500 hover:text-neutral-950 hover:bg-neutral-200/70 transition-colors cursor-pointer"
+                          title="Copy recipient address"
+                        >
+                          {copiedRecipientAddress ? (
+                            <IconCheck size={14} className="text-emerald-600" />
+                          ) : (
+                            <IconCopy size={14} />
+                          )}
+                        </button>
+                      )}
                     </div>
+                  </div>
 
-                    <div>
-                      <span className="text-[11px] font-medium text-neutral-500 block mb-1">
-                        Recipient Destination Address
+                  {/* Amount Due */}
+                  <div>
+                    <span className="text-xs font-medium text-neutral-500 block">
+                      Amount due
+                    </span>
+                    <p className="mt-1 font-display text-3xl font-extrabold text-neutral-950">
+                      {request.displayAmount} {request.destinationAssetSymbol}
+                    </p>
+                    <p className="text-xs text-neutral-500 mt-0.5">
+                      ≈ ${request.displayAmount} USD
+                    </p>
+                  </div>
+
+                  {/* Settlement (you receive) */}
+                  <div>
+                    <span className="text-xs font-semibold text-neutral-800 block mb-1.5">
+                      Settlement (you receive)
+                    </span>
+                    <div className="flex items-center gap-2.5 px-4 py-3 rounded-2xl border border-neutral-200/80 bg-neutral-50/70">
+                      <AssetAvatar
+                        symbol={request.destinationAssetSymbol}
+                        size={24}
+                      />
+                      <span className="font-display font-bold text-xs text-neutral-950">
+                        {request.destinationAssetSymbol} on{" "}
+                        {request.destinationNetwork}
                       </span>
-                      <div className="flex items-center justify-between gap-2 rounded-[12px] border border-neutral-200 bg-neutral-50 px-3.5 py-2.5 font-mono text-xs">
-                        {request.recipientAddress ? (
-                          <>
-                            <span className="truncate select-all text-neutral-800">
-                              {request.recipientAddress}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={handleCopyRecipientAddress}
-                              className="shrink-0 font-sans font-semibold text-[#FF1A1A] hover:underline"
-                            >
-                              {copiedRecipientAddress ? "Copied" : "Copy"}
-                            </button>
-                          </>
-                        ) : (
-                          <span className="text-neutral-400 italic text-[11px]">
-                            Address unavailable
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Informational Safety Warning */}
-                    <div className="rounded-[14px] border border-amber-200/90 bg-amber-50/80 p-3.5 text-xs text-amber-950 space-y-1">
-                      <p className="font-bold text-[#FF1A1A] flex items-center gap-1.5">
-                        <IconAlertTriangle
-                          size={15}
-                          className="shrink-0 text-[#FF1A1A]"
-                        />
-                        <span>
-                          Recipient wallet address — not the deposit address for
-                          this payment.
-                        </span>
-                      </p>
-                      <p className="text-[11px] leading-relaxed text-neutral-700">
-                        Do not send funds directly to this address when paying
-                        cross-chain. Select your source asset on the left and
-                        proceed to generate your dedicated payment deposit
-                        address.
-                      </p>
                     </div>
                   </div>
+
+                  {/* Route */}
+                  <div>
+                    <span className="text-xs font-semibold text-neutral-800 block mb-1.5">
+                      Route
+                    </span>
+                    <div className="p-3.5 rounded-2xl border border-neutral-200/80 bg-neutral-50/70 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <AssetAvatar
+                            symbol={activeRoute?.assetSymbol ?? "USDC"}
+                            size={22}
+                          />
+                          <span className="font-bold text-xs text-neutral-950">
+                            {activeRoute?.assetSymbol ?? "USDC"}
+                          </span>
+                          <span className="text-[11px] text-neutral-500">
+                            {activeRoute?.networkName ?? "Base"}
+                          </span>
+                        </div>
+                        <span className="text-neutral-400 font-bold">
+                          ······&gt;
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <AssetAvatar
+                            symbol={request.destinationAssetSymbol}
+                            size={22}
+                          />
+                          <span className="font-bold text-xs text-neutral-950">
+                            {request.destinationAssetSymbol}
+                          </span>
+                          <span className="text-[11px] text-neutral-500">
+                            {request.destinationNetwork}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="pt-1 flex justify-center">
+                        <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+                          <span>⚡</span>
+                          <span>
+                            {isCrossChain
+                              ? "NEAR Intents · Instant"
+                              : "Direct route · Instant"}
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* You'll send (exact) summary box */}
+                  <div className="p-4 rounded-2xl bg-red-50/50 border border-red-100 flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-semibold text-neutral-800 block">
+                        You&apos;ll send (exact)
+                      </span>
+                      <p className="mt-0.5 font-display text-2xl font-extrabold text-neutral-950">
+                        {quote?.sourceDisplayAmount ?? request.displayAmount}{" "}
+                        <span className="text-sm font-bold text-neutral-700">
+                          {quote?.sourceAssetSymbol ??
+                            activeRoute?.assetSymbol ??
+                            "USDC"}
+                        </span>
+                      </p>
+                    </div>
+                    <div className="text-right text-xs space-y-1">
+                      <div>
+                        <span className="text-neutral-500">Fee ⓘ </span>
+                        <span className="font-semibold text-neutral-900">
+                          0.00 {request.destinationAssetSymbol}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-neutral-500">You receive </span>
+                        <span className="font-bold text-neutral-950">
+                          {request.displayAmount}{" "}
+                          {request.destinationAssetSymbol}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {commitError && (
+                    <div className="p-3 rounded-xl border border-red-200 bg-red-50 text-xs text-[#FF1A1A]">
+                      <strong>Error:</strong> {commitError}
+                    </div>
+                  )}
+
+                  {/* Primary Action Button */}
+                  <button
+                    type="button"
+                    onClick={handleProceedToPayment}
+                    disabled={
+                      committing ||
+                      !quote ||
+                      quote.routeStatus !== "SUPPORTED_AND_QUOTABLE" ||
+                      (isRefundRequired && !!refundValidationMessage) ||
+                      (quote.isExecutionDisabled ?? true)
+                    }
+                    className={`w-full py-4 rounded-full text-xs sm:text-sm font-semibold transition-all ${
+                      !committing &&
+                      quote &&
+                      quote.routeStatus === "SUPPORTED_AND_QUOTABLE" &&
+                      (!isRefundRequired || !refundValidationMessage) &&
+                      !quote.isExecutionDisabled
+                        ? "bg-neutral-950 text-white hover:bg-neutral-800 shadow-md cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
+                        : "bg-neutral-950 text-white opacity-90 cursor-not-allowed"
+                    }`}
+                  >
+                    {committing
+                      ? "Securing Deposit Address..."
+                      : quote?.isExecutionDisabled
+                        ? "Pay Now (Payment Execution Disabled)"
+                        : "Proceed to payment →"}
+                  </button>
                 </div>
               ) : (
                 /* STATE B: Payment Instructions (After Authorized Payment Commitment) */
@@ -2029,11 +2010,14 @@ export function CheckoutView({ request }: CheckoutViewProps) {
         )}
       </main>
 
-      {/* Any Token Discovery Modal (Matches FLOW Dashboard Checkout and Assistant-9.png) */}
+      {/* Any Token Discovery Modal (Matches media_1794490079482_a5d66b1d.jpg) */}
       <UnifiedAssetSelectorModal
         isOpen={isAnyTokenModalOpen}
         onClose={() => setIsAnyTokenModalOpen(false)}
-        darkTheme={true}
+        darkTheme={false}
+        title="Pay with any token"
+        targetAmount={request.displayAmount ?? "1.00"}
+        targetSymbol={request.destinationAssetSymbol ?? "USDC"}
         filterCapability="CAN_PAY_FROM"
         onSelectToken={(token: DiscoveredToken) => {
           if (

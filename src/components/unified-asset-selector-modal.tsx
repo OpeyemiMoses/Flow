@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { DiscoveredToken } from "../server/providers/near-intents-discovery.ts";
-import { AssetAvatar, ChainBadge } from "./icons.tsx";
+import { AssetAvatar, ChainBadge, NearIntentsBadge } from "./icons.tsx";
 
 export interface UnifiedAssetSelectorModalProps {
   isOpen: boolean;
@@ -10,6 +10,8 @@ export interface UnifiedAssetSelectorModalProps {
   onSelectToken: (token: DiscoveredToken) => void;
   title?: string;
   subtitle?: string;
+  targetAmount?: string;
+  targetSymbol?: string;
   filterCapability?:
     | "CAN_DIRECT_DEPOSIT"
     | "CAN_PAY_FROM"
@@ -22,8 +24,10 @@ export function UnifiedAssetSelectorModal({
   isOpen,
   onClose,
   onSelectToken,
-  title = "Select token",
-  subtitle = "Choose from 200+ tokens supported across 35+ blockchains via NEAR Intents",
+  title = "Pay with any token",
+  subtitle,
+  targetAmount,
+  targetSymbol = "USDC",
   filterCapability,
   darkTheme = false,
 }: UnifiedAssetSelectorModalProps) {
@@ -175,7 +179,7 @@ export function UnifiedAssetSelectorModal({
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by name, symbol, or network..."
+                placeholder="Search a token or network"
                 className={`w-full px-4 py-2.5 pl-9 rounded-2xl text-xs border focus:outline-hidden ${
                   isDark
                     ? "bg-[#1e1e1e] border-neutral-700 text-white placeholder-neutral-500 focus:border-neutral-500"
@@ -287,26 +291,52 @@ export function UnifiedAssetSelectorModal({
                   </div>
 
                   <div className="text-right">
-                    {token.priceUsd ? (
-                      <p className="text-xs font-semibold font-mono">
-                        ${Number(token.priceUsd).toFixed(2)}
-                      </p>
+                    {targetAmount && token.priceUsd ? (
+                      <div>
+                        <p className="text-xs font-semibold font-mono text-neutral-950 dark:text-white">
+                          ≈{" "}
+                          {(
+                            Number(targetAmount) / Number(token.priceUsd)
+                          ).toFixed(
+                            Number(token.priceUsd) > 100
+                              ? 6
+                              : Number(token.priceUsd) > 1
+                                ? 4
+                                : 2,
+                          )}{" "}
+                          {token.symbol}
+                        </p>
+                        <p className="text-[10px] text-neutral-500 font-mono">
+                          ≈ {targetAmount} {targetSymbol}
+                        </p>
+                      </div>
+                    ) : token.priceUsd ? (
+                      <div>
+                        <p className="text-xs font-semibold font-mono">
+                          ${Number(token.priceUsd).toFixed(2)}
+                        </p>
+                        <span
+                          className={`text-[9px] uppercase tracking-wider font-semibold ${
+                            token.capabilities.includes("CAN_HOLD_IN_FLOW")
+                              ? "text-emerald-500"
+                              : "text-neutral-400"
+                          }`}
+                        >
+                          {token.capabilities.includes("CAN_HOLD_IN_FLOW")
+                            ? "Hold in Flow"
+                            : "Cross-chain swap"}
+                        </span>
+                      </div>
                     ) : null}
-                    <span
-                      className={`text-[9px] uppercase tracking-wider font-semibold ${
-                        token.capabilities.includes("CAN_HOLD_IN_FLOW")
-                          ? "text-emerald-500"
-                          : "text-neutral-400"
-                      }`}
-                    >
-                      {token.capabilities.includes("CAN_HOLD_IN_FLOW")
-                        ? "Hold in Flow"
-                        : "Cross-chain swap"}
-                    </span>
                   </div>
                 </button>
               ))
             )}
+          </div>
+
+          {/* Footer branding matching screenshot */}
+          <div className="pt-3.5 mt-2 border-t border-neutral-100 dark:border-neutral-800 flex justify-center">
+            <NearIntentsBadge />
           </div>
         </div>
       </div>

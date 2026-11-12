@@ -5,7 +5,11 @@ import { useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { FlowLogo } from "../../../components/flow-logo.tsx";
 import { ThemeToggle } from "../../../components/theme-toggle.tsx";
-import { UserAvatar } from "../../../components/user-avatar.tsx";
+import {
+  resetUserAvatar,
+  setUserAvatar,
+  UserAvatar,
+} from "../../../components/user-avatar.tsx";
 import { describe, Feedback, send } from "../../controls.tsx";
 
 export interface SessionRecord {
@@ -49,14 +53,73 @@ export function SecurityPanel({
   const [paymentLinkActivity, setPaymentLinkActivity] = useState(true);
   const [securityAlerts, setSecurityAlerts] = useState(true);
 
+  // Profile Customization state
+  const primaryAccount = accounts[0];
+  const [displayName, setDisplayName] = useState(
+    primaryAccount?.name ?? "Personal Workspace",
+  );
+  const [profileSavedMessage, setProfileSavedMessage] = useState<string | null>(
+    null,
+  );
+
   // Sessions state
   const [sessions, setSessions] =
     useState<readonly SessionRecord[]>(initialSessions);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
 
-  const primaryAccount = accounts[0];
   const backHref = primaryAccount ? `/accounts/${primaryAccount.id}` : "/";
+
+  // Sync profile name from localStorage on mount
+  useState(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const stored = window.localStorage.getItem("flow-user-name");
+        if (stored && stored.trim().length > 0) {
+          setDisplayName(stored);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  function handleSaveDisplayName(e: React.FormEvent) {
+    e.preventDefault();
+    try {
+      window.localStorage.setItem("flow-user-name", displayName.trim());
+      window.dispatchEvent(new Event("flow-name-change"));
+      setProfileSavedMessage("Display name saved successfully.");
+      setTimeout(() => setProfileSavedMessage(null), 3000);
+    } catch {
+      setProfileSavedMessage("Failed to save display name.");
+    }
+  }
+
+  function handleAvatarUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      setProfileSavedMessage("Avatar image must be under 2 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const result = event.target?.result;
+      if (typeof result === "string") {
+        setUserAvatar(result);
+        setProfileSavedMessage("Avatar image updated successfully.");
+        setTimeout(() => setProfileSavedMessage(null), 3000);
+      }
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function handleResetAvatar() {
+    resetUserAvatar();
+    setProfileSavedMessage("Avatar reset to default.");
+    setTimeout(() => setProfileSavedMessage(null), 3000);
+  }
 
   // Revoke session
   async function handleRevoke(sessionId: string) {
@@ -710,26 +773,113 @@ export function SecurityPanel({
                     Account &amp; Profile
                   </h2>
                   <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                    Your personal Flow account identity.
+                    Manage your personal details and profile picture across
+                    Flow.
                   </p>
                 </div>
 
-                <div className="flex items-center gap-4 p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/30">
-                  <UserAvatar
-                    size={48}
-                    className="rounded-full border border-neutral-200 dark:border-neutral-700"
-                  />
+                {profileSavedMessage && (
+                  <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold text-emerald-800 dark:text-emerald-300">
+                    {profileSavedMessage}
+                  </div>
+                )}
+
+                {/* Profile Picture Card */}
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-2xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/30">
+                  <div className="flex items-center gap-4">
+                    <UserAvatar
+                      size={64}
+                      className="rounded-full border-2 border-white dark:border-neutral-700 shadow-sm"
+                    />
+                    <div>
+                      <p className="font-display font-bold text-sm text-neutral-950 dark:text-white">
+                        Profile Picture
+                      </p>
+                      <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">
+                        PNG or JPG up to 2MB. Appears in navigation and payment
+                        links.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <label className="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 shadow-xs hover:opacity-90 transition-opacity cursor-pointer">
+                      <span>Change photo</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleAvatarUpload}
+                        className="hidden"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleResetAvatar}
+                      className="px-3.5 py-1.5 rounded-full text-xs font-semibold border border-neutral-200 dark:border-neutral-700 text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
+                    >
+                      Reset
+                    </button>
+                  </div>
+                </div>
+
+                {/* Personal Name Form */}
+                <form
+                  onSubmit={handleSaveDisplayName}
+                  className="p-5 rounded-2xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/30 space-y-4"
+                >
                   <div>
-                    <p className="font-display font-bold text-sm text-neutral-950 dark:text-white">
-                      {primaryAccount?.name ?? "Personal Workspace"}
+                    <label
+                      htmlFor="display-name-input"
+                      className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-1.5"
+                    >
+                      Display Name
+                    </label>
+                    <input
+                      id="display-name-input"
+                      type="text"
+                      value={displayName}
+                      onChange={(e) => setDisplayName(e.target.value)}
+                      placeholder="Your name or workspace title"
+                      className="w-full px-4 py-2.5 rounded-2xl text-xs bg-white dark:bg-[#1a1a1a] border border-neutral-200 dark:border-neutral-700 text-neutral-950 dark:text-white focus:outline-hidden focus:border-neutral-900 dark:focus:border-white"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between pt-1">
+                    <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                      Primary Email:{" "}
+                      <span className="font-mono text-neutral-800 dark:text-neutral-200">
+                        {email}
+                      </span>
                     </p>
-                    <p className="text-xs font-mono text-neutral-600 dark:text-neutral-400">
-                      {email}
-                    </p>
-                    <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700">
+                    <button
+                      type="submit"
+                      className="px-5 py-2 rounded-full text-xs font-semibold bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 shadow-xs hover:opacity-90 transition-opacity cursor-pointer"
+                    >
+                      Save Changes
+                    </button>
+                  </div>
+                </form>
+
+                {/* Account Details */}
+                <div className="p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800 text-xs space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-neutral-500">Account Type</span>
+                    <span className="font-semibold text-neutral-900 dark:text-white uppercase tracking-wider text-[11px]">
+                      {primaryAccount?.kind ?? "PERSONAL"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-neutral-500">Account ID</span>
+                    <span className="font-mono text-neutral-700 dark:text-neutral-300 text-[11px]">
+                      {primaryAccount?.id ?? "acc_default"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-neutral-500">Verification</span>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700">
                       <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                       Verified Owner
-                    </div>
+                    </span>
                   </div>
                 </div>
               </div>

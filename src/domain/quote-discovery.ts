@@ -126,6 +126,7 @@ export function isBannedIllustrativeAddress(
 }
 
 export function resolveOneClickAssetId(deploymentId: string): string | null {
+  if (deploymentId.startsWith("nep141:")) return deploymentId;
   return ONE_CLICK_ASSET_MAPPINGS[deploymentId] ?? null;
 }
 
