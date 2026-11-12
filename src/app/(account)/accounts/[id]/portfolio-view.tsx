@@ -1801,7 +1801,7 @@ export function PortfolioView({
                       htmlFor="recipient-address-input"
                       className="block text-xs font-semibold text-neutral-800"
                     >
-                      Recipient address
+                      Recipient {sendDestDeployment.networkName} address
                     </label>
                     <div className="relative flex items-center">
                       <input
