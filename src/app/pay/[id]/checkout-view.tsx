@@ -130,9 +130,56 @@ export function CheckoutView({ request }: CheckoutViewProps) {
     }
   };
 
+  const isFundedOrProcessing =
+    instructions !== null &&
+    (instructions.status === "DETECTED" ||
+      instructions.status === "SETTLING" ||
+      instructions.status === "SETTLED" ||
+      Boolean(instructions.sourceTxHash));
+
+  const isUnderReview =
+    instructions !== null && instructions.status === "RECONCILIATION_REQUIRED";
+
+  const isRefundRequiredState =
+    instructions !== null &&
+    instructions.status === "EXCEPTION_REFUND_REQUIRED";
+
+  const isFailedState =
+    instructions !== null && instructions.status === "FAILED";
+
+  // An attempt is ONLY expired if it is strictly awaiting deposit (unfunded)
+  // and its deposit deadline has elapsed, or if the server explicitly marked it EXPIRED.
+  const isDepositExpired =
+    instructions !== null &&
+    !isFundedOrProcessing &&
+    !isUnderReview &&
+    !isRefundRequiredState &&
+    !isFailedState &&
+    (depositSecondsRemaining <= 0 || instructions.status === "EXPIRED");
+
   // Stage B Navigation: Return safely to Payment Selection
   const handleBackToPaymentSelection = () => {
-    if (
+    if (isFundedOrProcessing) {
+      if (
+        typeof window !== "undefined" &&
+        typeof window.confirm === "function"
+      ) {
+        const proceed = window.confirm(
+          "A deposit has already been detected or is currently settling. Navigating away will not cancel settlement. Return to payment selection anyway?",
+        );
+        if (!proceed) return;
+      }
+    } else if (isUnderReview) {
+      if (
+        typeof window !== "undefined" &&
+        typeof window.confirm === "function"
+      ) {
+        const proceed = window.confirm(
+          "This payment attempt is currently under review. Navigating away will not cancel review. Return to payment selection anyway?",
+        );
+        if (!proceed) return;
+      }
+    } else if (
       depositSecondsRemaining > 0 &&
       instructions &&
       instructions.status !== "EXPIRED" &&
@@ -155,6 +202,7 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   // Stage B Regeneration: Recheck state and generate fresh quote
   const handleGenerateNewQuote = async () => {
     if (!instructions) return;
+    if (isFundedOrProcessing || isUnderReview) return;
     try {
       const res = await fetch(
         `/api/pay/${request.publicId}/attempt/${instructions.attemptPublicId}`,
@@ -165,7 +213,9 @@ export function CheckoutView({ request }: CheckoutViewProps) {
           latest.status === "SETTLING" ||
           latest.status === "SETTLED" ||
           latest.status === "DETECTED" ||
-          latest.status === "EXCEPTION_REFUND_REQUIRED"
+          latest.status === "EXCEPTION_REFUND_REQUIRED" ||
+          latest.status === "RECONCILIATION_REQUIRED" ||
+          Boolean(latest.sourceTxHash)
         ) {
           setInstructions(latest);
           return;
@@ -178,10 +228,6 @@ export function CheckoutView({ request }: CheckoutViewProps) {
     setQuote(null);
     setRefreshTrigger((n) => n + 1);
   };
-
-  const isDepositExpired =
-    (depositSecondsRemaining <= 0 && instructions !== null) ||
-    instructions?.status === "EXPIRED";
 
   const isExpired = request.status === "EXPIRED" || request.isExpired;
   const isCrossChain = activeRoute
@@ -679,32 +725,45 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                     </button>
                     <span
                       className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-semibold ${
-                        instructions.status === "FAILED" ||
-                        instructions.status === "EXCEPTION_REFUND_REQUIRED" ||
-                        isDepositExpired
-                          ? "bg-red-50 border-red-200 text-[#FF1A1A]"
-                          : "bg-amber-50 border-amber-200 text-amber-800"
+                        isFundedOrProcessing
+                          ? "bg-blue-50 border-blue-200 text-blue-700"
+                          : isUnderReview
+                            ? "bg-purple-50 border-purple-200 text-purple-700"
+                            : instructions.status === "FAILED" ||
+                                instructions.status ===
+                                  "EXCEPTION_REFUND_REQUIRED" ||
+                                isDepositExpired
+                              ? "bg-red-50 border-red-200 text-[#FF1A1A]"
+                              : "bg-amber-50 border-amber-200 text-amber-800"
                       }`}
                     >
                       <span
                         className={`h-1.5 w-1.5 rounded-full ${
-                          instructions.status === "FAILED" ||
-                          instructions.status === "EXCEPTION_REFUND_REQUIRED" ||
-                          isDepositExpired
-                            ? "bg-[#FF1A1A]"
-                            : "bg-amber-500 animate-pulse"
+                          isFundedOrProcessing
+                            ? "bg-blue-600 animate-pulse"
+                            : isUnderReview
+                              ? "bg-purple-600 animate-pulse"
+                              : instructions.status === "FAILED" ||
+                                  instructions.status ===
+                                    "EXCEPTION_REFUND_REQUIRED" ||
+                                  isDepositExpired
+                                ? "bg-[#FF1A1A]"
+                                : "bg-amber-500 animate-pulse"
                         }`}
                       />
-                      {isDepositExpired
-                        ? "EXPIRED"
-                        : instructions.status === "SETTLING" ||
-                            instructions.status === "DETECTED"
-                          ? "SETTLING"
+                      {isFundedOrProcessing
+                        ? instructions.status === "DETECTED"
+                          ? "DEPOSIT DETECTED"
+                          : "PAYMENT PROCESSING"
+                        : isUnderReview
+                          ? "UNDER REVIEW"
                           : instructions.status === "EXCEPTION_REFUND_REQUIRED"
                             ? "REFUND REQUIRED"
                             : instructions.status === "FAILED"
                               ? "FAILED"
-                              : "AWAITING DEPOSIT"}
+                              : isDepositExpired
+                                ? "EXPIRED"
+                                : "AWAITING DEPOSIT"}
                     </span>
                   </div>
 
@@ -841,32 +900,104 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                         </div>
                       )}
 
-                      <div className="flex items-center justify-between pt-1 border-t border-neutral-200/80 text-[11px]">
-                        <span className="text-neutral-500">
-                          Deposit Deadline:
-                        </span>
-                        <span className="font-mono font-bold text-neutral-950">
-                          {Math.floor(depositSecondsRemaining / 60)}:
-                          {(depositSecondsRemaining % 60)
-                            .toString()
-                            .padStart(2, "0")}{" "}
-                          remaining
-                        </span>
-                      </div>
+                      {isFundedOrProcessing ? (
+                        <div className="flex items-center justify-between pt-1 border-t border-neutral-200/80 text-[11px]">
+                          <span className="text-neutral-500">
+                            Payment Status:
+                          </span>
+                          <span className="font-semibold text-blue-700 flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-blue-600 animate-pulse" />
+                            {instructions.status === "DETECTED"
+                              ? "Deposit Detected — Verifying"
+                              : "Payment Processing — Settling on-chain"}
+                          </span>
+                        </div>
+                      ) : isUnderReview ? (
+                        <div className="flex items-center justify-between pt-1 border-t border-neutral-200/80 text-[11px]">
+                          <span className="text-neutral-500">
+                            Review Status:
+                          </span>
+                          <span className="font-semibold text-purple-700">
+                            Payment Under Review
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between pt-1 border-t border-neutral-200/80 text-[11px]">
+                          <span className="text-neutral-500">
+                            Deposit Deadline:
+                          </span>
+                          <span
+                            className={`font-mono font-bold ${
+                              depositSecondsRemaining <= 60
+                                ? "text-[#FF1A1A]"
+                                : "text-neutral-950"
+                            }`}
+                          >
+                            {Math.floor(depositSecondsRemaining / 60)}:
+                            {(depositSecondsRemaining % 60)
+                              .toString()
+                              .padStart(2, "0")}{" "}
+                            remaining
+                          </span>
+                        </div>
+                      )}
+
+                      {instructions.sourceTxHash && (
+                        <div className="flex items-center justify-between pt-1 border-t border-neutral-200/80 text-[11px]">
+                          <span className="text-neutral-500">
+                            Source Transaction:
+                          </span>
+                          <span
+                            className="font-mono text-neutral-800 text-[10px] truncate max-w-[180px]"
+                            title={instructions.sourceTxHash}
+                          >
+                            {instructions.sourceTxHash.slice(0, 8)}...
+                            {instructions.sourceTxHash.slice(-6)}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div className="rounded-[16px] border border-neutral-200/80 bg-neutral-50/70 p-4 text-xs text-neutral-600 space-y-1">
-                    <p className="font-semibold text-neutral-900">
-                      Payment Attempt Active
-                    </p>
-                    <p className="text-[11px] leading-relaxed">
-                      Funds sent to this address will automatically convert and
-                      credit to {request.recipientName}. If you navigate back to
-                      payment selection, this deposit address remains active
-                      until its deadline expires.
-                    </p>
-                  </div>
+                  {isFundedOrProcessing ? (
+                    <div className="rounded-[16px] border border-blue-200/80 bg-blue-50/60 p-4 text-xs text-blue-950 space-y-1">
+                      <p className="font-semibold text-blue-900 flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full bg-blue-600 animate-pulse" />
+                        <span>Payment Detected — Settling In Progress</span>
+                      </p>
+                      <p className="text-[11px] leading-relaxed text-blue-900/80">
+                        Your deposit has been recognized on{" "}
+                        {instructions.sourceNetwork}. Settlement to{" "}
+                        {request.recipientName} on{" "}
+                        {instructions.destinationNetwork} is proceeding
+                        automatically. Please keep this window open until
+                        settlement completes.
+                      </p>
+                    </div>
+                  ) : isUnderReview ? (
+                    <div className="rounded-[16px] border border-purple-200/80 bg-purple-50/60 p-4 text-xs text-purple-950 space-y-1">
+                      <p className="font-semibold text-purple-900">
+                        Payment Under Review
+                      </p>
+                      <p className="text-[11px] leading-relaxed text-purple-900/80">
+                        Your deposit was received and is currently under
+                        automated reconciliation. Do not initiate a new payment
+                        attempt.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="rounded-[16px] border border-neutral-200/80 bg-neutral-50/70 p-4 text-xs text-neutral-600 space-y-1">
+                      <p className="font-semibold text-neutral-900">
+                        Payment Attempt Active
+                      </p>
+                      <p className="text-[11px] leading-relaxed">
+                        Funds sent to this address will automatically convert
+                        and credit to {request.recipientName}. If you navigate
+                        back to payment selection, this deposit address remains
+                        active until its deadline expires.
+                      </p>
+                    </div>
+                  )}
                 </div>
               ) : (
                 /* ============================================================
@@ -1465,32 +1596,45 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                     </div>
                     <span
                       className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-semibold ${
-                        instructions.status === "FAILED" ||
-                        instructions.status === "EXCEPTION_REFUND_REQUIRED" ||
-                        isDepositExpired
-                          ? "bg-red-50 border-red-200 text-[#FF1A1A]"
-                          : "bg-amber-50 border-amber-200 text-amber-800"
+                        isFundedOrProcessing
+                          ? "bg-blue-50 border-blue-200 text-blue-700"
+                          : isUnderReview
+                            ? "bg-purple-50 border-purple-200 text-purple-700"
+                            : instructions.status === "FAILED" ||
+                                instructions.status ===
+                                  "EXCEPTION_REFUND_REQUIRED" ||
+                                isDepositExpired
+                              ? "bg-red-50 border-red-200 text-[#FF1A1A]"
+                              : "bg-amber-50 border-amber-200 text-amber-800"
                       }`}
                     >
                       <span
                         className={`h-1.5 w-1.5 rounded-full ${
-                          instructions.status === "FAILED" ||
-                          instructions.status === "EXCEPTION_REFUND_REQUIRED" ||
-                          isDepositExpired
-                            ? "bg-[#FF1A1A]"
-                            : "bg-amber-500 animate-pulse"
+                          isFundedOrProcessing
+                            ? "bg-blue-600 animate-pulse"
+                            : isUnderReview
+                              ? "bg-purple-600 animate-pulse"
+                              : instructions.status === "FAILED" ||
+                                  instructions.status ===
+                                    "EXCEPTION_REFUND_REQUIRED" ||
+                                  isDepositExpired
+                                ? "bg-[#FF1A1A]"
+                                : "bg-amber-500 animate-pulse"
                         }`}
                       />
-                      {isDepositExpired
-                        ? "EXPIRED"
-                        : instructions.status === "SETTLING" ||
-                            instructions.status === "DETECTED"
-                          ? "SETTLING"
+                      {isFundedOrProcessing
+                        ? instructions.status === "DETECTED"
+                          ? "DEPOSIT DETECTED"
+                          : "PAYMENT PROCESSING"
+                        : isUnderReview
+                          ? "UNDER REVIEW"
                           : instructions.status === "EXCEPTION_REFUND_REQUIRED"
                             ? "REFUND REQUIRED"
                             : instructions.status === "FAILED"
                               ? "FAILED"
-                              : "AWAITING DEPOSIT"}
+                              : isDepositExpired
+                                ? "EXPIRED"
+                                : "AWAITING DEPOSIT"}
                     </span>
                   </div>
 
@@ -1571,18 +1715,59 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                     )}
 
                     <div className="rounded-[14px] border border-neutral-200/80 bg-neutral-50/70 p-3.5 space-y-2 text-xs">
-                      <div className="flex justify-between items-center">
-                        <span className="text-neutral-500">
-                          Deposit Deadline:
-                        </span>
-                        <span className="font-mono font-bold text-neutral-950">
-                          {Math.floor(depositSecondsRemaining / 60)}:
-                          {(depositSecondsRemaining % 60)
-                            .toString()
-                            .padStart(2, "0")}{" "}
-                          remaining
-                        </span>
-                      </div>
+                      {isFundedOrProcessing ? (
+                        <div className="flex justify-between items-center">
+                          <span className="text-neutral-500">
+                            Payment Status:
+                          </span>
+                          <span className="font-semibold font-mono text-blue-700 flex items-center gap-1.5">
+                            <span className="h-1.5 w-1.5 rounded-full bg-blue-600 animate-pulse" />
+                            {instructions.status === "DETECTED"
+                              ? "Deposit Detected — Verifying"
+                              : "Payment Processing — Settling on-chain"}
+                          </span>
+                        </div>
+                      ) : isUnderReview ? (
+                        <div className="flex justify-between items-center">
+                          <span className="text-neutral-500">Status:</span>
+                          <span className="font-semibold text-purple-700">
+                            Payment Under Review
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="flex justify-between items-center">
+                          <span className="text-neutral-500">
+                            Deposit Deadline:
+                          </span>
+                          <span
+                            className={`font-mono font-bold ${
+                              depositSecondsRemaining <= 60
+                                ? "text-[#FF1A1A]"
+                                : "text-neutral-950"
+                            }`}
+                          >
+                            {Math.floor(depositSecondsRemaining / 60)}:
+                            {(depositSecondsRemaining % 60)
+                              .toString()
+                              .padStart(2, "0")}{" "}
+                            remaining
+                          </span>
+                        </div>
+                      )}
+
+                      {instructions.sourceTxHash && (
+                        <div className="flex justify-between items-center pt-1 border-t border-neutral-200/70">
+                          <span className="text-neutral-500">Source Tx:</span>
+                          <span
+                            className="font-mono text-neutral-800 text-[11px] truncate max-w-[180px]"
+                            title={instructions.sourceTxHash}
+                          >
+                            {instructions.sourceTxHash.slice(0, 8)}...
+                            {instructions.sourceTxHash.slice(-6)}
+                          </span>
+                        </div>
+                      )}
+
                       {(instructions.payerRefundAddress || refundAddress) && (
                         <div className="flex justify-between items-start gap-2 pt-1 border-t border-neutral-200/70">
                           <span className="text-neutral-500 shrink-0">
@@ -1601,25 +1786,27 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                     </div>
 
                     {/* Expiration and Exception Warnings */}
-                    <div className="rounded-[14px] border border-red-200/80 bg-red-50/60 p-3.5 text-xs text-neutral-800 space-y-1.5">
-                      <p className="font-bold text-[#FF1A1A]">
-                        Safety Instructions
-                      </p>
-                      <p className="text-[11px] leading-relaxed text-neutral-700">
-                        Send only{" "}
-                        <strong>{instructions.sourceAssetSymbol}</strong> on{" "}
-                        <strong>{instructions.sourceNetwork}</strong>. Other
-                        assets or networks cannot be recovered.
-                      </p>
-                      <p className="text-[11px] leading-relaxed text-neutral-700">
-                        This deposit address is valid for{" "}
-                        <strong>
-                          {Math.floor(depositSecondsRemaining / 60)}m{" "}
-                          {depositSecondsRemaining % 60}s
-                        </strong>
-                        . Do not send funds after expiration.
-                      </p>
-                    </div>
+                    {!isFundedOrProcessing && !isUnderReview && (
+                      <div className="rounded-[14px] border border-red-200/80 bg-red-50/60 p-3.5 text-xs text-neutral-800 space-y-1.5">
+                        <p className="font-bold text-[#FF1A1A]">
+                          Safety Instructions
+                        </p>
+                        <p className="text-[11px] leading-relaxed text-neutral-700">
+                          Send only{" "}
+                          <strong>{instructions.sourceAssetSymbol}</strong> on{" "}
+                          <strong>{instructions.sourceNetwork}</strong>. Other
+                          assets or networks cannot be recovered.
+                        </p>
+                        <p className="text-[11px] leading-relaxed text-neutral-700">
+                          This deposit address is valid for{" "}
+                          <strong>
+                            {Math.floor(depositSecondsRemaining / 60)}m{" "}
+                            {depositSecondsRemaining % 60}s
+                          </strong>
+                          . Do not send funds after expiration.
+                        </p>
+                      </div>
+                    )}
 
                     {instructions.status === "EXCEPTION_REFUND_REQUIRED" && (
                       <div className="rounded-[14px] border border-red-200 bg-red-50 p-3.5 text-xs text-[#FF1A1A] space-y-1">
@@ -1639,37 +1826,54 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                       </div>
                     )}
 
-                    {instructions.status === "EXPIRED" && (
-                      <div className="space-y-2">
-                        <div className="rounded-[14px] border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                          <strong>Deposit Window Expired:</strong> Do not send
-                          funds to this expired deposit address.
-                        </div>
-                        <button
-                          type="button"
-                          onClick={handleGenerateNewQuote}
-                          className="w-full rounded-full bg-[#FF1A1A] py-2.5 text-xs font-semibold text-white hover:bg-[#E01515]"
-                        >
-                          Generate New Quote
-                        </button>
+                    {isUnderReview && (
+                      <div className="rounded-[14px] border border-purple-200 bg-purple-50 p-3.5 text-xs text-purple-950 space-y-1">
+                        <p className="font-semibold text-purple-900">
+                          Payment Under Review:
+                        </p>
+                        <p className="text-[11px] leading-relaxed text-purple-900/80">
+                          Your deposit was received and is currently undergoing
+                          automated reconciliation. Do not initiate another
+                          payment.
+                        </p>
                       </div>
                     )}
 
-                    {instructions.status === "FAILED" && (
-                      <div className="space-y-2">
-                        <div className="rounded-[14px] border border-red-200 bg-red-50 p-3 text-xs text-[#FF1A1A]">
-                          <strong>Route Execution Failed:</strong> This payment
-                          attempt could not be completed.
+                    {instructions.status === "EXPIRED" &&
+                      !isFundedOrProcessing &&
+                      !isUnderReview && (
+                        <div className="space-y-2">
+                          <div className="rounded-[14px] border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                            <strong>Deposit Window Expired:</strong> Do not send
+                            funds to this expired deposit address.
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleGenerateNewQuote}
+                            className="w-full rounded-full bg-[#FF1A1A] py-2.5 text-xs font-semibold text-white hover:bg-[#E01515]"
+                          >
+                            Generate New Quote
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          onClick={handleGenerateNewQuote}
-                          className="w-full rounded-full bg-[#FF1A1A] py-2.5 text-xs font-semibold text-white hover:bg-[#E01515]"
-                        >
-                          Generate New Quote
-                        </button>
-                      </div>
-                    )}
+                      )}
+
+                    {instructions.status === "FAILED" &&
+                      !isFundedOrProcessing &&
+                      !isUnderReview && (
+                        <div className="space-y-2">
+                          <div className="rounded-[14px] border border-red-200 bg-red-50 p-3 text-xs text-[#FF1A1A]">
+                            <strong>Route Execution Failed:</strong> This
+                            payment attempt could not be completed.
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleGenerateNewQuote}
+                            className="w-full rounded-full bg-[#FF1A1A] py-2.5 text-xs font-semibold text-white hover:bg-[#E01515]"
+                          >
+                            Generate New Quote
+                          </button>
+                        </div>
+                      )}
                   </div>
                 </div>
               )}
