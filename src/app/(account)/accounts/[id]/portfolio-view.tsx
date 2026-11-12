@@ -19,6 +19,7 @@ import {
   IconSearch,
 } from "../../../../components/icons.tsx";
 import {
+  canonicalizeNetworkId,
   type CatalogTokenDeployment,
   CURATED_SUPPORTED_DEPLOYMENTS,
   ECOSYSTEM_METADATA,
@@ -26,6 +27,7 @@ import {
   isAssetSupportedOnNetwork,
   validateEcosystemAddress,
 } from "../../../../domain/supported-assets-catalog.ts";
+import { isBalanceMatchingDeployment } from "../../../../domain/portfolio.ts";
 import type {
   ActivityFeedResponse,
   SerializedWalletActivityRecord,
@@ -241,7 +243,16 @@ export function PortfolioView({
 
   useEffect(() => {
     let active = true;
+    let inFlight = false;
     const poll = () => {
+      if (inFlight) return;
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState === "hidden"
+      ) {
+        return;
+      }
+      inFlight = true;
       send<SerializedAccountPortfolio>(
         `/api/accounts/${accountId}/portfolio`,
         {},
@@ -252,13 +263,32 @@ export function PortfolioView({
             setPortfolio(res);
           }
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false;
+        });
     };
     poll();
     const interval = setInterval(poll, 10000);
+
+    const onVisibilityChange = () => {
+      if (
+        typeof document !== "undefined" &&
+        document.visibilityState === "visible"
+      ) {
+        poll();
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
+
     return () => {
       active = false;
       clearInterval(interval);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
     };
   }, [accountId, activeTab]);
 
@@ -308,22 +338,10 @@ export function PortfolioView({
 
   const mergedCatalogRows = useMemo(() => {
     return MAINNET_SUPPORTED_DEPLOYMENTS.map((item) => {
-      const matchingBalances = balances.filter(
-        (b: SerializedWalletBalanceRecord) => {
-          const bNet = b.networkAsset.network.toLowerCase();
-          const itemNet = item.networkKey.toLowerCase();
-          const isNetworkMatch =
-            bNet === itemNet ||
-            itemNet.startsWith(bNet) ||
-            itemNet.split("-")[0] === bNet;
-          return (
-            isNetworkMatch &&
-            b.networkAsset.asset.symbol.toUpperCase() ===
-              item.symbol.toUpperCase()
-          );
-        },
-      );
-      const primaryMatch = matchingBalances[0] ?? null;
+      const primaryMatch =
+        balances.find((b: SerializedWalletBalanceRecord) =>
+          isBalanceMatchingDeployment(b, item),
+        ) ?? null;
       return {
         catalog: item,
         observedBalance: primaryMatch,
@@ -434,17 +452,9 @@ export function PortfolioView({
 
   const sourceObservedBalance = useMemo(() => {
     return (
-      balances.find((b: SerializedWalletBalanceRecord) => {
-        const bNet = b.networkAsset.network.toLowerCase();
-        const sNet = sourceDeployment.networkKey.toLowerCase();
-        const isNetworkMatch =
-          bNet === sNet || sNet.startsWith(bNet) || sNet.split("-")[0] === bNet;
-        return (
-          isNetworkMatch &&
-          b.networkAsset.asset.symbol.toUpperCase() ===
-            sourceDeployment.symbol.toUpperCase()
-        );
-      }) ?? null
+      balances.find((b: SerializedWalletBalanceRecord) =>
+        isBalanceMatchingDeployment(b, sourceDeployment),
+      ) ?? null
     );
   }, [balances, sourceDeployment]);
 
@@ -482,39 +492,42 @@ export function PortfolioView({
 
   const ethAddr =
     wallet?.addresses.find(
-      (a) => a.network === "ethereum" || a.network.includes("ethereum"),
+      (a) => canonicalizeNetworkId(a.network) === "ethereum-mainnet",
     )?.address ??
     wallet?.addresses.find(
-      (a) => a.network === "base" || a.network.includes("base"),
+      (a) => canonicalizeNetworkId(a.network) === "base-mainnet",
     )?.address ??
     "Not provisioned";
   const baseAddr =
     wallet?.addresses.find(
-      (a) => a.network === "base" || a.network.includes("base"),
+      (a) => canonicalizeNetworkId(a.network) === "base-mainnet",
     )?.address ??
     wallet?.addresses.find(
-      (a) => a.network === "ethereum" || a.network.includes("ethereum"),
+      (a) => canonicalizeNetworkId(a.network) === "ethereum-mainnet",
     )?.address ??
     "Not provisioned";
   const evmAddr = baseAddr !== "Not provisioned" ? baseAddr : ethAddr;
   const solAddr =
-    wallet?.addresses.find((a) => a.network.includes("solana"))?.address ??
-    "Not provisioned";
+    wallet?.addresses.find(
+      (a) => canonicalizeNetworkId(a.network) === "solana-mainnet",
+    )?.address ?? "Not provisioned";
   const nearAddr =
-    wallet?.addresses.find((a) => a.network.includes("near"))?.address ??
-    "Not provisioned";
+    wallet?.addresses.find(
+      (a) => canonicalizeNetworkId(a.network) === "near-mainnet",
+    )?.address ?? "Not provisioned";
 
   const activeReceiveAddress = useMemo(() => {
+    const canonicalReceiveNet = canonicalizeNetworkId(receiveNetworkKey);
     if (
-      receiveNetworkKey === "ethereum-mainnet" ||
-      receiveNetworkKey === "base-mainnet"
+      canonicalReceiveNet === "ethereum-mainnet" ||
+      canonicalReceiveNet === "base-mainnet"
     ) {
       return evmAddr;
     }
-    if (receiveNetworkKey === "solana-mainnet") {
+    if (canonicalReceiveNet === "solana-mainnet") {
       return solAddr;
     }
-    if (receiveNetworkKey === "near-mainnet") {
+    if (canonicalReceiveNet === "near-mainnet") {
       return nearAddr;
     }
     return evmAddr;
@@ -548,13 +561,14 @@ export function PortfolioView({
     (netKey: string) => {
       setReceiveNetworkKey(netKey);
       if (!isAssetSupportedOnNetwork(receiveAssetSymbol, netKey)) {
-        if (netKey.includes("sol")) {
+        const canonical = canonicalizeNetworkId(netKey);
+        if (canonical === "solana-mainnet") {
           setReceiveAssetSymbol("SOL");
-        } else if (netKey.includes("near")) {
+        } else if (canonical === "near-mainnet") {
           setReceiveAssetSymbol("NEAR");
-        } else if (netKey.includes("base")) {
+        } else if (canonical === "base-mainnet") {
           setReceiveAssetSymbol("USDC");
-        } else if (netKey.includes("eth")) {
+        } else if (canonical === "ethereum-mainnet") {
           setReceiveAssetSymbol("ETH");
         } else {
           const match = MAINNET_SUPPORTED_DEPLOYMENTS.find(
@@ -584,12 +598,31 @@ export function PortfolioView({
     [copyAddress],
   );
 
+  const getDeploymentBalance = useCallback(
+    (deploymentId: string) => {
+      const dep = MAINNET_SUPPORTED_DEPLOYMENTS.find(
+        (d) => d.id === deploymentId,
+      );
+      if (!dep) return null;
+      return (
+        balances.find((b: SerializedWalletBalanceRecord) =>
+          isBalanceMatchingDeployment(b, dep),
+        ) ?? null
+      );
+    },
+    [balances],
+  );
+
   const stableBalanceTotal = useMemo(() => {
-    return balances
-      .filter((b) =>
-        ["USDC", "USDT"].includes(b.networkAsset.asset.symbol.toUpperCase()),
-      )
-      .reduce((acc, b) => acc + (Number(b.displayBalance) || 0), 0);
+    const stableDeployments = MAINNET_SUPPORTED_DEPLOYMENTS.filter(
+      (d) => d.kind === "STABLECOIN",
+    );
+    return stableDeployments.reduce((sum, dep) => {
+      const match = balances.find((b: SerializedWalletBalanceRecord) =>
+        isBalanceMatchingDeployment(b, dep),
+      );
+      return sum + (match ? Number(match.displayBalance) || 0 : 0);
+    }, 0);
   }, [balances]);
 
   const totalStableFormatted = `$${stableBalanceTotal.toLocaleString("en-US", {
@@ -598,51 +631,29 @@ export function PortfolioView({
   })}`;
 
   const ethNativeBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        b.networkAsset.network === "ethereum" &&
-        b.networkAsset.asset.symbol.toUpperCase() === "ETH",
+    return (
+      getDeploymentBalance("ethereum-mainnet:ETH")?.displayBalance ?? "0.00"
     );
-    return match?.displayBalance ?? "0.00";
-  }, [balances]);
+  }, [getDeploymentBalance]);
 
   const ethUsdcBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        b.networkAsset.network === "ethereum" &&
-        b.networkAsset.asset.symbol.toUpperCase() === "USDC",
+    return (
+      getDeploymentBalance("ethereum-mainnet:USDC")?.displayBalance ?? "0.00"
     );
-    return match?.displayBalance ?? "0.00";
-  }, [balances]);
+  }, [getDeploymentBalance]);
 
   const ethUsdtBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        b.networkAsset.network === "ethereum" &&
-        b.networkAsset.asset.symbol.toUpperCase() === "USDT",
+    return (
+      getDeploymentBalance("ethereum-mainnet:USDT")?.displayBalance ?? "0.00"
     );
-    return match?.displayBalance ?? "0.00";
-  }, [balances]);
+  }, [getDeploymentBalance]);
 
   const baseEthBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        (b.networkAsset.network === "base" ||
-          b.networkAsset.network === "base-mainnet" ||
-          b.networkAsset.chainId === "8453") &&
-        b.networkAsset.asset.symbol.toUpperCase() === "ETH",
-    );
-    return match?.displayBalance ?? "0.00";
-  }, [balances]);
+    return getDeploymentBalance("base-mainnet:ETH")?.displayBalance ?? "0.00";
+  }, [getDeploymentBalance]);
 
   const baseUsdcBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        (b.networkAsset.network === "base" ||
-          b.networkAsset.network === "base-mainnet" ||
-          b.networkAsset.chainId === "8453") &&
-        b.networkAsset.asset.symbol.toUpperCase() === "USDC",
-    );
+    const match = getDeploymentBalance("base-mainnet:USDC");
     if (!match) return "0.00";
     const num = Number(match.displayBalance);
     if (isNaN(num)) return match.displayBalance;
@@ -650,61 +661,35 @@ export function PortfolioView({
       minimumFractionDigits: 2,
       maximumFractionDigits: 6,
     });
-  }, [balances]);
+  }, [getDeploymentBalance]);
 
   const solNativeBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        b.networkAsset.network.includes("solana") &&
-        b.networkAsset.asset.symbol.toUpperCase() === "SOL",
-    );
-    return match?.displayBalance ?? "0";
-  }, [balances]);
+    return getDeploymentBalance("solana-mainnet:SOL")?.displayBalance ?? "0";
+  }, [getDeploymentBalance]);
 
   const solUsdcBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        b.networkAsset.network.includes("solana") &&
-        b.networkAsset.asset.symbol.toUpperCase() === "USDC",
+    return (
+      getDeploymentBalance("solana-mainnet:USDC")?.displayBalance ?? "0.00"
     );
-    return match?.displayBalance ?? "0.00";
-  }, [balances]);
+  }, [getDeploymentBalance]);
 
   const solUsdtBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        b.networkAsset.network.includes("solana") &&
-        b.networkAsset.asset.symbol.toUpperCase() === "USDT",
+    return (
+      getDeploymentBalance("solana-mainnet:USDT")?.displayBalance ?? "0.00"
     );
-    return match?.displayBalance ?? "0.00";
-  }, [balances]);
+  }, [getDeploymentBalance]);
 
   const nearNativeBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        b.networkAsset.network.includes("near") &&
-        b.networkAsset.asset.symbol.toUpperCase() === "NEAR",
-    );
-    return match?.displayBalance ?? "0";
-  }, [balances]);
+    return getDeploymentBalance("near-mainnet:NEAR")?.displayBalance ?? "0";
+  }, [getDeploymentBalance]);
 
   const nearUsdcBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        b.networkAsset.network.includes("near") &&
-        b.networkAsset.asset.symbol.toUpperCase() === "USDC",
-    );
-    return match?.displayBalance ?? "0.00";
-  }, [balances]);
+    return getDeploymentBalance("near-mainnet:USDC")?.displayBalance ?? "0.00";
+  }, [getDeploymentBalance]);
 
   const nearUsdtBalance = useMemo(() => {
-    const match = balances.find(
-      (b) =>
-        b.networkAsset.network.includes("near") &&
-        b.networkAsset.asset.symbol.toUpperCase() === "USDT",
-    );
-    return match?.displayBalance ?? "0.00";
-  }, [balances]);
+    return getDeploymentBalance("near-mainnet:USDT")?.displayBalance ?? "0.00";
+  }, [getDeploymentBalance]);
 
   const settledRequests = useMemo(
     () => paymentRequests.filter((r) => r.status === "COMPLETED"),
@@ -724,6 +709,10 @@ export function PortfolioView({
       maximumFractionDigits: 2,
     })}`;
   }, [settledRequests]);
+
+  const syncError = useMemo(() => {
+    return balances.find((b) => b.lastError)?.lastError ?? null;
+  }, [balances]);
 
   const latestShareUrl =
     paymentRequests[0]?.shareUrl ??
@@ -1062,6 +1051,14 @@ export function PortfolioView({
                 {portfolio.lastSyncedAt && (
                   <span className="text-[11px] text-neutral-500 dark:text-neutral-400">
                     Synced {formatTimestamp(portfolio.lastSyncedAt)}
+                  </span>
+                )}
+                {syncError && (
+                  <span
+                    className="text-[11px] text-amber-600 dark:text-amber-400 font-medium"
+                    title={syncError}
+                  >
+                    Sync notice: {syncError}
                   </span>
                 )}
               </div>

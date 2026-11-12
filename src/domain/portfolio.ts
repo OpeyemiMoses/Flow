@@ -2,6 +2,10 @@ import {
   type AccountPortfolioProjection,
   type WalletAddressProjection,
 } from "./assets.ts";
+import {
+  canonicalizeNetworkId,
+  type CatalogTokenDeployment,
+} from "./supported-assets-catalog.ts";
 
 export interface SerializedWalletBalanceRecord {
   readonly id: string;
@@ -126,4 +130,86 @@ export function serializePortfolio(
       : null,
     isStale: projection.isStale ?? false,
   };
+}
+
+/**
+ * Strict identity matcher between a stored balance record and a catalog deployment.
+ * Enforces canonical network identity, token standard, decimals, symbol, and
+ * exact verified contract / mint address.
+ * Prevents testnet balance contamination into mainnet catalog slots.
+ */
+export function isBalanceMatchingDeployment(
+  balance: SerializedWalletBalanceRecord,
+  deployment: CatalogTokenDeployment,
+): boolean {
+  // 1. Strict canonical network matching
+  const balanceCanonicalNetwork =
+    canonicalizeNetworkId(balance.networkAsset.chainId) ??
+    canonicalizeNetworkId(balance.networkAsset.network);
+  const deploymentCanonicalNetwork = canonicalizeNetworkId(
+    deployment.networkKey,
+  );
+
+  if (
+    !balanceCanonicalNetwork ||
+    !deploymentCanonicalNetwork ||
+    balanceCanonicalNetwork !== deploymentCanonicalNetwork
+  ) {
+    return false;
+  }
+
+  // 2. Strict token standard matching
+  if (
+    balance.networkAsset.tokenStandard.toUpperCase() !==
+    deployment.standard.toUpperCase()
+  ) {
+    return false;
+  }
+
+  // 3. Strict decimals matching
+  if (balance.networkAsset.decimals !== deployment.decimals) {
+    return false;
+  }
+
+  // 4. Strict symbol matching
+  const balSymbol = (
+    balance.networkAsset.symbolOverride ?? balance.networkAsset.asset.symbol
+  ).toUpperCase();
+  if (balSymbol !== deployment.symbol.toUpperCase()) {
+    return false;
+  }
+
+  // 5. Strict contract/mint address matching
+  const isDeploymentNative =
+    deployment.standard === "NATIVE" ||
+    deployment.contractIdentifier.toLowerCase() === "native";
+
+  if (isDeploymentNative) {
+    return (
+      balance.networkAsset.contractAddress === null ||
+      balance.networkAsset.contractAddress.trim() === "" ||
+      balance.networkAsset.contractAddress.toLowerCase() === "native"
+    );
+  }
+
+  if (!balance.networkAsset.contractAddress) {
+    return false;
+  }
+
+  if (
+    deploymentCanonicalNetwork === "solana-mainnet" ||
+    deploymentCanonicalNetwork === "solana-devnet"
+  ) {
+    // Solana mints are base58 and case-sensitive
+    return (
+      balance.networkAsset.contractAddress.trim() ===
+      deployment.contractIdentifier.trim()
+    );
+  }
+
+  // EVM and NEAR contracts are case-insensitive
+  return (
+    balance.networkAsset.contractAddress.trim().toLowerCase() ===
+    deployment.contractIdentifier.trim().toLowerCase()
+  );
 }

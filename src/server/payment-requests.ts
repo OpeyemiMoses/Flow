@@ -18,7 +18,10 @@ import type {
   PaymentAttemptStatus,
   PaymentDepositInstructions,
 } from "../domain/quote-discovery.ts";
-import { CURATED_SUPPORTED_DEPLOYMENTS } from "../domain/supported-assets-catalog.ts";
+import {
+  CURATED_SUPPORTED_DEPLOYMENTS,
+  getEquivalentNetworkTokens,
+} from "../domain/supported-assets-catalog.ts";
 import { getPrismaClient, runtime, type FlowDb } from "../foundation/prisma.ts";
 import { access, principal } from "./accounts.ts";
 import { clientBudget } from "./auth/limits.ts";
@@ -537,6 +540,9 @@ export async function readPublicPaymentRequest(
   let activeAttempt: PaymentDepositInstructions | null = null;
   try {
     const workerDb = getPrismaClient("worker");
+    const equivalentNetworks = getEquivalentNetworkTokens(
+      row.destination_network,
+    );
     const recipientWalletRows = await workerDb.$queryRaw<
       Array<{ address: string }>
     >`
@@ -545,7 +551,7 @@ export async function readPublicPaymentRequest(
       JOIN flow.wallet_addresses wa ON wa.wallet_id = w.id
       JOIN flow.payment_requests pr ON pr.account_id = w.account_id
       WHERE pr.public_id = ${publicId}
-        AND (wa.network = ${row.destination_network} OR wa.network = split_part(${row.destination_network}, '-', 1))
+        AND wa.network = ANY(${equivalentNetworks})
         AND w.status = 'ACTIVE'
       LIMIT 1
     `;

@@ -15,7 +15,10 @@ import {
 } from "../domain/atomic-amounts.ts";
 import { isValidPublicPaymentId } from "../domain/payment-requests.ts";
 import { isFinancialExecutionDisabled } from "../domain/custody.ts";
-import { CURATED_SUPPORTED_DEPLOYMENTS } from "../domain/supported-assets-catalog.ts";
+import {
+  canonicalizeNetworkId,
+  CURATED_SUPPORTED_DEPLOYMENTS,
+} from "../domain/supported-assets-catalog.ts";
 import { clientBudget } from "./auth/limits.ts";
 import { ApiFailure, reply } from "./http.ts";
 import { runtime, type FlowDb } from "../foundation/prisma.ts";
@@ -501,16 +504,17 @@ export async function requestPaymentQuote(
 
   let networkGasEstimateDisplay = "0.000005";
   let networkGasAssetSymbol = sourceDeployment.symbol;
-  if (sourceDeployment.networkKey === "solana-mainnet") {
+  const canonicalSourceNet = canonicalizeNetworkId(sourceDeployment.networkKey);
+  if (canonicalSourceNet === "solana-mainnet") {
     networkGasEstimateDisplay = "0.000005";
     networkGasAssetSymbol = "SOL";
-  } else if (sourceDeployment.networkKey === "ethereum-mainnet") {
+  } else if (canonicalSourceNet === "ethereum-mainnet") {
     networkGasEstimateDisplay = "0.0008";
     networkGasAssetSymbol = "ETH";
-  } else if (sourceDeployment.networkKey.startsWith("base")) {
+  } else if (canonicalSourceNet === "base-mainnet") {
     networkGasEstimateDisplay = "0.00002";
     networkGasAssetSymbol = "ETH";
-  } else if (sourceDeployment.networkKey.startsWith("near")) {
+  } else if (canonicalSourceNet === "near-mainnet") {
     networkGasEstimateDisplay = "0.0008";
     networkGasAssetSymbol = "NEAR";
   }

@@ -83,10 +83,14 @@ export function CheckoutView({ request }: CheckoutViewProps) {
   };
 
   const handleCopyRecipientAddress = () => {
-    const addr =
-      request.recipientAddress || "0x436BdB38888998e269E94301C2362C2f46bCF614";
+    if (!request.recipientAddress) {
+      console.warn(
+        `[FLOW Reconciliation] Recipient address is unavailable for payment request ${request.publicId}`,
+      );
+      return;
+    }
     if (typeof navigator !== "undefined" && navigator.clipboard) {
-      void navigator.clipboard.writeText(addr);
+      void navigator.clipboard.writeText(request.recipientAddress);
       setCopiedRecipientAddress(true);
       setTimeout(() => setCopiedRecipientAddress(false), 2000);
     }
@@ -246,15 +250,12 @@ export function CheckoutView({ request }: CheckoutViewProps) {
     }
 
     // Inbound/Outbound address separation invariant (Task 2 & 3)
-    const recipientAddrLower = (
-      request.recipientAddress || "0x436BdB38888998e269E94301C2362C2f46bCF614"
-    ).toLowerCase();
     if (
-      trimmed.toLowerCase() === recipientAddrLower ||
+      (request.recipientAddress &&
+        trimmed.toLowerCase() === request.recipientAddress.toLowerCase()) ||
       trimmed === "GvTihjQRfzPtuk4iptiDnsWLojCFX1QBSDgzgi8JAgAS" ||
       trimmed ===
-        "8dd1fb6f9ca1f542d1faa6a8526f3ca0c68fab6d2081d52aa86bb10a73349628" ||
-      trimmed.toLowerCase() === "0x436bdb38888998e269e94301c2362c2f46bcf614"
+        "8dd1fb6f9ca1f542d1faa6a8526f3ca0c68fab6d2081d52aa86bb10a73349628"
     ) {
       return "The recipient's Flow custody wallet cannot be used as the refund address. Please enter a genuine payer-controlled self-custody wallet.";
     }
@@ -620,31 +621,35 @@ export function CheckoutView({ request }: CheckoutViewProps) {
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-neutral-500">Recipient Address</span>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-mono text-neutral-800">
-                    {request.recipientAddress
-                      ? `${request.recipientAddress.slice(0, 8)}...${request.recipientAddress.slice(-6)}`
-                      : "0x436B...CF614"}
+                {request.recipientAddress ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono text-neutral-800">
+                      {`${request.recipientAddress.slice(0, 8)}...${request.recipientAddress.slice(-6)}`}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleCopyRecipientAddress}
+                      className="inline-flex items-center gap-1 rounded bg-white px-2 py-0.5 text-[11px] font-semibold text-neutral-700 border border-neutral-200 hover:bg-neutral-100 transition-colors cursor-pointer"
+                      title="Copy recipient address"
+                    >
+                      {copiedRecipientAddress ? (
+                        <>
+                          <IconCheck size={11} className="text-emerald-600" />
+                          <span>Copied</span>
+                        </>
+                      ) : (
+                        <>
+                          <IconCopy size={11} />
+                          <span>Copy</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                ) : (
+                  <span className="font-mono text-neutral-400 italic text-[11px]">
+                    Address unavailable
                   </span>
-                  <button
-                    type="button"
-                    onClick={handleCopyRecipientAddress}
-                    className="inline-flex items-center gap-1 rounded bg-white px-2 py-0.5 text-[11px] font-semibold text-neutral-700 border border-neutral-200 hover:bg-neutral-100 transition-colors cursor-pointer"
-                    title="Copy recipient address"
-                  >
-                    {copiedRecipientAddress ? (
-                      <>
-                        <IconCheck size={11} className="text-emerald-600" />
-                        <span>Copied</span>
-                      </>
-                    ) : (
-                      <>
-                        <IconCopy size={11} />
-                        <span>Copy</span>
-                      </>
-                    )}
-                  </button>
-                </div>
+                )}
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-neutral-500">Settled Amount</span>
@@ -1550,19 +1555,28 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                   </div>
 
                   <div className="flex flex-col items-center justify-center rounded-[22px] border border-neutral-200/70 bg-neutral-50 p-6">
-                    <QrCode
-                      value={
-                        request.recipientAddress ||
-                        "0x436BdB38888998e269E94301C2362C2f46bCF614"
-                      }
-                      size={156}
-                    />
-                    <p className="mt-3 text-xs font-medium text-neutral-600 text-center">
-                      Recipient destination wallet on{" "}
-                      <strong className="text-neutral-900">
-                        {request.destinationNetwork}
-                      </strong>
-                    </p>
+                    {request.recipientAddress ? (
+                      <>
+                        <QrCode value={request.recipientAddress} size={156} />
+                        <p className="mt-3 text-xs font-medium text-neutral-600 text-center">
+                          Recipient destination wallet on{" "}
+                          <strong className="text-neutral-900">
+                            {request.destinationNetwork}
+                          </strong>
+                        </p>
+                      </>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-6 text-center">
+                        <span className="text-sm font-semibold text-neutral-700">
+                          Recipient address unavailable
+                        </span>
+                        <p className="mt-1 text-xs text-neutral-500 max-w-[260px]">
+                          This payment request does not have an active
+                          registered destination address for{" "}
+                          {request.destinationNetwork}.
+                        </p>
+                      </div>
+                    )}
                   </div>
 
                   <div className="space-y-3">
@@ -1587,17 +1601,24 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                         Recipient Destination Address
                       </span>
                       <div className="flex items-center justify-between gap-2 rounded-[12px] border border-neutral-200 bg-neutral-50 px-3.5 py-2.5 font-mono text-xs">
-                        <span className="truncate select-all text-neutral-800">
-                          {request.recipientAddress ||
-                            "0x436BdB38888998e269E94301C2362C2f46bCF614"}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={handleCopyRecipientAddress}
-                          className="shrink-0 font-sans font-semibold text-[#FF1A1A] hover:underline"
-                        >
-                          {copiedRecipientAddress ? "Copied" : "Copy"}
-                        </button>
+                        {request.recipientAddress ? (
+                          <>
+                            <span className="truncate select-all text-neutral-800">
+                              {request.recipientAddress}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleCopyRecipientAddress}
+                              className="shrink-0 font-sans font-semibold text-[#FF1A1A] hover:underline"
+                            >
+                              {copiedRecipientAddress ? "Copied" : "Copy"}
+                            </button>
+                          </>
+                        ) : (
+                          <span className="text-neutral-400 italic text-[11px]">
+                            Address unavailable
+                          </span>
+                        )}
                       </div>
                     </div>
 

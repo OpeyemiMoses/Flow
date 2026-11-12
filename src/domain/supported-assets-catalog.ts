@@ -417,6 +417,100 @@ export const APPROVED_MAINNET_NETWORKS = [
 ] as const;
 export type ApprovedMainnetNetwork = (typeof APPROVED_MAINNET_NETWORKS)[number];
 
+export type CanonicalNetworkId =
+  | "ethereum-mainnet"
+  | "base-mainnet"
+  | "solana-mainnet"
+  | "near-mainnet"
+  | "base-sepolia"
+  | "solana-devnet"
+  | "near-testnet";
+
+/**
+ * Strict canonical network identifier mapping.
+ * Normalizes synonyms for each approved chain into its canonical identity.
+ * Strictly separates testnet identifiers and never normalizes testnets to mainnet.
+ */
+export function canonicalizeNetworkId(
+  networkOrChain: string | null | undefined,
+): CanonicalNetworkId | null {
+  if (!networkOrChain) return null;
+  const norm = networkOrChain.trim().toLowerCase();
+  switch (norm) {
+    // Ethereum Mainnet (Chain ID 1, EVM)
+    case "ethereum":
+    case "ethereum-mainnet":
+    case "1":
+    case "eip155:1":
+      return "ethereum-mainnet";
+
+    // Base Mainnet (Chain ID 8453, EVM)
+    case "base":
+    case "base-mainnet":
+    case "8453":
+    case "eip155:8453":
+      return "base-mainnet";
+
+    // Solana Mainnet
+    case "solana":
+    case "solana-mainnet":
+    case "solana:mainnet":
+      return "solana-mainnet";
+
+    // NEAR Mainnet
+    case "near":
+    case "near-mainnet":
+    case "near:mainnet":
+      return "near-mainnet";
+
+    // Testnet networks — explicitly separate, NEVER normalized to mainnet
+    case "base-sepolia":
+    case "84532":
+    case "eip155:84532":
+      return "base-sepolia";
+
+    case "solana-devnet":
+    case "solana:devnet":
+      return "solana-devnet";
+
+    case "near-testnet":
+    case "near:testnet":
+      return "near-testnet";
+
+    default:
+      return null;
+  }
+}
+
+/**
+ * Returns equivalent database network tokens for a given network identifier,
+ * based on strict canonical network identity.
+ * Testnets are never normalized to mainnet.
+ */
+export function getEquivalentNetworkTokens(
+  networkOrChain: string | null | undefined,
+): string[] {
+  const canonical = canonicalizeNetworkId(networkOrChain);
+  switch (canonical) {
+    case "base-mainnet":
+      return ["base", "base-mainnet"];
+    case "ethereum-mainnet":
+      return ["ethereum", "ethereum-mainnet"];
+    case "solana-mainnet":
+      return ["solana", "solana-mainnet"];
+    case "near-mainnet":
+      return ["near", "near-mainnet"];
+    case "base-sepolia":
+      return ["base-sepolia"];
+    case "solana-devnet":
+      return ["solana-devnet"];
+    case "near-testnet":
+      return ["near-testnet"];
+    default:
+      return networkOrChain ? [networkOrChain] : [];
+  }
+}
+
 export const MAINNET_SUPPORTED_DEPLOYMENTS: readonly [
   CatalogTokenDeployment,
   ...CatalogTokenDeployment[],
@@ -506,9 +600,13 @@ export function getCanonicalDeploymentsForAsset(
 }
 
 export function getEcosystemForNetworkKey(networkKey: string): EcosystemFamily {
-  const lower = networkKey.toLowerCase();
-  if (lower.includes("sol")) return "solana";
-  if (lower.includes("near")) return "near";
+  const canonical = canonicalizeNetworkId(networkKey);
+  if (canonical === "solana-mainnet" || canonical === "solana-devnet") {
+    return "solana";
+  }
+  if (canonical === "near-mainnet" || canonical === "near-testnet") {
+    return "near";
+  }
   return "evm";
 }
 

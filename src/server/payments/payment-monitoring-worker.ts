@@ -2,7 +2,10 @@ import { FlowError } from "../../foundation/errors.ts";
 import { log } from "../../foundation/logger.ts";
 import { getPrismaClient, type FlowDb } from "../../foundation/prisma.ts";
 import { isValidTransactionHash } from "../../domain/ledger.ts";
-import { CURATED_SUPPORTED_DEPLOYMENTS } from "../../domain/supported-assets-catalog.ts";
+import {
+  CURATED_SUPPORTED_DEPLOYMENTS,
+  getEquivalentNetworkTokens,
+} from "../../domain/supported-assets-catalog.ts";
 import {
   getDefaultRpcConfig,
   reconcileWalletBalances,
@@ -269,6 +272,7 @@ export class PaymentMonitoringWorker {
     paymentAttemptId: string,
     destinationNetwork: string,
   ): Promise<string> {
+    const equivalentNetworks = getEquivalentNetworkTokens(destinationNetwork);
     const rows = await this.workerDb.$queryRaw<Array<{ address: string }>>`
       SELECT wa.address
       FROM flow.wallet_addresses wa
@@ -276,10 +280,7 @@ export class PaymentMonitoringWorker {
       JOIN flow.payment_requests pr ON pr.account_id = w.account_id
       JOIN flow.payment_attempts pa ON pa.payment_request_id = pr.id
       WHERE pa.id = ${paymentAttemptId}::uuid
-        AND (
-          wa.network = ${destinationNetwork}
-          OR wa.network = split_part(${destinationNetwork}, '-', 1)
-        )
+        AND wa.network = ANY(${equivalentNetworks})
       LIMIT 1
     `;
 
