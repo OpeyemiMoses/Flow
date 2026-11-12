@@ -1,891 +1,738 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useRef, useState, type ChangeEvent } from "react";
+import { useSearchParams } from "next/navigation";
+import { useState } from "react";
 import { FlowLogo } from "../../../components/flow-logo.tsx";
-import {
-  SidebarSignOutButton,
-  ThemeToggle,
-} from "../../../components/theme-toggle.tsx";
-import {
-  UserAvatar,
-  setUserAvatar,
-  resetUserAvatar,
-} from "../../../components/user-avatar.tsx";
-import {
-  describe,
-  Feedback,
-  FreshProof,
-  googleNavigate,
-  send,
-} from "../../controls.tsx";
+import { ThemeToggle } from "../../../components/theme-toggle.tsx";
+import { UserAvatar } from "../../../components/user-avatar.tsx";
+import { describe, Feedback, send } from "../../controls.tsx";
 
-const actions = {
-  "enroll-email": { label: "Enable email sign-in", path: "email/enroll" },
-  "disable-email": { label: "Disable email sign-in", path: "email/disable" },
-  "link-google": { label: "Link Google", path: "google/link" },
-  "unlink-google": { label: "Disconnect Google", path: "google/unlink" },
-  "revoke-all": { label: "Sign out all sessions", path: "sessions/revoke-all" },
-} as const;
-
-function WorkspaceDisplayNameCard({
-  account,
-}: {
-  account: { id: string; name: string };
-}) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [name, setName] = useState(account.name);
-  const [savedName, setSavedName] = useState(account.name);
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("");
-  const router = useRouter();
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    setBusy(true);
-    setMessage("");
-    try {
-      await send(`/api/accounts/${account.id}`, { name: name.trim() }, "PATCH");
-      setSavedName(name.trim());
-      setIsEditing(false); // Automatically collapses once saved!
-      setMessage("Workspace display name saved.");
-      router.refresh();
-    } catch (err) {
-      setMessage(describe(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="rounded-[16px] border border-neutral-200/90 dark:border-neutral-800 bg-neutral-50/70 dark:bg-neutral-800/40 p-4 space-y-3">
-      {!isEditing ? (
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
-              Workspace display name
-            </span>
-            <p className="font-display text-sm sm:text-base font-bold text-neutral-950 dark:text-white truncate mt-0.5">
-              {savedName}
-            </p>
-            <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
-              Shown on payment links and checkout receipts.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              setName(savedName);
-              setIsEditing(true);
-            }}
-            title="Edit workspace display name"
-            aria-label="Edit workspace display name"
-            className="flex items-center gap-1.5 rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#1f1f1f] px-3 py-1.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:border-neutral-400 dark:hover:border-neutral-500 shadow-2xs transition-colors shrink-0"
-          >
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-            </svg>
-            <span>Edit</span>
-          </button>
-        </div>
-      ) : (
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor="ws-name-input"
-              className="block text-xs font-semibold text-neutral-800 dark:text-neutral-200"
-            >
-              Workspace display name
-            </label>
-            <button
-              type="button"
-              onClick={() => {
-                setName(savedName);
-                setIsEditing(false);
-              }}
-              className="text-xs text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-            >
-              Cancel
-            </button>
-          </div>
-          <input
-            id="ws-name-input"
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={80}
-            required
-            placeholder="Workspace name"
-            className="flow-input w-full px-3.5 py-2 text-sm"
-          />
-          <div className="flex items-center gap-2">
-            <button
-              type="submit"
-              disabled={busy || !name.trim()}
-              className="flow-btn-primary px-4 py-1.5 text-xs font-semibold disabled:opacity-50"
-            >
-              {busy ? "Saving..." : "Save name"}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setName(savedName);
-                setIsEditing(false);
-              }}
-              className="rounded-full border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-[#141414] px-3 py-1.5 text-xs font-semibold text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50"
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-      )}
-      {message && <Feedback text={message} />}
-    </div>
-  );
+export interface SessionRecord {
+  readonly id: string;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly current: boolean;
 }
+
+export interface SecurityPanelProps {
+  readonly email: string;
+  readonly emailEnrolled: boolean;
+  readonly mailboxPaused: boolean;
+  readonly googleLinked: boolean;
+  readonly sessions: readonly SessionRecord[];
+  readonly accounts: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly kind: string;
+    readonly role: string;
+    readonly walletStatus: string;
+  }[];
+}
+
+type SettingsTab = "notifications" | "security" | "preferences" | "profile";
 
 export function SecurityPanel({
   email,
   emailEnrolled,
   googleLinked,
-  mailboxPaused,
-  sessions,
-  accounts = [],
-}: {
-  email: string;
-  emailEnrolled: boolean;
-  googleLinked: boolean;
-  mailboxPaused: boolean;
-  sessions: {
-    id: string;
-    createdAt: string;
-    expiresAt: string;
-    current: boolean;
-  }[];
-  accounts?: {
-    id: string;
-    kind: "PERSONAL" | "BUSINESS" | "personal" | "business";
-    name: string;
-    role: string;
-    walletStatus: string;
-  }[];
-}) {
-  const [action, setAction] = useState<keyof typeof actions>();
-  const [message, setMessage] = useState("");
-  const [revoking, setRevoking] = useState(false);
-  const [workspaceDropdownOpen, setWorkspaceDropdownOpen] = useState(true);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [avatarNotice, setAvatarNotice] = useState("");
-  const router = useRouter();
+  sessions: initialSessions,
+  accounts,
+}: SecurityPanelProps) {
+  const searchParams = useSearchParams();
+  const initialTab =
+    (searchParams?.get("tab") as SettingsTab) || "notifications";
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
-  function handleAvatarChange(e: ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      setAvatarNotice("Photo must be smaller than 5MB.");
-      return;
+  // Notifications state
+  const [incomingPayments, setIncomingPayments] = useState(true);
+  const [paymentLinkActivity, setPaymentLinkActivity] = useState(true);
+  const [securityAlerts, setSecurityAlerts] = useState(true);
+
+  // Sessions state
+  const [sessions, setSessions] =
+    useState<readonly SessionRecord[]>(initialSessions);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
+
+  const primaryAccount = accounts[0];
+  const backHref = primaryAccount ? `/accounts/${primaryAccount.id}` : "/";
+
+  // Revoke session
+  async function handleRevoke(sessionId: string) {
+    setRevokingId(sessionId);
+    setMessage("");
+    try {
+      await send("/api/security/sessions/revoke", { id: sessionId }, "POST");
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      setMessage("Session revoked successfully.");
+    } catch (err) {
+      setMessage(describe(err));
+    } finally {
+      setRevokingId(null);
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string") {
-        setUserAvatar(reader.result);
-        setAvatarNotice("Profile photo updated globally.");
-        setTimeout(() => setAvatarNotice(""), 3500);
-      }
-    };
-    reader.readAsDataURL(file);
   }
 
-  const personalAccount = accounts.find(
-    (a) => a.kind.toLowerCase() === "personal",
-  );
-  const primaryAccount = personalAccount ?? accounts[0];
-  const emailPrefix = email.split("@")[0] || "user";
-  const displayName =
-    personalAccount?.name &&
-    personalAccount.name.toLowerCase() !== "personal account"
-      ? personalAccount.name
-      : emailPrefix
-          .split(/[._-]+/)
-          .filter(Boolean)
-          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-          .join(" ") || email;
-  const userHandle = `@${emailPrefix.toLowerCase().replace(/[^a-z0-9_]/g, "") || "user"}`;
-
-  async function revoke(id: string, current: boolean) {
-    setRevoking(true);
+  // Revoke all other sessions
+  async function handleRevokeAll() {
+    setRevokingId("all");
+    setMessage("");
     try {
-      await send("/api/security/sessions/revoke", { id });
-      if (current) window.location.replace("/sign-in");
-      else {
-        setMessage("Session signed out.");
-        router.refresh();
-      }
-    } catch (error) {
-      setMessage(describe(error));
+      await send("/api/security/sessions/revoke-all", {}, "POST");
+      setSessions((prev) => prev.filter((s) => s.current));
+      setMessage("All other sessions have been signed out.");
+    } catch (err) {
+      setMessage(describe(err));
     } finally {
-      setRevoking(false);
+      setRevokingId(null);
     }
   }
 
   return (
-    <div className="min-h-screen bg-[#FAF8F5] dark:bg-neutral-950 text-neutral-950 dark:text-white flex flex-col lg:flex-row">
-      {/* =====================================================================
-          LEFT DARK SIDEBAR (Matches 08_26_23 PM-10.png)
-         ===================================================================== */}
-      <aside
-        aria-label="Settings workspace navigation"
-        className="hidden lg:flex lg:fixed lg:inset-y-0 lg:left-0 lg:w-[250px] lg:shrink-0 lg:flex-col lg:justify-between bg-[#0B0B0B] text-white p-5 lg:z-30 lg:overflow-y-auto border-r border-neutral-900"
-      >
-        <div>
-          <div className="px-2 pt-1 pb-7">
-            <Link href="/" prefetch={false} aria-label="FLOW Home">
-              <FlowLogo size={26} variant="inverse" />
-            </Link>
-          </div>
+    <div className="min-h-screen bg-[#FAF8F5] dark:bg-[#0B0B0B] text-neutral-950 dark:text-white pb-20 selection:bg-red-100 selection:text-red-900">
+      {/* Top Navigation Bar matching media_1794481849606_6993ee54.jpg */}
+      <header className="sticky top-0 z-40 w-full px-4 sm:px-8 pt-4 pb-3">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4">
+          <Link
+            href={backHref}
+            aria-label="FLOW Home"
+            className="flex items-center gap-2"
+          >
+            <FlowLogo size={28} />
+          </Link>
 
-          <nav className="space-y-1">
+          <nav
+            aria-label="Primary navigation"
+            className="hidden md:flex items-center p-1 rounded-full bg-white/90 dark:bg-[#141414]/90 backdrop-blur-md border border-neutral-200/80 dark:border-neutral-800/80 shadow-xs"
+          >
             <Link
-              prefetch={false}
-              href="/accounts"
-              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+              href={backHref}
+              className="flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100/70 dark:hover:bg-neutral-800/50 transition-colors"
             >
               <span>⌂</span>
               <span>Home</span>
             </Link>
             <Link
-              prefetch={false}
-              href="/accounts"
-              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+              href={`${backHref}?view=send`}
+              className="flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100/70 dark:hover:bg-neutral-800/50 transition-colors"
             >
               <span>↗</span>
               <span>Send</span>
             </Link>
             <Link
-              prefetch={false}
-              href="/accounts"
-              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+              href={`${backHref}?view=receive`}
+              className="flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100/70 dark:hover:bg-neutral-800/50 transition-colors"
             >
-              <span>↙</span>
-              <span>Receive</span>
+              <span>+</span>
+              <span>Add Money</span>
             </Link>
             <Link
-              prefetch={false}
-              href="/accounts"
-              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+              href={`${backHref}?view=request`}
+              className="flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100/70 dark:hover:bg-neutral-800/50 transition-colors"
             >
-              <span>🔗</span>
-              <span>Request</span>
+              <span>⚲</span>
+              <span>Payment Links</span>
             </Link>
             <Link
-              prefetch={false}
-              href="/accounts"
-              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
-            >
-              <span>▣</span>
-              <span>Wallets &amp; Assets</span>
-            </Link>
-            <Link
-              prefetch={false}
-              href="/accounts"
-              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium text-neutral-400 hover:bg-white/5 hover:text-white transition-all"
+              href={`${backHref}?view=activity`}
+              className="flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100/70 dark:hover:bg-neutral-800/50 transition-colors"
             >
               <span>◷</span>
               <span>Activity</span>
             </Link>
-
-            <div className="!my-4 border-t border-white/10" />
-
-            <Link
-              prefetch={false}
-              href="/security"
-              className="flex w-full items-center gap-3 rounded-full px-4 py-2.5 text-[13px] font-medium bg-gradient-to-r from-[#450A0A] via-[#7F1D1D] to-[#991B1B] text-white border border-[#EF4444]/40 shadow-sm"
-            >
-              <span>⚙</span>
-              <span>Settings</span>
-            </Link>
           </nav>
-        </div>
 
-        <div className="space-y-4 pt-6">
-          <div className="relative overflow-hidden rounded-[18px] border border-white/10 bg-[#141414] p-4">
-            <div className="pointer-events-none absolute -bottom-6 -right-6 h-24 w-24 rounded-full bg-[#FF1A1A]/25 blur-xl" />
-            <p className="text-[13px] font-semibold text-white leading-snug">
-              Get the Flow app on mobile.
-            </p>
-            <p className="mt-1 text-[11px] text-neutral-400 leading-relaxed">
-              Manage payments, wallets, and activity anywhere.
-            </p>
+          <div className="flex items-center gap-2">
             <Link
-              prefetch={false}
-              href="/accounts"
-              className="mt-3 inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[11px] font-medium text-white hover:bg-white/15"
+              href="/security"
+              aria-label="Settings"
+              className="p-2 rounded-full text-neutral-950 dark:text-white bg-neutral-200/60 dark:bg-neutral-800 transition-colors"
             >
-              Get the app <span>→</span>
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
             </Link>
           </div>
-
-          <div className="flex items-center justify-between border-t border-white/10 pt-4">
-            <div className="flex items-center gap-2.5 min-w-0">
-              <UserAvatar className="h-9 w-9 rounded-full object-cover border border-white/20 shrink-0" />
-              <div className="min-w-0">
-                <p className="truncate text-xs font-semibold text-white">
-                  {displayName}
-                </p>
-                <p className="truncate text-[11px] text-neutral-400">{email}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-1.5 shrink-0">
-              <ThemeToggle variant="sidebar" />
-              <span className="text-neutral-400 text-sm px-1">•••</span>
-              <SidebarSignOutButton />
-            </div>
-          </div>
         </div>
-      </aside>
+      </header>
 
-      {/* =====================================================================
-          MAIN SETTINGS WORKSPACE (Matches 08_26_23 PM-10.png)
-         ===================================================================== */}
-      <div className="flex-1 min-w-0 pb-20 relative overflow-hidden lg:pl-[250px]">
-        {/* Top-Right Red Wave Accent */}
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute -top-10 right-0 w-[340px] sm:w-[460px] h-[180px] z-0 overflow-hidden"
+      {/* Main Settings Page Container */}
+      <main className="mx-auto max-w-5xl px-4 sm:px-8 pt-6">
+        {/* Back Link */}
+        <Link
+          href={backHref}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-neutral-600 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white transition-colors mb-4"
         >
-          <svg viewBox="0 0 500 200" fill="none" className="w-full h-full">
-            <path
-              d="M120 -20 C240 80, 360 20, 520 150 L520 -20 Z"
-              fill="url(#secWaveGrad)"
-            />
-            <defs>
-              <linearGradient id="secWaveGrad" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stopColor="#FF2E2E" />
-                <stop offset="65%" stopColor="#CC0000" />
-                <stop offset="100%" stopColor="#1A0000" />
-              </linearGradient>
-            </defs>
-          </svg>
+          <span>←</span>
+          <span>Back</span>
+        </Link>
+
+        {/* Settings Header */}
+        <div className="mb-8">
+          <h1 className="font-serif text-3xl sm:text-4xl font-normal tracking-tight text-neutral-950 dark:text-white">
+            Settings
+          </h1>
+          <p className="mt-1 text-xs sm:text-sm text-neutral-600 dark:text-neutral-400">
+            Manage your profile, security, notifications, and preferences.
+          </p>
         </div>
 
-        <div className="relative z-10 mx-auto max-w-[1180px] px-4 sm:px-8 pt-6">
-          {/* Top Bar */}
-          <div className="flex items-center justify-between gap-4 mb-6">
-            <div>
-              <div className="lg:hidden mb-3">
-                <Link href="/" prefetch={false}>
-                  <FlowLogo size={24} />
-                </Link>
-              </div>
-              <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
-                ACCOUNT &amp; WORKSPACE
-              </p>
-              <h1 className="mt-1 font-serif text-3xl sm:text-[42px] font-normal tracking-[-0.02em] text-neutral-950 dark:text-white">
-                Settings
-              </h1>
-              <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
-                Manage your profile, security, notifications, and workspace
-                preferences.
-              </p>
-            </div>
+        {message && (
+          <div className="mb-6">
+            <Feedback text={message} />
+          </div>
+        )}
 
-            {/* Right Top Bar with Workspace Switcher Dropdown (Matches 08_26_23 PM-10.png) */}
-            <div className="flex items-center gap-3 self-start">
-              <div className="relative">
+        {/* 2-Column Layout matching media_1794481849606_6993ee54.jpg */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+          {/* Left Subnav Card (4 cols) */}
+          <div className="lg:col-span-4 rounded-3xl border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-3 shadow-sm space-y-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab("profile")}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${
+                activeTab === "profile"
+                  ? "bg-red-50/70 dark:bg-red-950/30 text-neutral-950 dark:text-white border border-red-200/60 dark:border-red-900/40"
+                  : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/50"
+              }`}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={activeTab === "profile" ? "text-[#FF1A1A]" : ""}
+              >
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+              <span>Account &amp; Profile</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("notifications")}
+              className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${
+                activeTab === "notifications"
+                  ? "bg-red-50/70 dark:bg-red-950/30 text-neutral-950 dark:text-white border border-red-200/60 dark:border-red-900/40"
+                  : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/50"
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className={
+                    activeTab === "notifications" ? "text-[#FF1A1A]" : ""
+                  }
+                >
+                  <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+                  <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+                </svg>
+                <span>Notifications</span>
+              </div>
+              <span className="h-2 w-2 rounded-full bg-[#FF1A1A]" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("security")}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${
+                activeTab === "security"
+                  ? "bg-red-50/70 dark:bg-red-950/30 text-neutral-950 dark:text-white border border-red-200/60 dark:border-red-900/40"
+                  : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/50"
+              }`}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={activeTab === "security" ? "text-[#FF1A1A]" : ""}
+              >
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+              <span>Security &amp; Sessions</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("preferences")}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${
+                activeTab === "preferences"
+                  ? "bg-red-50/70 dark:bg-red-950/30 text-neutral-950 dark:text-white border border-red-200/60 dark:border-red-900/40"
+                  : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/50"
+              }`}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className={activeTab === "preferences" ? "text-[#FF1A1A]" : ""}
+              >
+                <line x1="4" y1="21" x2="4" y2="14" />
+                <line x1="4" y1="10" x2="4" y2="3" />
+                <line x1="12" y1="21" x2="12" y2="12" />
+                <line x1="12" y1="8" x2="12" y2="3" />
+                <line x1="20" y1="21" x2="20" y2="16" />
+                <line x1="20" y1="12" x2="20" y2="3" />
+                <line x1="1" y1="14" x2="7" y2="14" />
+                <line x1="9" y1="8" x2="15" y2="8" />
+                <line x1="17" y1="16" x2="23" y2="16" />
+              </svg>
+              <span>Preferences</span>
+            </button>
+          </div>
+
+          {/* Right Content Panels (8 cols) */}
+          <div className="lg:col-span-8 space-y-4">
+            {/* TAB 1: NOTIFICATIONS (Matches Reference Screenshot) */}
+            {activeTab === "notifications" && (
+              <div className="space-y-4">
+                <div className="rounded-3xl border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 sm:p-7 shadow-sm">
+                  {/* Panel Header */}
+                  <div className="flex items-start gap-4 mb-6">
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-red-50 dark:bg-red-950/40 text-[#FF1A1A]">
+                      <svg
+                        width="22"
+                        height="22"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+                        <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+                      </svg>
+                    </div>
+                    <div>
+                      <h2 className="font-display text-base font-bold text-neutral-950 dark:text-white">
+                        Notifications
+                      </h2>
+                      <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                        Choose how you want to be notified about payments and
+                        account activity.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Toggle 1: Incoming payments */}
+                  <div className="flex items-center justify-between p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/30 transition-colors mb-3">
+                    <div>
+                      <p className="font-display font-semibold text-xs text-neutral-950 dark:text-white">
+                        Incoming payments
+                      </p>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Instant alert when a payment is received.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={incomingPayments}
+                      onClick={() => setIncomingPayments((prev) => !prev)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                        incomingPayments
+                          ? "bg-[#FF1A1A]"
+                          : "bg-neutral-200 dark:bg-neutral-700"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                          incomingPayments ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  {/* Toggle 2: Payment link activity */}
+                  <div className="flex items-center justify-between p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/30 transition-colors mb-3">
+                    <div>
+                      <p className="font-display font-semibold text-xs text-neutral-950 dark:text-white">
+                        Payment link activity
+                      </p>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Notify when a customer opens or pays a payment link.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={paymentLinkActivity}
+                      onClick={() => setPaymentLinkActivity((prev) => !prev)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                        paymentLinkActivity
+                          ? "bg-[#FF1A1A]"
+                          : "bg-neutral-200 dark:bg-neutral-700"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                          paymentLinkActivity
+                            ? "translate-x-5"
+                            : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  {/* Toggle 3: Security alerts */}
+                  <div className="flex items-center justify-between p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800 hover:bg-neutral-50/50 dark:hover:bg-neutral-800/30 transition-colors">
+                    <div>
+                      <p className="font-display font-semibold text-xs text-neutral-950 dark:text-white">
+                        Security alerts
+                      </p>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        New sign-ins, verification codes, and important security
+                        updates.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={securityAlerts}
+                      onClick={() => setSecurityAlerts((prev) => !prev)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden ${
+                        securityAlerts
+                          ? "bg-[#FF1A1A]"
+                          : "bg-neutral-200 dark:bg-neutral-700"
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                          securityAlerts ? "translate-x-5" : "translate-x-0"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Secondary Navigation Strips matching reference screenshot */}
                 <button
                   type="button"
-                  onClick={() => setWorkspaceDropdownOpen((prev) => !prev)}
-                  className="inline-flex items-center gap-2.5 rounded-full border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 px-4 py-2 text-xs font-semibold text-neutral-900 dark:text-white shadow-sm"
+                  onClick={() => setActiveTab("security")}
+                  className="w-full flex items-center justify-between p-5 rounded-3xl border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] shadow-sm hover:border-neutral-300 transition-all text-left cursor-pointer"
                 >
-                  <UserAvatar
-                    className="h-5 w-5 rounded-full object-cover shrink-0"
-                    alt=""
-                  />
-                  <span>{primaryAccount?.name ?? "Personal account"}</span>
-                  <span className="text-neutral-400 text-[10px]">▾</span>
+                  <div className="flex items-center gap-3.5">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300">
+                      <svg
+                        width="18"
+                        height="18"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                      </svg>
+                    </div>
+                    <div>
+                      <p className="font-display font-bold text-xs text-neutral-950 dark:text-white">
+                        Security &amp; Sessions
+                      </p>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Keep your account secure and manage your active
+                        sessions.
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-neutral-400 font-bold">&gt;</span>
                 </button>
 
-                {workspaceDropdownOpen && (
-                  <div className="hidden xl:block absolute right-0 mt-2 w-64 rounded-[20px] border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-3 shadow-xl z-30">
-                    <div className="space-y-1 text-xs">
-                      {accounts.map((acc, idx) => (
-                        <Link
-                          key={acc.id}
-                          prefetch={false}
-                          href={`/accounts/${acc.id}`}
-                          className={`flex items-center justify-between rounded-[12px] px-3 py-2 ${
-                            idx === 0
-                              ? "bg-neutral-100 dark:bg-neutral-800 font-semibold text-neutral-950 dark:text-white"
-                              : "text-neutral-700 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("preferences")}
+                  className="w-full flex items-center justify-between p-5 rounded-3xl border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] shadow-sm hover:border-neutral-300 transition-all text-left cursor-pointer"
+                >
+                  <div className="flex items-center gap-3.5">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300">
+                      <svg
+                        width="18"
+                        height="18"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <line x1="4" y1="21" x2="4" y2="14" />
+                        <line x1="4" y1="10" x2="4" y2="3" />
+                        <line x1="12" y1="21" x2="12" y2="12" />
+                        <line x1="12" y1="8" x2="12" y2="3" />
+                        <line x1="20" y1="21" x2="20" y2="16" />
+                        <line x1="20" y1="12" x2="20" y2="3" />
+                        <line x1="1" y1="14" x2="7" y2="14" />
+                        <line x1="9" y1="8" x2="15" y2="8" />
+                        <line x1="17" y1="16" x2="23" y2="16" />
+                      </svg>
+                    </div>
+                    <div>
+                      <p className="font-display font-bold text-xs text-neutral-950 dark:text-white">
+                        Preferences
+                      </p>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Customize the look and feel of Flow.
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-neutral-400 font-bold">&gt;</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("profile")}
+                  className="w-full flex items-center justify-between p-5 rounded-3xl border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] shadow-sm hover:border-neutral-300 transition-all text-left cursor-pointer"
+                >
+                  <div className="flex items-center gap-3.5">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-neutral-100 dark:bg-neutral-800 text-neutral-700 dark:text-neutral-300">
+                      <svg
+                        width="18"
+                        height="18"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                        <circle cx="12" cy="7" r="4" />
+                      </svg>
+                    </div>
+                    <div>
+                      <p className="font-display font-bold text-xs text-neutral-950 dark:text-white">
+                        Account &amp; Profile
+                      </p>
+                      <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                        Update your personal details and profile picture.
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-neutral-400 font-bold">&gt;</span>
+                </button>
+              </div>
+            )}
+
+            {/* TAB 2: SECURITY & SESSIONS */}
+            {activeTab === "security" && (
+              <div className="space-y-4">
+                <div className="rounded-3xl border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 sm:p-7 shadow-sm space-y-6">
+                  <div>
+                    <h2 className="font-display text-base font-bold text-neutral-950 dark:text-white">
+                      Security &amp; Authentication
+                    </h2>
+                    <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                      Manage authentication credentials and active sessions for{" "}
+                      <span className="font-mono font-semibold text-neutral-900 dark:text-neutral-200">
+                        {email}
+                      </span>
+                    </p>
+                  </div>
+
+                  {/* Authentication Methods */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/30">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-bold text-neutral-950 dark:text-white">
+                          Email OTP
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+                          {emailEnrolled ? "Enrolled" : "Available"}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-neutral-500">
+                        Passwordless one-time verification codes sent to {email}
+                        .
+                      </p>
+                    </div>
+
+                    <div className="p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/30">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-bold text-neutral-950 dark:text-white">
+                          Google SSO
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            googleLinked
+                              ? "bg-emerald-50 text-emerald-700"
+                              : "bg-neutral-100 text-neutral-600"
                           }`}
                         >
-                          <div>
-                            <p className="font-semibold">{acc.name}</p>
-                            <p className="text-[10px] font-normal text-neutral-500">
-                              {acc.kind.toLowerCase() === "business"
-                                ? `Business · ${acc.role}`
-                                : `Personal · ${acc.walletStatus.replace(/_/g, " ")}`}
-                            </p>
+                          {googleLinked ? "Connected" : "Not connected"}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-neutral-500">
+                        Sign in directly using your verified Google account.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Active Sessions */}
+                  <div className="pt-4 border-t border-neutral-100 dark:border-neutral-800">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <h3 className="font-display text-xs font-bold text-neutral-950 dark:text-white">
+                          Active Sessions ({sessions.length})
+                        </h3>
+                        <p className="text-[11px] text-neutral-500">
+                          Devices currently authorized to access this account.
+                        </p>
+                      </div>
+                      {sessions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={handleRevokeAll}
+                          disabled={revokingId === "all"}
+                          className="px-3 py-1.5 rounded-xl text-xs font-semibold text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40 transition-colors"
+                        >
+                          {revokingId === "all"
+                            ? "Signing out..."
+                            : "Sign out other sessions"}
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      {sessions.map((sess) => (
+                        <div
+                          key={sess.id}
+                          className="flex items-center justify-between p-3.5 rounded-2xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50/40 dark:bg-neutral-900/20"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-lg">💻</span>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-display font-semibold text-xs text-neutral-950 dark:text-white">
+                                  Authorized Browser Session
+                                </span>
+                                {sess.current && (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+                                    Current
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-neutral-500">
+                                Created:{" "}
+                                {new Date(sess.createdAt).toLocaleString()}
+                              </p>
+                            </div>
                           </div>
-                          {idx === 0 && (
-                            <span className="text-[#FF1A1A]">✓</span>
+
+                          {!sess.current && (
+                            <button
+                              type="button"
+                              onClick={() => handleRevoke(sess.id)}
+                              disabled={revokingId === sess.id}
+                              className="px-2.5 py-1 rounded-lg text-xs font-semibold text-neutral-600 hover:text-red-600 hover:bg-red-50 transition-colors"
+                            >
+                              {revokingId === sess.id
+                                ? "Revoking..."
+                                : "Revoke"}
+                            </button>
                           )}
-                        </Link>
+                        </div>
                       ))}
                     </div>
-                    <div className="mt-2 border-t border-neutral-100 dark:border-neutral-800 pt-2">
-                      <Link
-                        prefetch={false}
-                        href="/accounts"
-                        className="block rounded-[10px] px-3 py-1.5 text-xs font-semibold text-neutral-800 dark:text-neutral-200 hover:bg-neutral-50"
-                      >
-                        + Create workspace
-                      </Link>
-                    </div>
                   </div>
-                )}
-              </div>
-
-              <ThemeToggle />
-            </div>
-          </div>
-
-          {action && (
-            <div className="mb-6">
-              <FreshProof
-                key={action}
-                purpose={action}
-                onCancel={() => setAction(undefined)}
-                onConfirm={async () => {
-                  const response = await send<{ url: string } | undefined>(
-                    `/api/security/${actions[action].path}`,
-                  );
-                  if (action === "link-google" && response)
-                    googleNavigate(response.url);
-                  else window.location.replace("/sign-in?notice=updated");
-                }}
-              >
-                {actions[action].label}.
-              </FreshProof>
-            </div>
-          )}
-
-          {message && (
-            <div className="mb-5">
-              <Feedback text={message} />
-            </div>
-          )}
-
-          {/* Main Grid: Left Settings Sub-Nav (3 cols) + Right Cards (9 cols) */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Left Sub-Navigation Card */}
-            <div className="lg:col-span-3 rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-3 shadow-2xs space-y-1">
-              <div className="flex items-center justify-between rounded-[14px] bg-neutral-950 text-white px-3.5 py-2.5 text-xs font-semibold">
-                <span>Account &amp; Profile</span>
-                <span className="h-1.5 w-1.5 rounded-full bg-[#FF1A1A]" />
-              </div>
-              <div className="rounded-[14px] px-3.5 py-2.5 text-xs font-medium text-neutral-600 dark:text-neutral-400">
-                Notifications
-              </div>
-              <div className="rounded-[14px] px-3.5 py-2.5 text-xs font-medium text-neutral-600 dark:text-neutral-400">
-                Connected Accounts
-              </div>
-              <div className="rounded-[14px] px-3.5 py-2.5 text-xs font-medium text-neutral-600 dark:text-neutral-400">
-                Security &amp; Sessions
-              </div>
-              <div className="rounded-[14px] px-3.5 py-2.5 text-xs font-medium text-neutral-600 dark:text-neutral-400">
-                Billing &amp; Plan
-              </div>
-              <Link
-                prefetch={false}
-                href="/accounts"
-                className="block rounded-[14px] px-3.5 py-2.5 text-xs font-medium text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800"
-              >
-                Workspaces →
-              </Link>
-            </div>
-
-            {/* Right 9 Columns */}
-            <div className="lg:col-span-9 space-y-5">
-              {/* Top Dark Red-Wave Security Banner */}
-              <div className="relative overflow-hidden rounded-[22px] bg-[#0B0B0B] p-6 text-white shadow-md">
-                <div
-                  aria-hidden="true"
-                  className="pointer-events-none absolute inset-y-0 right-0 w-1/2 bg-gradient-to-l from-[#FF1A1A]/35 via-[#991B1B]/20 to-transparent"
-                />
-                <div className="relative z-10 max-w-lg">
-                  <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#FF1A1A]">
-                    SECURITY STATUS · PROTECTED
-                  </span>
-                  <h2 className="mt-1 font-serif text-2xl text-white">
-                    Keep your Flow account secure and working for you.
-                  </h2>
-                  <p className="mt-1 text-xs text-neutral-300">
-                    Email code {emailEnrolled ? "enabled" : "disabled"} · Google{" "}
-                    {googleLinked ? "linked" : "available to link"}
-                  </p>
                 </div>
               </div>
+            )}
 
-              {/* 2x2 Cards Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {/* Card 1: Profile Settings */}
-                <section className="rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-6 shadow-2xs space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="font-display text-base font-bold text-neutral-950 dark:text-white">
-                        Profile Settings
-                      </h2>
-                      <p className="text-xs text-neutral-500">
-                        Update your personal details, profile picture, and
-                        workspace name.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-4 pt-1">
-                    <div className="relative group shrink-0">
-                      <UserAvatar className="h-14 w-14 rounded-full object-cover border-2 border-neutral-200 dark:border-neutral-700 shadow-xs" />
-                      <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        title="Upload new profile picture"
-                        aria-label="Upload new profile picture"
-                        className="absolute inset-0 flex items-center justify-center rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <svg
-                          width="16"
-                          height="16"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                        >
-                          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-                          <circle cx="12" cy="13" r="4" />
-                        </svg>
-                      </button>
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept="image/*"
-                        onChange={handleAvatarChange}
-                        className="hidden"
-                      />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="font-display text-sm font-bold text-neutral-950 dark:text-white">
-                        {displayName}
-                      </p>
-                      <p className="truncate text-xs text-neutral-500">
-                        {email}
-                      </p>
-                      <div className="flex items-center gap-2 mt-1.5">
-                        <button
-                          type="button"
-                          onClick={() => fileInputRef.current?.click()}
-                          className="text-[11px] font-semibold text-[#FF1A1A] hover:underline"
-                        >
-                          Change photo
-                        </button>
-                        <span className="text-neutral-300 dark:text-neutral-700">
-                          ·
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            resetUserAvatar();
-                            setAvatarNotice("Profile photo reset to default.");
-                            setTimeout(() => setAvatarNotice(""), 3000);
-                          }}
-                          className="text-[11px] font-semibold text-neutral-500 hover:text-neutral-800 dark:hover:text-neutral-200"
-                        >
-                          Reset
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  {avatarNotice && (
-                    <p className="text-xs font-semibold text-[#0F9F80] bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 rounded-xl px-3 py-1.5">
-                      {avatarNotice}
-                    </p>
-                  )}
-
-                  {/* Collapsible Workspace Display Name Section */}
-                  {primaryAccount && (
-                    <div className="pt-2">
-                      <WorkspaceDisplayNameCard account={primaryAccount} />
-                    </div>
-                  )}
-
-                  <div className="space-y-2.5 pt-1 text-xs">
-                    <div className="flex items-center justify-between rounded-[12px] bg-neutral-50 dark:bg-neutral-800/60 px-3.5 py-2.5">
-                      <span className="text-neutral-500">Handle</span>
-                      <span className="font-mono font-semibold text-neutral-900 dark:text-white">
-                        {userHandle}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between rounded-[12px] bg-neutral-50 dark:bg-neutral-800/60 px-3.5 py-2.5">
-                      <span className="text-neutral-500">Default currency</span>
-                      <span className="font-semibold text-neutral-900 dark:text-white">
-                        USD ($)
-                      </span>
-                    </div>
-                  </div>
-                </section>
-
-                {/* Card 2: Notifications */}
-                <section className="rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-6 shadow-2xs space-y-4">
-                  <div>
-                    <h2 className="font-display text-base font-bold text-neutral-950 dark:text-white">
-                      Notifications
-                    </h2>
-                    <p className="text-xs text-neutral-500">
-                      Choose how you want to be notified about payments.
-                    </p>
-                  </div>
-
-                  <div className="space-y-3 text-xs">
-                    {[
-                      {
-                        title: "Incoming payments",
-                        desc: "Instant alert when a link or invoice is settled",
-                        on: true,
-                      },
-                      {
-                        title: "Payment link activity",
-                        desc: "Notify when a customer opens or quotes your link",
-                        on: true,
-                      },
-                      {
-                        title: "Security & sign-in alerts",
-                        desc: "New browser sessions and verification codes",
-                        on: true,
-                      },
-                    ].map((item) => (
-                      <div
-                        key={item.title}
-                        className="flex items-center justify-between gap-3 rounded-[12px] bg-neutral-50 dark:bg-neutral-800/60 px-3.5 py-2.5"
-                      >
-                        <div>
-                          <p className="font-semibold text-neutral-900 dark:text-white">
-                            {item.title}
-                          </p>
-                          <p className="text-[11px] text-neutral-500">
-                            {item.desc}
-                          </p>
-                        </div>
-                        <span className="inline-flex h-5 w-9 shrink-0 items-center rounded-full bg-[#FF1A1A] p-0.5 justify-end">
-                          <span className="h-4 w-4 rounded-full bg-white" />
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-
-                {/* Card 3: Connected Accounts / Sign-in methods */}
-                <section className="rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-6 shadow-2xs space-y-4">
-                  <div>
-                    <h2 className="font-display text-base font-bold text-neutral-950 dark:text-white">
-                      Sign-in methods
-                    </h2>
-                    <p className="text-xs text-neutral-500">
-                      Manage passwordless Google and email verification methods.
-                    </p>
-                  </div>
-
-                  <div className="space-y-2.5 text-xs">
-                    <div className="flex items-center justify-between rounded-[12px] border border-neutral-200/70 dark:border-neutral-800 px-3.5 py-2.5">
-                      <div>
-                        <p className="font-semibold text-neutral-900 dark:text-white">
-                          Google Account
-                        </p>
-                        <p className="text-[11px] text-neutral-500">
-                          {googleLinked ? email : "Not linked"}
-                        </p>
-                      </div>
-                      <span
-                        className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
-                          googleLinked
-                            ? "bg-emerald-50 text-emerald-700"
-                            : "bg-neutral-100 text-neutral-600"
-                        }`}
-                      >
-                        {googleLinked ? "Connected" : "Available"}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between rounded-[12px] border border-neutral-200/70 dark:border-neutral-800 px-3.5 py-2.5">
-                      <div>
-                        <p className="font-semibold text-neutral-900 dark:text-white">
-                          Email Verification (OTP)
-                        </p>
-                        <p className="text-[11px] text-neutral-500">{email}</p>
-                      </div>
-                      <span
-                        className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase ${
-                          emailEnrolled
-                            ? "bg-emerald-50 text-emerald-700"
-                            : "bg-neutral-100 text-neutral-600"
-                        }`}
-                      >
-                        {emailEnrolled ? "Enabled" : "Disabled"}
-                      </span>
-                    </div>
-                  </div>
-
-                  {mailboxPaused ? (
-                    <p
-                      role="status"
-                      className="rounded-[12px] border border-amber-200 bg-amber-50 px-3.5 py-2.5 text-xs font-semibold text-amber-900"
-                    >
-                      Email security changes are paused. Contact support if you
-                      need access.
-                    </p>
-                  ) : (
-                    <div className="flex flex-wrap items-center gap-2 pt-1">
-                      {!emailEnrolled && (
-                        <button
-                          type="button"
-                          onClick={() => setAction("enroll-email")}
-                          className="rounded-full bg-neutral-950 px-4 py-2 text-xs font-semibold text-white hover:bg-neutral-800"
-                        >
-                          Enable email sign-in
-                        </button>
-                      )}
-                      {emailEnrolled && googleLinked && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => setAction("disable-email")}
-                            className="rounded-full border border-neutral-200 bg-white px-3.5 py-2 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
-                          >
-                            Disable email sign-in
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setAction("unlink-google")}
-                            className="rounded-full border border-neutral-200 bg-white px-3.5 py-2 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
-                          >
-                            Disconnect Google
-                          </button>
-                        </>
-                      )}
-                      {!googleLinked && (
-                        <button
-                          type="button"
-                          onClick={() => setAction("link-google")}
-                          className="rounded-full bg-neutral-950 px-4 py-2 text-xs font-semibold text-white hover:bg-neutral-800"
-                        >
-                          Link Google
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </section>
-
-                {/* Card 4: Security & Active Sessions */}
-                <section className="rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-6 shadow-2xs space-y-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <h2 className="font-display text-base font-bold text-neutral-950 dark:text-white">
-                        Active sessions
-                      </h2>
-                      <p className="text-xs text-neutral-500">
-                        Manage devices signed in to your Flow account.
-                      </p>
-                    </div>
-                    {!mailboxPaused && (
-                      <button
-                        type="button"
-                        onClick={() => setAction("revoke-all")}
-                        className="rounded-full bg-[#FF1A1A] px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-[#E01515]"
-                      >
-                        Sign out all sessions
-                      </button>
-                    )}
-                  </div>
-
-                  <ul className="space-y-2.5 text-xs">
-                    {sessions.map((session) => (
-                      <li
-                        key={session.id}
-                        className="flex items-center justify-between gap-2 rounded-[12px] border border-neutral-200/70 dark:border-neutral-800 px-3.5 py-2.5"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`h-2 w-2 rounded-full ${
-                              session.current
-                                ? "bg-emerald-500"
-                                : "bg-neutral-400"
-                            }`}
-                          />
-                          <div>
-                            <p className="font-semibold text-neutral-900 dark:text-white">
-                              {session.current
-                                ? "This session"
-                                : "Other session"}
-                            </p>
-                            <p className="text-[11px] text-neutral-500">
-                              Started{" "}
-                              <time dateTime={session.createdAt}>
-                                {session.createdAt.slice(0, 10)} UTC
-                              </time>
-                            </p>
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          disabled={revoking}
-                          onClick={() => revoke(session.id, session.current)}
-                          className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-semibold text-neutral-800 hover:bg-neutral-50"
-                        >
-                          Sign out session
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              </div>
-
-              {/* Bottom Account Management Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-4 rounded-[22px] border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-5 shadow-2xs">
+            {/* TAB 3: PREFERENCES */}
+            {activeTab === "preferences" && (
+              <div className="rounded-3xl border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 sm:p-7 shadow-sm space-y-6">
                 <div>
-                  <h3 className="font-display text-sm font-bold text-neutral-950 dark:text-white">
-                    Account Management
-                  </h3>
-                  <p className="text-xs text-neutral-500">
-                    Switch between personal and business workspaces or export
-                    your account data.
+                  <h2 className="font-display text-base font-bold text-neutral-950 dark:text-white">
+                    Preferences
+                  </h2>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                    Customize your display settings and theme preferences.
                   </p>
                 </div>
-                <div className="flex items-center gap-2.5">
-                  <Link
-                    prefetch={false}
-                    href="/accounts"
-                    className="rounded-full bg-neutral-950 px-4 py-2 text-xs font-semibold text-white hover:bg-neutral-800"
-                  >
-                    Manage Workspaces →
-                  </Link>
+
+                <div className="flex items-center justify-between p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800">
+                  <div>
+                    <p className="font-display font-semibold text-xs text-neutral-950 dark:text-white">
+                      Appearance Theme
+                    </p>
+                    <p className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                      Toggle between clean light and deep dark visual styles.
+                    </p>
+                  </div>
+                  <ThemeToggle />
                 </div>
               </div>
-            </div>
+            )}
+
+            {/* TAB 4: ACCOUNT & PROFILE */}
+            {activeTab === "profile" && (
+              <div className="rounded-3xl border border-neutral-200/80 dark:border-neutral-800 bg-white dark:bg-[#141414] p-6 sm:p-7 shadow-sm space-y-6">
+                <div>
+                  <h2 className="font-display text-base font-bold text-neutral-950 dark:text-white">
+                    Account &amp; Profile
+                  </h2>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
+                    Your personal Flow account identity.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-4 p-4 rounded-2xl border border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-900/30">
+                  <UserAvatar
+                    size={48}
+                    className="rounded-full border border-neutral-200 dark:border-neutral-700"
+                  />
+                  <div>
+                    <p className="font-display font-bold text-sm text-neutral-950 dark:text-white">
+                      {primaryAccount?.name ?? "Personal Workspace"}
+                    </p>
+                    <p className="text-xs font-mono text-neutral-600 dark:text-neutral-400">
+                      {email}
+                    </p>
+                    <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                      Verified Owner
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
-      </div>
+      </main>
     </div>
   );
 }

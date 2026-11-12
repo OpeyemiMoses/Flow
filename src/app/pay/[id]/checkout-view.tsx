@@ -1200,6 +1200,11 @@ export function CheckoutView({ request }: CheckoutViewProps) {
                           <button
                             key={net.key}
                             type="button"
+                            aria-label={
+                              net.key === "ethereum-mainnet"
+                                ? "Ethereum & Base"
+                                : undefined
+                            }
                             onClick={() => {
                               setSelectedNetworkFilter(net.key);
                               handleSelectEcosystem(net.eco);

@@ -4,10 +4,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { FlowLogo } from "./flow-logo.tsx";
 import { UserAvatar } from "./user-avatar.tsx";
-import { ThemeToggle } from "./theme-toggle.tsx";
 
 export type NavTabId =
-  "dashboard" | "send" | "receive" | "request" | "activity";
+  "dashboard" | "assets" | "send" | "receive" | "request" | "activity";
 
 export interface FloatingNavProps {
   activeTab: NavTabId;
@@ -46,6 +45,25 @@ const TABS: NavTabItem[] = [
     ),
   },
   {
+    id: "assets",
+    label: "Wallets & Assets",
+    icon: (
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <rect x="2" y="5" width="20" height="14" rx="2" />
+        <path d="M16 12h.01" />
+      </svg>
+    ),
+  },
+  {
     id: "send",
     label: "Send",
     icon: (
@@ -66,7 +84,7 @@ const TABS: NavTabItem[] = [
   },
   {
     id: "receive",
-    label: "Add Money",
+    label: "Receive",
     icon: (
       <svg
         width="14"
@@ -85,7 +103,7 @@ const TABS: NavTabItem[] = [
   },
   {
     id: "request",
-    label: "Payment Links",
+    label: "Request",
     icon: (
       <svg
         width="14"
@@ -148,34 +166,32 @@ export function FloatingNav({
         setProfileOpen(false);
       }
     }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+    if (profileOpen) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [profileOpen]);
 
   return (
-    <header className="sticky top-0 z-40 w-full px-4 sm:px-6 lg:px-8 py-3 transition-all">
-      <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
-        {/* Left: FLOW Brand Logo */}
-        <div className="flex items-center gap-3 shrink-0">
+    <header className="sticky top-0 z-40 w-full px-4 sm:px-8 pt-4 pb-3">
+      <div className="mx-auto flex max-w-7xl items-center justify-between gap-4">
+        {/* Brand Logo */}
+        <div className="flex items-center gap-6">
           <Link
             href="/"
-            className="flex items-center gap-2 group transition-opacity hover:opacity-90"
             aria-label="FLOW Home"
+            className="flex items-center gap-2 hover:opacity-90 transition-opacity"
           >
             <FlowLogo size={28} />
-            <span className="font-bold tracking-tight text-lg text-neutral-950 dark:text-white">
-              FLOW
-            </span>
           </Link>
-          <span className="hidden sm:inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-400 border border-neutral-200/60 dark:border-neutral-700/60">
-            Personal
-          </span>
         </div>
 
-        {/* Center: Desktop Floating Pill Navigation (Matches FLOW Dashboard Overview-2.png) */}
+        {/* Center Floating Pill Navigation (Desktop) */}
         <nav
           aria-label="Primary navigation"
-          className="hidden md:flex items-center rounded-full bg-white/90 dark:bg-[#141414]/90 backdrop-blur-md p-1 border border-neutral-200/80 dark:border-neutral-800/80 shadow-[0_2px_12px_rgba(0,0,0,0.04)] dark:shadow-[0_2px_12px_rgba(0,0,0,0.4)]"
+          className="hidden md:flex items-center p-1 rounded-full bg-white/90 dark:bg-[#141414]/90 backdrop-blur-md border border-neutral-200/80 dark:border-neutral-800/80 shadow-xs"
         >
           {TABS.map((tab) => {
             const isActive = activeTab === tab.id;
@@ -184,53 +200,54 @@ export function FloatingNav({
                 key={tab.id}
                 type="button"
                 onClick={() => onTabChange(tab.id)}
-                className={`relative flex items-center gap-1.5 px-4 sm:px-5 py-2 text-xs font-semibold rounded-full transition-all duration-200 select-none ${
+                aria-current={isActive ? "page" : undefined}
+                className={`relative flex items-center gap-2 px-3.5 py-1.5 rounded-full text-xs font-semibold transition-all duration-200 cursor-pointer select-none ${
                   isActive
-                    ? "bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 shadow-xs scale-[1.02]"
-                    : "text-neutral-600 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white hover:bg-neutral-100/60 dark:hover:bg-neutral-800/60"
+                    ? "bg-neutral-950 text-white shadow-xs dark:bg-white dark:text-neutral-950 scale-[1.02]"
+                    : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100/70 dark:hover:bg-neutral-800/50"
                 }`}
               >
-                <span>{tab.icon}</span>
+                <span
+                  className={
+                    isActive
+                      ? "text-white dark:text-neutral-950"
+                      : "text-neutral-500"
+                  }
+                >
+                  {tab.icon}
+                </span>
                 <span>{tab.label}</span>
               </button>
             );
           })}
         </nav>
 
-        {/* Right: Actions, Notifications & Profile */}
-        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-          {/* AI Assistant Quick Trigger */}
+        {/* Right Action Icons: Flow AI, Notifications, Profile, Settings */}
+        <div className="flex items-center gap-2">
+          {/* Flow AI Assistant Trigger */}
           {onOpenAssistant && (
             <button
               type="button"
               onClick={onOpenAssistant}
-              aria-label="Open Flow AI Assistant"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-neutral-100 hover:bg-neutral-200/80 text-neutral-900 dark:bg-neutral-800 dark:hover:bg-neutral-700 dark:text-neutral-100 border border-neutral-200/60 dark:border-neutral-700/60 transition-all hover:scale-[1.02]"
+              aria-label="Flow AI Assistant"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-gradient-to-r from-red-50 to-orange-50 dark:from-red-950/40 dark:to-orange-950/30 border border-red-200/70 dark:border-red-900/40 text-neutral-800 dark:text-neutral-200 hover:border-red-300 dark:hover:border-red-800 transition-all shadow-2xs cursor-pointer group"
             >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="text-amber-500"
-              >
-                <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z" />
-              </svg>
-              <span className="hidden sm:inline">AI</span>
+              <span className="text-[#FF1A1A] text-xs font-bold animate-pulse group-hover:scale-110 transition-transform">
+                ✦
+              </span>
+              <span className="text-[11px] font-bold text-neutral-900 dark:text-white">
+                Flow AI
+              </span>
             </button>
           )}
 
-          {/* Notifications Bell */}
+          {/* Notifications Trigger */}
           {onOpenNotifications && (
             <button
               type="button"
               onClick={onOpenNotifications}
               aria-label="Notifications"
-              className="relative p-2 rounded-full text-neutral-600 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+              className="relative p-2 rounded-full text-neutral-600 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors cursor-pointer"
             >
               <svg
                 width="18"
@@ -246,20 +263,18 @@ export function FloatingNav({
                 <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
               </svg>
               {unreadCount > 0 && (
-                <span className="absolute top-1 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-[#FF1A1A] text-[9px] font-bold text-white shadow-xs animate-pulse">
-                  {unreadCount > 9 ? "9+" : unreadCount}
-                </span>
+                <span className="absolute top-1.5 right-1.5 flex h-2 w-2 rounded-full bg-[#FF1A1A] ring-2 ring-white dark:ring-[#0B0B0B]" />
               )}
             </button>
           )}
 
-          {/* User Profile Dropdown */}
+          {/* User Profile Dropdown matching media_1794481849606_6993ee54.jpg */}
           <div className="relative" ref={profileRef}>
             <button
               type="button"
               onClick={() => setProfileOpen((prev) => !prev)}
               aria-expanded={profileOpen}
-              className="flex items-center gap-2 pl-1.5 pr-2.5 py-1 rounded-full bg-white dark:bg-[#141414] border border-neutral-200/80 dark:border-neutral-800/80 shadow-xs hover:border-neutral-300 dark:hover:border-neutral-700 transition-all select-none"
+              className="flex items-center gap-2 pl-1.5 pr-2.5 py-1 rounded-full bg-white dark:bg-[#141414] border border-neutral-200/80 dark:border-neutral-800/80 shadow-xs hover:border-neutral-300 dark:hover:border-neutral-700 transition-all select-none cursor-pointer"
             >
               <UserAvatar alt={userName} size={28} />
               <span className="hidden sm:inline text-xs font-semibold text-neutral-900 dark:text-neutral-100">
@@ -282,63 +297,119 @@ export function FloatingNav({
 
             {/* Profile Dropdown Menu */}
             {profileOpen && (
-              <div className="absolute right-0 mt-2 w-64 rounded-2xl bg-white dark:bg-[#141414] border border-neutral-200/90 dark:border-neutral-800 shadow-xl p-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
+              <div className="absolute right-0 mt-2 w-56 rounded-2xl bg-white dark:bg-[#141414] border border-neutral-200/90 dark:border-neutral-800 shadow-xl p-1.5 z-50 animate-in fade-in slide-in-from-top-2 duration-150">
                 <div className="px-3 py-2 border-b border-neutral-100 dark:border-neutral-800 mb-1">
-                  <p className="text-xs font-bold text-neutral-900 dark:text-neutral-100 truncate">
+                  <p className="text-xs font-bold text-neutral-900 dark:text-white truncate">
                     {userName}
                   </p>
-                  <p className="text-[11px] text-neutral-500 dark:text-neutral-400 truncate">
+                  <p className="text-[11px] text-neutral-500 truncate">
                     {userEmail}
                   </p>
-                  <div className="mt-1.5 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200/60 dark:border-emerald-800/40">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                    Personal Account
-                  </div>
                 </div>
-
                 <div className="space-y-0.5 text-xs font-medium text-neutral-700 dark:text-neutral-300">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onTabChange("dashboard");
-                      setProfileOpen(false);
-                    }}
-                    className="w-full flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800/70 transition-colors text-left"
+                  <Link
+                    href="/security?tab=profile"
+                    onClick={() => setProfileOpen(false)}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800/70 transition-colors text-left"
                   >
-                    <span>⌂</span>
-                    <span>Dashboard</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onTabChange("receive");
-                      setProfileOpen(false);
-                    }}
-                    className="w-full flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800/70 transition-colors text-left"
-                  >
-                    <span>↙</span>
-                    <span>Deposit &amp; Receive</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onTabChange("activity");
-                      setProfileOpen(false);
-                    }}
-                    className="w-full flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800/70 transition-colors text-left"
-                  >
-                    <span>◷</span>
-                    <span>Transaction History</span>
-                  </button>
-                </div>
+                    <svg
+                      width="15"
+                      height="15"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                      <circle cx="12" cy="7" r="4" />
+                    </svg>
+                    <span>Profile</span>
+                  </Link>
 
-                <div className="my-1 border-t border-neutral-100 dark:border-neutral-800" />
+                  <Link
+                    href="/security?tab=notifications"
+                    onClick={() => setProfileOpen(false)}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800/70 transition-colors text-left"
+                  >
+                    <svg
+                      width="15"
+                      height="15"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+                      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+                    </svg>
+                    <span>Notifications</span>
+                  </Link>
 
-                <div className="flex items-center justify-between px-3 py-1.5">
-                  <span className="text-xs text-neutral-600 dark:text-neutral-400">
-                    Theme
-                  </span>
-                  <ThemeToggle />
+                  <Link
+                    href="/security?tab=security"
+                    onClick={() => setProfileOpen(false)}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800/70 transition-colors text-left"
+                  >
+                    <svg
+                      width="15"
+                      height="15"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                    </svg>
+                    <span>Security</span>
+                  </Link>
+
+                  <Link
+                    href="/security?tab=security"
+                    onClick={() => setProfileOpen(false)}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800/70 transition-colors text-left"
+                  >
+                    <svg
+                      width="15"
+                      height="15"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                      <line x1="8" y1="21" x2="16" y2="21" />
+                      <line x1="12" y1="17" x2="12" y2="21" />
+                    </svg>
+                    <span>Sessions</span>
+                  </Link>
+
+                  <Link
+                    href="/security?tab=preferences"
+                    onClick={() => setProfileOpen(false)}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800/70 transition-colors text-left"
+                  >
+                    <svg
+                      width="15"
+                      height="15"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                    </svg>
+                    <span>Appearance</span>
+                  </Link>
                 </div>
 
                 <div className="my-1 border-t border-neutral-100 dark:border-neutral-800" />
@@ -350,22 +421,48 @@ export function FloatingNav({
                       setProfileOpen(false);
                       onSignOut();
                     }}
-                    className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40 transition-colors text-left"
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40 transition-colors text-left cursor-pointer"
                   >
-                    <span>⎋</span>
+                    <svg
+                      width="15"
+                      height="15"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                      <polyline points="16 17 21 12 16 7" />
+                      <line x1="21" y1="12" x2="9" y2="12" />
+                    </svg>
                     <span>Sign out</span>
                   </button>
                 ) : (
                   <form
                     action="/api/auth/sign-out"
                     method="POST"
-                    className="w-full"
+                    className="block w-full"
                   >
                     <button
                       type="submit"
-                      className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40 transition-colors text-left"
+                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40 transition-colors text-left cursor-pointer"
                     >
-                      <span>⎋</span>
+                      <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                        <polyline points="16 17 21 12 16 7" />
+                        <line x1="21" y1="12" x2="9" y2="12" />
+                      </svg>
                       <span>Sign out</span>
                     </button>
                   </form>
@@ -374,10 +471,10 @@ export function FloatingNav({
             )}
           </div>
 
-          {/* Settings Gear Icon */}
+          {/* Settings Gear Icon Button */}
           <Link
             href="/security"
-            aria-label="Settings & Security"
+            aria-label="Settings"
             className="p-2 rounded-full text-neutral-600 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
           >
             <svg
@@ -399,8 +496,8 @@ export function FloatingNav({
           <button
             type="button"
             onClick={() => setMobileMenuOpen((prev) => !prev)}
-            aria-label="Toggle mobile menu"
-            className="md:hidden p-2 rounded-full text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+            aria-label="Toggle navigation menu"
+            className="md:hidden p-2 rounded-xl text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800"
           >
             <svg
               width="20"
@@ -413,25 +510,18 @@ export function FloatingNav({
               strokeLinejoin="round"
             >
               {mobileMenuOpen ? (
-                <>
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </>
+                <path d="M18 6L6 18M6 6l12 12" />
               ) : (
-                <>
-                  <line x1="4" y1="12" x2="20" y2="12" />
-                  <line x1="4" y1="6" x2="20" y2="6" />
-                  <line x1="4" y1="18" x2="20" y2="18" />
-                </>
+                <path d="M4 6h16M4 12h16M4 18h16" />
               )}
             </svg>
           </button>
         </div>
       </div>
 
-      {/* Mobile Dropdown Navigation */}
+      {/* Mobile Drawer Navigation */}
       {mobileMenuOpen && (
-        <div className="md:hidden mt-2 p-3 rounded-2xl bg-white dark:bg-[#141414] border border-neutral-200/90 dark:border-neutral-800 shadow-xl space-y-1 z-50">
+        <div className="md:hidden mt-2 p-3 rounded-2xl bg-white/95 dark:bg-[#141414]/95 backdrop-blur-md border border-neutral-200 dark:border-neutral-800 shadow-xl space-y-1">
           {TABS.map((tab) => {
             const isActive = activeTab === tab.id;
             return (
@@ -442,13 +532,13 @@ export function FloatingNav({
                   onTabChange(tab.id);
                   setMobileMenuOpen(false);
                 }}
-                className={`w-full flex items-center justify-between px-4 py-2.5 rounded-xl text-xs font-semibold transition-colors ${
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition-all ${
                   isActive
-                    ? "bg-neutral-950 text-white dark:bg-white dark:text-neutral-950 shadow-xs"
+                    ? "bg-neutral-950 text-white dark:bg-white dark:text-neutral-950"
                     : "text-neutral-700 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800"
                 }`}
               >
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2.5">
                   <span>{tab.icon}</span>
                   <span>{tab.label}</span>
                 </div>
