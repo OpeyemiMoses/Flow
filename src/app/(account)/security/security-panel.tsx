@@ -178,14 +178,17 @@ export function SecurityPanel({
         </Link>
 
         {/* Settings Header */}
-        <div className="mb-8">
-          <h1 className="font-serif text-3xl sm:text-4xl font-normal tracking-tight text-neutral-950 dark:text-white">
-            Settings
-          </h1>
-          <p className="mt-1 text-xs sm:text-sm text-neutral-600 dark:text-neutral-400">
-            Manage your profile ({email}), security, notifications, and
-            preferences.
-          </p>
+        <div className="mb-8 flex items-center justify-between gap-4">
+          <div>
+            <h1 className="font-serif text-3xl sm:text-4xl font-normal tracking-tight text-neutral-950 dark:text-white">
+              Settings
+            </h1>
+            <p className="mt-1 text-xs sm:text-sm text-neutral-600 dark:text-neutral-400">
+              Manage your profile ({email}), security, notifications, and
+              preferences.
+            </p>
+          </div>
+          <ThemeToggle />
         </div>
 
         {message && (

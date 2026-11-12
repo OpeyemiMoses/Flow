@@ -95,6 +95,7 @@ export function PortfolioView({
     useState<SerializedAccountPortfolio>(initialPortfolio);
   const [activeTab, setActiveTab] = useState<NavTabId>(initialView);
   const isBusiness = account?.kind === "BUSINESS";
+  const canManageTeam = isBusiness && account?.role !== "MEMBER";
   const [refreshing, setRefreshing] = useState(false);
   const [cooldown, setCooldown] = useState(
     initialPortfolio.cooldownRemainingSeconds ?? 0,
@@ -660,7 +661,7 @@ export function PortfolioView({
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                {isBusiness && (
+                {canManageTeam && (
                   <Link
                     prefetch={false}
                     href={`/accounts/${accountId}/team`}
