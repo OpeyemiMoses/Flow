@@ -183,7 +183,8 @@ export function SecurityPanel({
             Settings
           </h1>
           <p className="mt-1 text-xs sm:text-sm text-neutral-600 dark:text-neutral-400">
-            Manage your profile, security, notifications, and preferences.
+            Manage your profile ({email}), security, notifications, and
+            preferences.
           </p>
         </div>
 
